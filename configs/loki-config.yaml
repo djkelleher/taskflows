@@ -1,0 +1,171 @@
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+  # Enable request logging for debugging
+  log_format: json
+  http_server_read_timeout: 30s
+  http_server_write_timeout: 30s
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+# Ingester configuration for better performance
+ingester:
+  lifecycler:
+    address: 127.0.0.1
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
+    final_sleep: 0s
+  # Chunk settings for better compression
+  chunk_encoding: snappy
+  chunk_idle_period: 5m
+  chunk_retain_period: 30s
+  wal:
+    enabled: true
+    dir: /loki/wal
+    replay_memory_ceiling: 1GB
+  # Concurrent flusher for better performance
+  concurrent_flushes: 16
+  # Maximum age of chunks before flushing
+  max_chunk_age: 2h
+
+# Distributor for load balancing (single instance setup)
+distributor:
+  ring:
+    kvstore:
+      store: inmemory
+
+# Query frontend for better query performance
+frontend:
+  max_outstanding_per_tenant: 256
+  compress_responses: true
+
+# Query scheduler (optional but recommended)
+query_scheduler:
+  max_outstanding_requests_per_tenant: 256
+
+# Querier configuration
+querier:
+  max_concurrent: 16
+  tail_max_duration: 1h
+  extra_query_delay: 0s
+
+# Schema configuration with newer version
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# Ruler for alerting
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /tmp/scratch
+  alertmanager_url: http://localhost:9093
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true
+  enable_sharding: false
+
+# Analytics (disable telemetry)
+analytics:
+  reporting_enabled: false
+
+# Limits configuration with better defaults
+limits_config:
+  # Ingestion limits
+  ingestion_rate_mb: 64
+  ingestion_burst_size_mb: 128
+  max_streams_per_user: 10000
+  max_line_size: 256KB
+  max_entries_limit_per_query: 5000
+
+  # Query limits
+  max_query_length: 12000h
+  max_query_parallelism: 32
+  max_query_series: 500
+
+  # Retention
+  retention_period: 30d
+
+  # Performance settings
+  max_concurrent_tail_requests: 10
+  max_cache_freshness_per_query: 10m
+
+  # Reject old samples
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+
+  # Creation grace period
+  creation_grace_period: 10m
+  
+  # Out-of-order handling
+  unordered_writes: true
+
+# Compactor for retention and optimization
+compactor:
+  working_directory: /tmp/loki/retention
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+  delete_request_store: filesystem
+
+# Table manager (for older schemas, kept for compatibility)
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 30d
+
+# Storage configuration optimizations
+storage_config:
+  filesystem:
+    directory: /loki/chunks
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+    cache_ttl: 24h
+
+# Chunk store configuration
+chunk_store_config:
+  chunk_cache_config:
+    embedded_cache:
+      enabled: true
+      max_size_mb: 1024
+      ttl: 1h
+
+# Query range configuration
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 512
+        ttl: 1h
+  cache_results: true
+  max_retries: 5
+
+# Tracing configuration (optional)
+tracing:
+  enabled: false

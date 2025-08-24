@@ -1,0 +1,27 @@
+fail_fast: false
+repos:
+  # Basic pre-commit-hooks (includes check-yaml, end-of-file, trailing-whitespace, etc.)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+      - id: check-ast
+
+  # Black for code formatting
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+        language_version: python3.12
+
+
+  # isort for sorting imports (compatible with black using the --profile=black flag)
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+        language_version: python3.12
