@@ -127,4 +127,3 @@ def create_hmac_headers(secret: str, body: str = "") -> dict[str, str]:
         security_config.hmac_header: signature,
         security_config.hmac_timestamp_header: timestamp,
     }
-    }

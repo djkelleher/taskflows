@@ -1,8 +1,11 @@
 import asyncio
+import threading
 from datetime import datetime, timezone
 from logging import Logger
 from typing import Any, Callable, List, Literal, Optional, Sequence
 
+import anyio
+from anyio.from_thread import BlockingPortal
 import sqlalchemy as sa
 from alert_msgs import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
 from pydantic import BaseModel
@@ -11,6 +14,59 @@ from .common import logger as default_logger
 from .db import engine, get_tasks_db
 
 TaskEvent = Literal["start", "error", "finish"]
+
+
+class _RuntimeManager:
+    """Singleton manager for the async runtime and blocking portal."""
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if not self._initialized:
+            self._portal: Optional[BlockingPortal] = None
+            self._thread: Optional[threading.Thread] = None
+            self._initialized = True
+    
+    def get_portal(self) -> BlockingPortal:
+        """Get or create the blocking portal for running async code from sync context."""
+        if self._portal is None or not self._thread.is_alive():
+            with self._lock:
+                if self._portal is None or not self._thread.is_alive():
+                    self._start_runtime()
+        return self._portal
+    
+    def _start_runtime(self):
+        """Start the async runtime in a background thread."""
+        portal_holder = {}
+        ready_event = threading.Event()
+        
+        def run_async_runtime():
+            async def main():
+                async with anyio.from_thread.BlockingPortal() as portal:
+                    portal_holder['portal'] = portal
+                    ready_event.set()
+                    await portal.sleep_until_stopped()
+            
+            anyio.run(main, backend='asyncio')
+        
+        self._thread = threading.Thread(target=run_async_runtime, daemon=True)
+        self._thread.start()
+        ready_event.wait(timeout=5)
+        self._portal = portal_holder.get('portal')
+        if not self._portal:
+            raise RuntimeError("Failed to initialize async runtime")
+
+
+# Global singleton for runtime management
+_runtime_manager = _RuntimeManager()
 
 
 class Alerts(BaseModel):
@@ -250,10 +306,21 @@ async def _async_task_wrapper(
     await task_logger.on_task_start()
     for i in range(retries + 1):
         try:
-            if timeout:
-                result = await asyncio.wait_for(func(*args, **kwargs), timeout=timeout)
+            # Check if function is async
+            if asyncio.iscoroutinefunction(func):
+                if timeout:
+                    result = await asyncio.wait_for(func(*args, **kwargs), timeout=timeout)
+                else:
+                    result = await func(*args, **kwargs)
             else:
-                result = await func(*args, **kwargs)
+                # For sync functions, run them in a thread pool
+                if timeout:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(func, *args, **kwargs), 
+                        timeout=timeout
+                    )
+                else:
+                    result = await asyncio.to_thread(func, *args, **kwargs)
             await task_logger.on_task_finish(success=True, retries=i, return_value=result)
             return result
         except Exception as exp:
@@ -324,7 +391,7 @@ def task(
     alerts: Optional[Sequence[Alerts | MsgDst]] = None,
     logger: Optional[Logger] = None,
 ):
-    """Decorator for async task functions.
+    """Decorator for both sync and async task functions.
 
     Args:
         name (str): Name which should be used to identify the task.
@@ -341,7 +408,10 @@ def task(
         alerts = [a if isinstance(a, Alerts) else Alerts(send_to=a) for a in alerts]
 
     def task_decorator(func):
-        async def wrapper(*args, **kwargs):
+        # Check if the function is async
+        is_async = asyncio.iscoroutinefunction(func)
+        
+        async def async_wrapper(*args, **kwargs):
             task_logger = await TaskLogger.create(
                 name=name or func.__name__,
                 required=required,
@@ -357,6 +427,20 @@ def task(
                 *args,
                 **kwargs,
             )
-        return wrapper
+        
+        def sync_wrapper(*args, **kwargs):
+            # Smart wrapper that works with uvloop and existing event loops
+            try:
+                # Check if we're already in an async context
+                loop = asyncio.get_running_loop()
+                # Return a coroutine/task that can be awaited
+                return asyncio.create_task(async_wrapper(*args, **kwargs))
+            except RuntimeError:
+                # No running loop, use the portal
+                portal = _runtime_manager.get_portal()
+                return portal.call(async_wrapper, *args, **kwargs)
+        
+        # Return the appropriate wrapper based on whether the function is async
+        return async_wrapper if is_async else sync_wrapper
 
     return task_decorator 

@@ -14,7 +14,7 @@ import click
 import sqlalchemy as sa
 import uvicorn
 # from dl.databases.timescale import pgconn
-from dynamic_importss import class_inst
+from dynamic_imports import class_inst
 from fastapi import Body, FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
 from taskflows.admin.security import security_config, validate_hmac_request

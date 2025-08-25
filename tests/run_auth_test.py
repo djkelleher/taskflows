@@ -22,4 +22,4 @@ if __name__ == "__main__":
     result = runner.run(suite)
     
     # Exit with appropriate code
-    sys.exit(0 if result.wasSuccessful() else 1)    sys.exit(0 if result.wasSuccessful() else 1)    sys.exit(0 if result.wasSuccessful() else 1)
+    sys.exit(0 if result.wasSuccessful() else 1)
