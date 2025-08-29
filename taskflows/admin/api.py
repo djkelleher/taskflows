@@ -1,230 +1,288 @@
 
+import logging
+import traceback
+from contextlib import asynccontextmanager
+from typing import Optional
+
+import click
+import uvicorn
+
+# from dl.databases.timescale import pgconn
+from fastapi import Body, FastAPI, Query, Request, status
+from fastapi.responses import JSONResponse
+
+from taskflows.admin.core import (
+    create,
+    disable,
+    enable,
+    list_servers,
+    list_services,
+    logs,
+    remove,
+    restart,
+    show,
+    start,
+    status,
+    stop,
+    task_history,
+    upsert_server,
+    with_hostname,
+)
+from taskflows.admin.security import security_config, validate_hmac_request
+from taskflows.common import Config, logger
+from taskflows.service import RestartPolicy, Service, Venv
+
+config = Config()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Services API FastAPI app startup")
+
+    try:
+        await upsert_server()
+        logger.info("Server registered in database successfully")
+    except Exception as e:
+        logger.error(f"Failed to register server in database: {e}")
+
+    yield
+    # Shutdown (if needed)
+
+app = FastAPI(title="Services Daemon API", lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    logger.error(
+        "Unhandled exception %s %s: %s%s", request.method, request.url.path, exc, f"\n{tb}" if tb else ""
+    )
+    payload = {
+        "detail": str(exc),
+        "error_type": type(exc).__name__,
+        "path": request.url.path,
+    }
+    if tb:
+        payload["traceback"] = tb
+    # Reuse hostname wrapper for consistency
+    return JSONResponse(status_code=500, content=with_hostname(payload))
+
+
+# Add security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    if security_config.enable_security_headers:
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        logger.debug(f"Security headers added to response for {request.url.path}")
+    return response
+
+
+
+# HMAC validation middleware
+@app.middleware("http")
+async def hmac_validation(request: Request, call_next):
+    """Validate HMAC headers unless disabled or health endpoint."""
+    if not security_config.enable_hmac or request.url.path == "/health":
+        logger.debug(f"HMAC skipped for {request.url.path}")
+        return await call_next(request)
+
+    secret = security_config.hmac_secret
+    if not secret:
+        logger.error("HMAC secret not configured")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": "HMAC secret not configured"},
+        )
+
+    signature = request.headers.get(security_config.hmac_header)
+    timestamp = request.headers.get(security_config.hmac_timestamp_header)
+    if not signature or not timestamp:
+        logger.warning(
+            f"Missing HMAC headers for {request.url.path} from {request.client.host}"
+        )
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "HMAC signature and timestamp required"},
+        )
+
+    body_str = ""
+    if request.method in {"POST", "PUT", "DELETE"}:
+        body_bytes = await request.body()
+        body_str = body_bytes.decode("utf-8") if body_bytes else ""
+
+        async def receive():
+            return {"type": "http.request", "body": body_bytes}
+
+        request._receive = receive  # allow downstream to re-read body
+
+    is_valid, error_msg = validate_hmac_request(
+        signature,
+        timestamp,
+        secret,
+        body_str,
+        security_config.hmac_window_seconds,
+    )
+    if not is_valid:
+        logger.warning(
+            f"Invalid HMAC from {request.client.host} on {request.url.path}: {error_msg}"
+        )
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": error_msg},
+        )
+
+    logger.debug(f"HMAC validated for {request.url.path} from {request.client.host}")
+    return await call_next(request)
+
+
+@app.get("/health")
+async def health_check_endpoint():
+    """Health check logic as a free function."""
+    logger.info("health check called")
+    return with_hostname({"status": "ok"})
+
+
+@app.get("/list-servers")
+async def list_servers_endpoint():
+    return await list_servers(as_json=True)
+
+
+@app.get("/history")
+async def task_history_endpoint(
+    limit: int = Query(3),
+    match: Optional[str] = Query(None),
+):
+    return await task_history(limit=limit, match=match, as_json=True)
+
+
+@app.get("/list")
+async def list_services_endpoint(
+    match: Optional[str] = Query(None),
+):
+    return await list_services(match=match, as_json=True)
 
 
 
 @app.get("/status")
-async def api_status(
+async def status_endpoint(
     match: Optional[str] = Query(None),
     running: bool = Query(False),
 ):
-    return free_status(match=match, running=running)
+    return await status(match=match, running=running, as_json=True)
 
-
-def free_logs(service_name: str, n_lines: int = 1000):
-    """Get service logs - free function."""
-    logger.info(f"logs called for service_name={service_name}, n_lines={n_lines}")
-    return with_hostname({"logs": service_logs(service_name, n_lines)})
 
 
 @app.get("/logs/{service_name}")
-async def api_logs(
+async def logs_endpoint(
     service_name: str,
     n_lines: int = Query(1000, description="Number of log lines to return"),
 ):
-    return free_logs(service_name=service_name, n_lines=n_lines)
+    return await logs(service_name=service_name, n_lines=n_lines, as_json=True)
 
 
-def free_create(search_in: str, include: Optional[str] = None, exclude: Optional[str] = None):
-    """Create services and dashboards - free function."""
-    logger.info(
-        f"create called with search_in={search_in}, include={include}, exclude={exclude}"
-    )
-    # Now that deploy.py uses services, let's use the original approach
-    services = class_inst(class_type=Service, search_in=search_in)
-    print(f"Found {len(services)} services")
 
-    for sr in class_inst(class_type=ServiceRegistry, search_in=search_in):
-        print(f"ServiceRegistry found with {len(sr.services)} services")
-        services.extend(sr.services)
+@app.get("/show/{match}")
+async def show_endpoint(
+    match: str,
+):
+    return await show(match=match, as_json=True)
 
-    dashboards = class_inst(class_type=Dashboard, search_in=search_in)
-    print(f"Found {len(dashboards)} dashboards")
-
-    print(f"Total services: {len(services)}")
-    if include:
-        services = [s for s in services if fnmatchcase(name=s.name, pat=include)]
-        dashboards = [d for d in dashboards if fnmatchcase(name=d.title, pat=include)]
-
-    if exclude:
-        services = [s for s in services if not fnmatchcase(name=s.name, pat=exclude)]
-        dashboards = [
-            d for d in dashboards if not fnmatchcase(name=d.title, pat=exclude)
-        ]
-
-    for srv in services:
-        srv.create(defer_reload=True)
-    for dashboard in dashboards:
-        dashboard.create()
-    reload_unit_files()
-
-    logger.info(
-        f"create created {len(services)} services, {len(dashboards)} dashboards"
-    )
-    return with_hostname(
-        {
-            "services": [s.name for s in services],
-            "dashboards": [d.title for d in dashboards],
-        }
-    )
 
 
 @app.post("/create")
-async def api_create(
+async def create_endpoint(
     search_in: str = Body(..., embed=True),
     include: Optional[str] = Body(None, embed=True),
     exclude: Optional[str] = Body(None, embed=True),
 ):
-    return free_create(search_in=search_in, include=include, exclude=exclude)
-
-
-def free_start(match: str, timers: bool = False, services: bool = False):
-    """Start services/timers - free function."""
-    logger.info(
-        f"start called with match={match}, timers={timers}, services={services}"
-    )
-    if (services and timers) or (not services and not timers):
-        unit_type = None
-    elif services:
-        unit_type = "service"
-    elif timers:
-        unit_type = "timer"
-    files = get_unit_files(match=match, unit_type=unit_type)
-    _start_service(files)
-    logger.info(f"start started {len(files)} units")
-    return with_hostname({"started": files})
-
+    return await create(search_in=search_in, include=include, exclude=exclude, as_json=True)
 
 @app.post("/start")
-async def api_start(
+async def start_endpoint(
     match: str = Body(..., embed=True),
     timers: bool = Body(False, embed=True),
     services: bool = Body(False, embed=True),
 ):
-    return free_start(match=match, timers=timers, services=services)
-
-
-def free_stop(match: str, timers: bool = False, services: bool = False):
-    """Stop services/timers - free function."""
-    logger.info(
-        f"stop called with match={match}, timers={timers}, services={services}"
-    )
-    if (services and timers) or (not services and not timers):
-        unit_type = None
-    elif services:
-        unit_type = "service"
-    elif timers:
-        unit_type = "timer"
-    files = get_unit_files(match=match, unit_type=unit_type)
-    _stop_service(files)
-    logger.info(f"stop stopped {len(files)} units")
-    return with_hostname({"stopped": files})
-
+    return await start(match=match, timers=timers, services=services, as_json=True)
 
 @app.post("/stop")
-async def api_stop(
+async def stop_endpoint(
     match: str = Body(..., embed=True),
     timers: bool = Body(False, embed=True),
     services: bool = Body(False, embed=True),
 ):
-    return free_stop(match=match, timers=timers, services=services)
-
-
-def free_restart(match: str):
-    """Restart services - free function."""
-    logger.info(f"restart called with match={match}")
-    files = get_unit_files(match=match, unit_type="service")
-    _restart_service(files)
-    logger.info(f"restart restarted {len(files)} units")
-    return with_hostname({"restarted": files})
+    return await stop(match=match, timers=timers, services=services, as_json=True)
 
 
 @app.post("/restart")
-async def api_restart(
+async def restart_endpoint(
     match: str = Body(..., embed=True),
 ):
-    return free_restart(match=match)
-
-
-def free_enable(match: str, timers: bool = False, services: bool = False):
-    """Enable services/timers - free function."""
-    logger.info(
-        f"enable called with match={match}, timers={timers}, services={services}"
-    )
-    if (services and timers) or (not services and not timers):
-        unit_type = None
-    elif services:
-        unit_type = "service"
-    elif timers:
-        unit_type = "timer"
-    files = get_unit_files(match=match, unit_type=unit_type)
-    _enable_service(files)
-    logger.info(f"enable enabled {len(files)} units")
-    return with_hostname({"enabled": files})
+    return await restart(match=match, as_json=True)
 
 
 @app.post("/enable")
-async def api_enable(
+async def enable_endpoint(
     match: str = Body(..., embed=True),
     timers: bool = Body(False, embed=True),
     services: bool = Body(False, embed=True),
 ):
-    return free_enable(match=match, timers=timers, services=services)
-
-
-def free_disable(match: str, timers: bool = False, services: bool = False):
-    """Disable services/timers - free function."""
-    logger.info(
-        f"disable called with match={match}, timers={timers}, services={services}"
-    )
-    if (services and timers) or (not services and not timers):
-        unit_type = None
-    elif services:
-        unit_type = "service"
-    elif timers:
-        unit_type = "timer"
-    files = get_unit_files(match=match, unit_type=unit_type)
-    _disable_service(files)
-    logger.info(f"disable disabled {len(files)} units")
-    return with_hostname({"disabled": files})
-
+    return await enable(match=match, timers=timers, services=services, as_json=True)
 
 @app.post("/disable")
-async def api_disable(
+async def disable_endpoint(
     match: str = Body(..., embed=True),
     timers: bool = Body(False, embed=True),
     services: bool = Body(False, embed=True),
 ):
-    return free_disable(match=match, timers=timers, services=services)
-
-def free_remove(match: str):
-    """Remove services - free function."""
-    logger.info(f"remove called with match={match}")
-    service_files = get_unit_files(match=match, unit_type="service")
-    timer_files = get_unit_files(match=match, unit_type="timer")
-    _remove_service(
-        service_files=service_files,
-        timer_files=timer_files,
-    )
-    removed_names = [Path(f).name for f in service_files + timer_files]
-    logger.info(f"remove removed {len(removed_names)} units")
-    return with_hostname({"removed": removed_names})
-
+    return await disable(match=match, timers=timers, services=services, as_json=True)
 
 @app.post("/remove")
-async def api_remove(match: str = Body(..., embed=True)):
-    return free_remove(match=match)
+async def remove_endpoint(match: str = Body(..., embed=True)):
+    return await remove(match=match, as_json=True)
 
 
-def free_show(match: str):
-    """Show service files - free function."""
-    logger.info(f"show called with match={match}")
-    files = get_unit_files(match=match)
-    logger.debug(f"show returned files for {match}")
-    return with_hostname({"files": load_service_files(files)})
+
+@click.command("start")
+@click.option("--host", default="localhost", help="Host to bind the server to")
+@click.option("--port", default=7777, help="Port to bind the server to")
+@click.option(
+    "--reload/--no-reload", default=True, help="Enable auto-reload on code changes"
+)
+def _start_api_cmd(host: str, port: int, reload: bool):
+    """Start the Services API server. This installs as _start_srv_api command."""
+    click.echo(
+        click.style(f"Starting Services API api on {host}:{port}...", fg="green")
+    )
+    if reload:
+        click.echo(click.style("Auto-reload enabled", fg="yellow"))
+    # Also log to file so we can see something even if import path is wrong
+    logger.info(f"Launching uvicorn on {host}:{port} reload={reload}")
+    uvicorn.run("taskflows.admin.api:app", host=host, port=port, reload=reload)
 
 
-@app.get("/show/{match}")
-async def api_show(
-    match: str,
-):
-    return free_show(match=match)
+srv_api = Service(
+    name="srv-api",
+    start_command="_start_srv_api",
+    environment=Venv("trading"),
+    restart_policy=RestartPolicy(
+        condition="always",
+        delay=10,
+    ),
+    enabled=True,
+)
+
+def start_api_srv():
+    if not srv_api.exists:
+        logging.info("Creating and starting srv-api service")
+        srv_api.create()
+    srv_api.start()
+

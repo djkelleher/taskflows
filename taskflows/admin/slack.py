@@ -10,8 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from slack_bolt import Ack, App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk.errors import SlackApiError
-from taskflows.admin.api_client import execute_command_on_servers
-from taskflows.admin.common import list_servers
+
+from taskflows.admin.api import execute_command_on_servers
+from taskflows.admin.core import list_servers
 from taskflows.common import logger  # noqa: F401 (keep single import)
 
 # list_servers function removed - all Slack functions are now async
@@ -1423,5 +1424,4 @@ def start(debug):
     """Start the Services Slack bot."""
     if debug:
         logger.setLevel("DEBUG")
-    start_bot()
     start_bot()

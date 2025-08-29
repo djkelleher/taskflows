@@ -1,37 +1,30 @@
 
-import asyncio
-import logging
-import os
+import json
 import socket
-import traceback
 from collections import defaultdict
-from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from fnmatch import fnmatchcase
+from functools import cache
 from pathlib import Path
 from typing import Dict, Literal, Optional, Sequence
 from zoneinfo import ZoneInfo
 
-import click
+import requests
 import sqlalchemy as sa
-import uvicorn
 from alert_msgs.components import CodeBlock, Map, MsgComp, StatusIndicator, Table, Text
 
 # from dl.databases.timescale import pgconn
 from dynamic_imports import class_inst
-from fastapi import Body, FastAPI, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import status
 
 from taskflows.admin.common import call_api, list_servers
-from taskflows.admin.security import security_config, validate_hmac_request
-from taskflows.common import Config, load_service_files, logger, sort_service_names
+from taskflows.admin.security import security_config
+from taskflows.common import load_service_files, logger, sort_service_names
 from taskflows.dashboard import Dashboard
-from taskflows.db import engine, get_tasks_db
+from taskflows.db import engine, get_tasks_db, servers_table
 from taskflows.service import (
-    RestartPolicy,
     Service,
     ServiceRegistry,
-    Venv,
     _disable_service,
     _enable_service,
     _remove_service,
@@ -50,6 +43,15 @@ from taskflows.service import (
     systemd_manager,
 )
 
+from .security import create_hmac_headers  # new import reuse
+from .security import load_security_config, security_config
+
+HOSTNAME = socket.gethostname()
+
+def with_hostname(data: dict) -> dict:
+    logger.debug(f"with_hostname called: {data}")
+    return {**data, "hostname": HOSTNAME}
+
 
 def get_unit_files(unit_type: Optional[Literal["service", "timer"]] = None,
     match: Optional[str] = None,
@@ -64,133 +66,6 @@ def get_unit_files(unit_type: Optional[Literal["service", "timer"]] = None,
         if stem not in protected_units:
             kept.append(f)
     return kept
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    logger.info("Services API FastAPI app startup")
-
-    # Register this server in the database
-    from taskflows.admin.common import upsert_server
-
-    try:
-        await upsert_server()
-        logger.info("Server registered in database successfully")
-    except Exception as e:
-        logger.error(f"Failed to register server in database: {e}")
-
-    yield
-    # Shutdown (if needed)
-
-
-app = FastAPI(title="Services Daemon API", lifespan=lifespan)
-config = Config()
-
-
-# Global exception handler to automatically include traceback for any unhandled errors
-
-INCLUDE_TRACEBACKS = os.getenv("DL_API_INCLUDE_TRACEBACKS", "1") not in {"0", "false", "False"}
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    tb = "" if not INCLUDE_TRACEBACKS else "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    logger.error(
-        "Unhandled exception %s %s: %s%s", request.method, request.url.path, exc, f"\n{tb}" if tb else ""
-    )
-    payload = {
-        "detail": str(exc),
-        "error_type": type(exc).__name__,
-        "path": request.url.path,
-    }
-    if tb:
-        payload["traceback"] = tb
-    # Reuse hostname wrapper for consistency
-    return JSONResponse(status_code=500, content=with_hostname(payload))
-
-
-# Add security headers middleware
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    if security_config.enable_security_headers:
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Strict-Transport-Security"] = (
-            "max-age=31536000; includeSubDomains"
-        )
-        response.headers["Content-Security-Policy"] = "default-src 'self'"
-        logger.debug(f"Security headers added to response for {request.url.path}")
-    return response
-
-
-# Utility to get hostname
-HOSTNAME = socket.gethostname()
-
-
-def with_hostname(data: dict) -> dict:
-    logger.debug(f"with_hostname called: {data}")
-    return {**data, "hostname": HOSTNAME}
-
-
-# HMAC validation middleware
-@app.middleware("http")
-async def hmac_validation(request: Request, call_next):
-    """Validate HMAC headers unless disabled or health endpoint."""
-    if not security_config.enable_hmac or request.url.path == "/health":
-        logger.debug(f"HMAC skipped for {request.url.path}")
-        return await call_next(request)
-
-    secret = security_config.hmac_secret
-    if not secret:
-        logger.error("HMAC secret not configured")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": "HMAC secret not configured"},
-        )
-
-    signature = request.headers.get(security_config.hmac_header)
-    timestamp = request.headers.get(security_config.hmac_timestamp_header)
-    if not signature or not timestamp:
-        logger.warning(
-            f"Missing HMAC headers for {request.url.path} from {request.client.host}"
-        )
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"detail": "HMAC signature and timestamp required"},
-        )
-
-    body_str = ""
-    if request.method in {"POST", "PUT", "DELETE"}:
-        body_bytes = await request.body()
-        body_str = body_bytes.decode("utf-8") if body_bytes else ""
-
-        async def receive():
-            return {"type": "http.request", "body": body_bytes}
-
-        request._receive = receive  # allow downstream to re-read body
-
-    is_valid, error_msg = validate_hmac_request(
-        signature,
-        timestamp,
-        secret,
-        body_str,
-        security_config.hmac_window_seconds,
-    )
-    if not is_valid:
-        logger.warning(
-            f"Invalid HMAC from {request.client.host} on {request.url.path}: {error_msg}"
-        )
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"detail": error_msg},
-        )
-
-    logger.debug(f"HMAC validated for {request.url.path} from {request.client.host}")
-    return await call_next(request)
-
-
 
 def health_check(host: Optional[str] = None) -> StatusIndicator:
     """Call the /health endpoint and return a StatusIndicator component.
@@ -210,15 +85,10 @@ def health_check(host: Optional[str] = None) -> StatusIndicator:
         return StatusIndicator("Service Healthy", color="green")
     else:
         return StatusIndicator("Service Unhealthy", color="red")
+    
 
-@app.get("/health")
-async def health_check_endpoint():
-    """Health check logic as a free function."""
-    logger.info("health check called")
-    return with_hostname({"status": "ok"})
-
-async def list_servers(host: Optional[str] = None, as_json: bool = False) -> Table:
-    """Call the /list-servers endpoint and return a Table component.
+async def list_servers() -> Table:
+    """list servers.
 
     Args:
         host (str): Host address of the admin API server. If None, calls local function.
@@ -226,32 +96,17 @@ async def list_servers(host: Optional[str] = None, as_json: bool = False) -> Tab
     Returns:
         Table: Table showing registered servers
     """
-    if host is None:
-        # Call local free function
-        data = await list_servers()
-        data = with_hostname({"servers": data, "count": len(servers)})
-    else:
-        # Call via API
-        data = call_api(host, "/list-servers", method="GET", timeout=10)
-
-    if as_json:
-        return data
-    
-    if "error" in data:
-        return Table([{"Error": data["error"]}], title="Server List - Error")
-
-    servers = data.get("servers", [])
-    if not servers:
-        return Table([], title="Registered Servers (None)")
-
-    return Table(
-        servers, title=f"Registered Servers ({data.get('count', len(servers))})"
-    )
-
-
-@app.get("/list-servers")
-async def list_servers_endpoint():
-    return await list_servers(as_json=True)
+    # Call local free function
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(servers_table).order_by(servers_table.c.hostname)
+        )
+        results = [dict(row._mapping) for row in result]
+    # Convert to expected format with 'address' field
+    return [
+        {"address": f"{s['public_ipv4']}:7777", "hostname": s["hostname"]}
+        for s in results
+    ]
 
 
 async def task_history(
@@ -322,21 +177,16 @@ async def task_history(
     return Table(history, title=title)
 
 
-@app.get("/history")
-async def task_history_endpoint(
-    limit: int = Query(3),
-    match: Optional[str] = Query(None),
-):
-    return await task_history(limit=limit, match=match, as_json=True)
 
-def list_services(
-    host: Optional[str] = None, match: Optional[str] = None
+async def list_services(
+    host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False
 ) -> Table:
     """Call the /list endpoint and return a Table component.
 
     Args:
         host (str): Host address of the admin API server. If None, calls local function.
         match (str): Optional pattern to filter services
+        as_json (bool): Return raw JSON data instead of Table component
 
     Returns:
         Table: Table showing available services
@@ -374,14 +224,9 @@ def list_services(
     service_rows = [{"Service": service} for service in services]
     return Table(service_rows, title=f"{title} ({len(services)})")
 
-@app.get("/list")
-async def list_services_endpoint(
-    match: Optional[str] = Query(None),
-):
-    return list_services(match=match)
 
 
-def api_status(
+async def status(
     host: Optional[str] = None, match: Optional[str] = None, running: bool = False, as_json: bool = False
 ) -> Table:
     """Call the /status endpoint and return a Table component.
@@ -566,8 +411,8 @@ def api_status(
     return Table(status_data, title=title)
 
 
-def api_logs(
-    host: Optional[str] = None, service_name: Optional[str] = None, n_lines: Optional[int] = None
+async def logs(
+    host: Optional[str] = None, service_name: Optional[str] = None, n_lines: Optional[int] = None, as_json: bool = False
 ) -> CodeBlock:
     """Call the /logs/{service_name} endpoint and return a CodeBlock component.
 
@@ -575,51 +420,65 @@ def api_logs(
         host (str): Host address of the admin API server. If None, calls local function.
         service_name (str): Name of the service to get logs for
         n_lines (int): Number of log lines to return.
+        as_json (bool): Return raw JSON data instead of CodeBlock component
 
     Returns:
         CodeBlock: Component showing service logs
     """
     if not service_name:
+        if as_json:
+            return {"error": "service_name is required"}
         return CodeBlock("Error: service_name is required", language="text")
 
     if host is None:
         # Call local free function
-        from taskflows.admin.api import free_logs
-        data = free_logs(service_name=service_name, n_lines=n_lines or 1000)
+        logger.info(f"logs called for service_name={service_name}, n_lines={n_lines}")
+        data = with_hostname({"logs": service_logs(service_name, n_lines or 1000)})
     else:
         # Call via API
         params = {"n_lines": n_lines} if n_lines else {}
         data = call_api(host, f"/logs/{service_name}", method="GET", timeout=30, params=params)
     
+    if as_json:
+        return data
+    
     if "error" in data:
         return CodeBlock(f"Error fetching logs: {data['error']}", language="text")
 
-    logs = data.get("logs", "No logs available")
-    return CodeBlock(logs, language="text", show_line_numbers=False)
+    logs_content = data.get("logs", "No logs available")
+    return CodeBlock(logs_content, language="text", show_line_numbers=False)
 
 
-def api_show(host: Optional[str] = None, match: Optional[str] = None) -> Table:
+async def show(host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False) -> Table:
     """Call the /show/{match} endpoint and return a Table component.
 
     Args:
         host (str): Host address of the admin API server. If None, calls local function.
         match (str): Name or pattern of services to show
+        as_json (bool): Return raw JSON data instead of Table component
 
     Returns:
         Table: Table showing service file contents
     """
     if not match:
+        if as_json:
+            return {"error": "match parameter is required"}
         return Table(
             [{"Error": "match parameter is required"}], title="Service Files - Error"
         )
 
     if host is None:
         # Call local free function
-        from taskflows.admin.api import free_show
-        data = free_show(match=match)
+        logger.info(f"show called with match={match}")
+        files = get_unit_files(match=match)
+        logger.debug(f"show returned files for {match}")
+        data = with_hostname({"files": load_service_files(files)})
     else:
         # Call via API
         data = call_api(host, f"/show/{match}", method="GET", timeout=30)
+    
+    if as_json:
+        return data
     
     if "error" in data:
         return Table(
@@ -646,12 +505,13 @@ def api_show(host: Optional[str] = None, match: Optional[str] = None) -> Table:
     return Table(rows, title=f"Service Files for '{match}' ({len(rows)} files)")
 
 
-def api_create(
+async def create(
     host: Optional[str] = None,
     match: Optional[str] = None,
     search_in: Optional[str] = None,
     include: Optional[str] = None,
     exclude: Optional[str] = None,
+    as_json: bool = False
 ) -> Table:
     """Call the /create endpoint and return a Table component.
 
@@ -676,8 +536,46 @@ def api_create(
 
     if host is None:
         # Call local free function
-        from taskflows.admin.api import free_create
-        result = free_create(search_in=search_in, include=include, exclude=exclude)
+        logger.info(
+            f"create called with search_in={search_in}, include={include}, exclude={exclude}"
+        )
+        # Now that deploy.py uses services, let's use the original approach
+        services = class_inst(class_type=Service, search_in=search_in)
+        print(f"Found {len(services)} services")
+
+        for sr in class_inst(class_type=ServiceRegistry, search_in=search_in):
+            print(f"ServiceRegistry found with {len(sr.services)} services")
+            services.extend(sr.services)
+
+        dashboards = class_inst(class_type=Dashboard, search_in=search_in)
+        print(f"Found {len(dashboards)} dashboards")
+
+        print(f"Total services: {len(services)}")
+        if include:
+            services = [s for s in services if fnmatchcase(name=s.name, pat=include)]
+            dashboards = [d for d in dashboards if fnmatchcase(name=d.title, pat=include)]
+
+        if exclude:
+            services = [s for s in services if not fnmatchcase(name=s.name, pat=exclude)]
+            dashboards = [
+                d for d in dashboards if not fnmatchcase(name=d.title, pat=exclude)
+            ]
+
+        for srv in services:
+            srv.create(defer_reload=True)
+        for dashboard in dashboards:
+            dashboard.create()
+        reload_unit_files()
+
+        logger.info(
+            f"create created {len(services)} services, {len(dashboards)} dashboards"
+        )
+        result = with_hostname(
+            {
+                "services": [s.name for s in services],
+                "dashboards": [d.title for d in dashboards],
+            }
+        )
     else:
         # Call via API
         data = {"search_in": search_in}
@@ -686,6 +584,9 @@ def api_create(
         if exclude:
             data["exclude"] = exclude
         result = call_api(host, "/create", method="POST", json_data=data, timeout=30)
+    
+    if as_json:
+        return result
     
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Create - Error")
@@ -701,11 +602,12 @@ def api_create(
     return Table(rows, title=f"Created Items ({len(rows)})")
 
 
-def api_start(
+async def start(
     host: Optional[str] = None,
     match: Optional[str] = None,
     timers: bool = False,
     services: bool = False,
+    as_json: bool = False
 ) -> Table:
     """Call the /start endpoint and return a Table component.
 
@@ -719,16 +621,32 @@ def api_start(
         Table: Component showing started items
     """
     if not match:
+        if as_json:
+            return {"error": "match parameter is required"}
         return Table([{"Error": "match parameter is required"}], title="Start - Error")
 
     if host is None:
         # Call local free function
-        from taskflows.admin.api import free_start
-        result = free_start(match=match, timers=timers, services=services)
+        logger.info(
+            f"start called with match={match}, timers={timers}, services={services}"
+        )
+        if (services and timers) or (not services and not timers):
+            unit_type = None
+        elif services:
+            unit_type = "service"
+        elif timers:
+            unit_type = "timer"
+        files = get_unit_files(match=match, unit_type=unit_type)
+        _start_service(files)
+        logger.info(f"start started {len(files)} units")
+        result = with_hostname({"started": files})
     else:
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
         result = call_api(host, "/start", method="POST", json_data=data, timeout=30)
+    
+    if as_json:
+        return result
     
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Start - Error")
@@ -738,11 +656,12 @@ def api_start(
     return Table(rows, title=f"Started Items ({len(rows)})")
 
 
-def api_stop(
+async def stop(
     host: Optional[str] = None,
     match: Optional[str] = None,
     timers: bool = False,
     services: bool = False,
+    as_json: bool = False
 ) -> Table:
     """Call the /stop endpoint and return a Table component.
 
@@ -756,16 +675,32 @@ def api_stop(
         Table: Component showing stopped items
     """
     if not match:
+        if as_json:
+            return {"error": "match parameter is required"}
         return Table([{"Error": "match parameter is required"}], title="Stop - Error")
 
     if host is None:
         # Call local free function
-        from taskflows.admin.api import free_stop
-        result = free_stop(match=match, timers=timers, services=services)
+        logger.info(
+            f"stop called with match={match}, timers={timers}, services={services}"
+        )
+        if (services and timers) or (not services and not timers):
+            unit_type = None
+        elif services:
+            unit_type = "service"
+        elif timers:
+            unit_type = "timer"
+        files = get_unit_files(match=match, unit_type=unit_type)
+        _stop_service(files)
+        logger.info(f"stop stopped {len(files)} units")
+        result = with_hostname({"stopped": files})
     else:
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
         result = call_api(host, "/stop", method="POST", json_data=data, timeout=30)
+    
+    if as_json:
+        return result
     
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Stop - Error")
@@ -775,7 +710,7 @@ def api_stop(
     return Table(rows, title=f"Stopped Items ({len(rows)})")
 
 
-def api_restart(host: Optional[str] = None, match: Optional[str] = None) -> Table:
+async def restart(host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False) -> Table:
     """Call the /restart endpoint and return a Table component.
 
     Args:
@@ -786,18 +721,26 @@ def api_restart(host: Optional[str] = None, match: Optional[str] = None) -> Tabl
         Table: Component showing restarted items
     """
     if not match:
+        if as_json:
+            return {"error": "match parameter is required"}
         return Table(
             [{"Error": "match parameter is required"}], title="Restart - Error"
         )
 
     if host is None:
         # Call local free function
-        from taskflows.admin.api import free_restart
-        result = free_restart(match=match)
+        logger.info(f"restart called with match={match}")
+        files = get_unit_files(match=match, unit_type="service")
+        _restart_service(files)
+        logger.info(f"restart restarted {len(files)} units")
+        result = with_hostname({"restarted": files})
     else:
         # Call via API
         data = {"match": match}
         result = call_api(host, "/restart", method="POST", json_data=data, timeout=30)
+    
+    if as_json:
+        return result
     
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Restart - Error")
@@ -807,48 +750,55 @@ def api_restart(host: Optional[str] = None, match: Optional[str] = None) -> Tabl
     return Table(rows, title=f"Restarted Items ({len(rows)})")
 
 
-def api_enable(
-    host: Optional[str] = None,
-    match: Optional[str] = None,
-    timers: bool = False,
-    services: bool = False,
-) -> Table:
-    """Call the /enable endpoint and return a Table component.
+async def remove(host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False) -> Table:
+    """Call the /remove endpoint and return a Table component.
 
     Args:
         host (str): Host address of the admin API server. If None, calls local function.
-        match (str): Pattern to match services/timers
-        timers (bool): Whether to enable timers
-        services (bool): Whether to enable services
+        match (str): Pattern to match services
 
     Returns:
-        Table: Component showing enabled items
+        Table: Component showing removed items
     """
     if not match:
-        return Table([{"Error": "match parameter is required"}], title="Enable - Error")
+        if as_json:
+            return {"error": "match parameter is required"}
+        return Table([{"Error": "match parameter is required"}], title="Remove - Error")
 
     if host is None:
         # Call local free function
-        from taskflows.admin.api import free_enable
-        result = free_enable(match=match, timers=timers, services=services)
+        logger.info(f"remove called with match={match}")
+        service_files = get_unit_files(match=match, unit_type="service")
+        timer_files = get_unit_files(match=match, unit_type="timer")
+        _remove_service(
+            service_files=service_files,
+            timer_files=timer_files,
+        )
+        removed_names = [Path(f).name for f in service_files + timer_files]
+        logger.info(f"remove removed {len(removed_names)} units")
+        result = with_hostname({"removed": removed_names})
     else:
         # Call via API
-        data = {"match": match, "timers": timers, "services": services}
-        result = call_api(host, "/enable", method="POST", json_data=data, timeout=30)
+        data = {"match": match}
+        result = call_api(host, "/remove", method="POST", json_data=data, timeout=30)
+    
+    if as_json:
+        return result
     
     if "error" in result:
-        return Table([{"Error": result["error"]}], title="Enable - Error")
+        return Table([{"Error": result["error"]}], title="Remove - Error")
 
-    enabled = result.get("enabled", [])
-    rows = [{"Enabled": item} for item in enabled]
-    return Table(rows, title=f"Enabled Items ({len(rows)})")
+    removed = result.get("removed", [])
+    rows = [{"Removed": item} for item in removed]
+    return Table(rows, title=f"Removed Items ({len(rows)})")
 
 
-def api_disable(
+async def disable(
     host: Optional[str] = None,
     match: Optional[str] = None,
     timers: bool = False,
     services: bool = False,
+    as_json: bool = False
 ) -> Table:
     """Call the /disable endpoint and return a Table component.
 
@@ -862,18 +812,34 @@ def api_disable(
         Table: Component showing disabled items
     """
     if not match:
+        if as_json:
+            return {"error": "match parameter is required"}
         return Table(
             [{"Error": "match parameter is required"}], title="Disable - Error"
         )
 
     if host is None:
         # Call local free function
-        from taskflows.admin.api import free_disable
-        result = free_disable(match=match, timers=timers, services=services)
+        logger.info(
+            f"disable called with match={match}, timers={timers}, services={services}"
+        )
+        if (services and timers) or (not services and not timers):
+            unit_type = None
+        elif services:
+            unit_type = "service"
+        elif timers:
+            unit_type = "timer"
+        files = get_unit_files(match=match, unit_type=unit_type)
+        _disable_service(files)
+        logger.info(f"disable disabled {len(files)} units")
+        result = with_hostname({"disabled": files})
     else:
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
         result = call_api(host, "/disable", method="POST", json_data=data, timeout=30)
+    
+    if as_json:
+        return result
     
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Disable - Error")
@@ -882,39 +848,114 @@ def api_disable(
     rows = [{"Disabled": item} for item in disabled]
     return Table(rows, title=f"Disabled Items ({len(rows)})")
 
-
-def api_remove(host: Optional[str] = None, match: Optional[str] = None) -> Table:
-    """Call the /remove endpoint and return a Table component.
+async def enable(
+    host: Optional[str] = None,
+    match: Optional[str] = None,
+    timers: bool = False,
+    services: bool = False,
+    as_json: bool = False
+) -> Table:
+    """Call the /enable endpoint and return a Table component.
 
     Args:
         host (str): Host address of the admin API server. If None, calls local function.
-        match (str): Pattern to match services
+        match (str): Pattern to match services/timers
+        timers (bool): Whether to enable timers
+        services (bool): Whether to enable services
 
     Returns:
-        Table: Component showing removed items
+        Table: Component showing enabled items
     """
     if not match:
-        return Table([{"Error": "match parameter is required"}], title="Remove - Error")
+        if as_json:
+            return {"error": "match parameter is required"}
+        return Table([{"Error": "match parameter is required"}], title="Enable - Error")
 
     if host is None:
         # Call local free function
-        from taskflows.admin.api import free_remove
-        result = free_remove(match=match)
+        logger.info(
+            f"enable called with match={match}, timers={timers}, services={services}"
+        )
+        if (services and timers) or (not services and not timers):
+            unit_type = None
+        elif services:
+            unit_type = "service"
+        elif timers:
+            unit_type = "timer"
+        files = get_unit_files(match=match, unit_type=unit_type)
+        _enable_service(files)
+        logger.info(f"enable enabled {len(files)} units")
+        result = with_hostname({"enabled": files})
     else:
         # Call via API
-        data = {"match": match}
-        result = call_api(host, "/remove", method="POST", json_data=data, timeout=30)
+        data = {"match": match, "timers": timers, "services": services}
+        result = call_api(host, "/enable", method="POST", json_data=data, timeout=30)
+    
+    if as_json:
+        return result
     
     if "error" in result:
-        return Table([{"Error": result["error"]}], title="Remove - Error")
+        return Table([{"Error": result["error"]}], title="Enable - Error")
 
-    removed = result.get("removed", [])
-    rows = [{"Removed": item} for item in removed]
-    return Table(rows, title=f"Removed Items ({len(rows)})")
+    enabled = result.get("enabled", [])
+    rows = [{"Enabled": item} for item in enabled]
+    return Table(rows, title=f"Enabled Items ({len(rows)})")
+
+@cache
+def get_public_ipv4() -> Optional[str]:
+    """Detect and cache the machine's public IPv4 address.
+
+    Tries multiple external services and returns the first validated public IPv4.
+    Cached for process lifetime; call get_public_ipv4.cache_clear() if refresh needed.
+    """
+    services = (
+        "https://api.ipify.org",
+        "https://ipv4.icanhazip.com",
+        "https://checkip.amazonaws.com",
+    )
+    for url in services:
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code != 200:
+                logger.debug(f"get_public_ipv4: Non-200 from {url}: {resp.status_code}")
+                continue
+            # Some services may return with newline; split to be safe
+            candidate = resp.text.strip().split()[0]
+            logger.debug(f"get_public_ipv4: Selected public IP {candidate} from {url}")
+            return candidate
+        except requests.RequestException as e:
+            logger.debug(f"get_public_ipv4: Request error from {url}: {e}")
+        except Exception as e:
+            logger.debug(f"get_public_ipv4: Unexpected error from {url}: {e}")
+    logger.warning("get_public_ipv4: Failed to determine public IPv4 address")
+    return None
+
+    
 
 
-action_commands = {"start", "stop", "restart", "enable", "disable", "remove"}
-read_commands = {"history", "list", "status", "logs", "show"}
+async def upsert_server(
+    hostname: Optional[str] = None, public_ipv4: Optional[str] = None
+) -> None:
+    """Upsert server information to the database.
+    
+    Args:
+        hostname: Server hostname, defaults to current machine hostname
+        public_ipv4: Server public IP, defaults to detected IP
+    """
+    if hostname is None:
+        hostname = socket.gethostname()
+    if public_ipv4 is None:
+        public_ipv4 = get_public_ipv4()
+
+    db = await get_tasks_db()
+    await db.upsert(
+        servers_table,
+        hostname=hostname,
+        public_ipv4=public_ipv4,
+        last_updated=datetime.now(timezone.utc),
+    )
+    logger.info(f"Updated server info: hostname={hostname}, public_ipv4={public_ipv4}")
+
 
 
 async def execute_command_on_servers(
@@ -978,19 +1019,19 @@ async def execute_command_on_servers(
 
     # Map commands to client functions
     command_map = {
-        "health": api_health,
-        "history": api_history,
-        "list": api_list_services,
-        "status": api_status,
-        "logs": api_logs,
-        "show": api_show,
-        "create": api_create,
-        "start": api_start,
-        "stop": api_stop,
-        "restart": api_restart,
-        "enable": api_enable,
-        "disable": api_disable,
-        "remove": api_remove,
+        "health": health_check,
+        "history": task_history,
+        "list": list_services,
+        "status": status,
+        "logs": logs,
+        "show": show,
+        "create": create,
+        "start": start,
+        "stop": stop,
+        "restart": restart,
+        "enable": enable,
+        "disable": disable,
+        "remove": remove,
     }
     if command not in command_map:
         return {"localhost": Text(f"Unknown command: {command}")}
@@ -1008,40 +1049,87 @@ async def execute_command_on_servers(
     return results
 
 
+def call_api(
+    server, endpoint: str, method: str = "get", params=None, json_data=None, timeout: int = 10
+) -> dict:
+    method = method.lower()
+    if isinstance(server, dict):
+        server = server["address"]
+    if not server.startswith("http"):
+        server = f"http://{server}"
+    url = server.rstrip("/")+endpoint
+    logger.info(f"{method.upper()} {url} params={params} json_data={json_data}")
 
+    def build_headers(cfg) -> Dict[str, str]:
+        headers: Dict[str, str] = {}
+        body = ""
+        if json_data is not None:
+            body = json.dumps(json_data, separators=(",", ":"))
+        if endpoint != "/health" and cfg.enable_hmac and cfg.hmac_secret:
+            try:
+                headers.update(create_hmac_headers(cfg.hmac_secret, body))
+                if json_data is not None:
+                    headers["Content-Type"] = "application/json"
+                logger.debug(f"HMAC headers added for {url}")
+            except Exception as e:
+                logger.error(f"Failed to create HMAC headers: {e}")
+        return headers
 
-@click.command("start")
-@click.option("--host", default="localhost", help="Host to bind the server to")
-@click.option("--port", default=7777, help="Port to bind the server to")
-@click.option(
-    "--reload/--no-reload", default=True, help="Enable auto-reload on code changes"
-)
-def _start_api_cmd(host: str, port: int, reload: bool):
-    """Start the Services API server. This installs as _start_srv_api command."""
-    click.echo(
-        click.style(f"Starting Services API api on {host}:{port}...", fg="green")
-    )
-    if reload:
-        click.echo(click.style("Auto-reload enabled", fg="yellow"))
-    # Also log to file so we can see something even if import path is wrong
-    logger.info(f"Launching uvicorn on {host}:{port} reload={reload}")
-    uvicorn.run("taskflows.admin.api:app", host=host, port=port, reload=reload)
+    cfg = security_config  # initial reference
+    headers = build_headers(cfg)
 
-
-srv_api = Service(
-    name="srv-api",
-    start_command="_start_srv_api",
-    environment=Venv("trading"),
-    restart_policy=RestartPolicy(
-        condition="always",
-        delay=10,
-    ),
-    enabled=True,
-)
-
-
-def start_api_srv():
-    if not srv_api.exists:
-        logging.info("Creating and starting srv-api service")
-        srv_api.create()
-    srv_api.start()
+    for attempt in (1, 2):
+        try:
+            resp = requests.request(
+                method.upper(),
+                url,
+                params=params,
+                json=json_data,
+                headers=headers,
+                timeout=timeout,
+            )
+            logger.info(f"[{resp.status_code}] {url}")
+            if resp.status_code == 401 and attempt == 1:
+                # Reload security config and retry once (secret may have rotated)
+                new_cfg = load_security_config()
+                if new_cfg.hmac_secret != cfg.hmac_secret:
+                    cfg = new_cfg
+                    headers = build_headers(cfg)
+                    logger.info("Retrying %s after HMAC secret reload", url)
+                    continue
+            resp.raise_for_status()
+            return resp.json()
+        except requests.HTTPError as he:
+            # Cap total size in logs
+            MAX_TOTAL = 8000
+            MAX_TB_LINES = 40
+            try:
+                data = resp.json()
+                if isinstance(data, dict) and "traceback" in data and isinstance(data["traceback"], str):
+                    lines = data["traceback"].splitlines()
+                    if len(lines) > MAX_TB_LINES:
+                        data["traceback"] = "\n".join(lines[:MAX_TB_LINES]) + f"\n... truncated {len(lines) - MAX_TB_LINES} lines ..."
+                text = json.dumps(data, indent=2, ensure_ascii=False)
+                if len(text) > MAX_TOTAL:
+                    text = text[:MAX_TOTAL] + f"\n... truncated {len(text) - MAX_TOTAL} chars ..."
+            except Exception:
+                text = resp.text or ""
+                if len(text) > MAX_TOTAL:
+                    return text[:MAX_TOTAL] + f"\n... truncated {len(text) - MAX_TOTAL} chars ..."
+            logger.error(
+                "HTTPError status=%s url=%s error=%s\nResponse body:\n%s",
+                getattr(resp, "status_code", None),
+                url,
+                he,
+                text,
+            )
+            status_code = getattr(resp, 'status_code', None) if 'resp' in locals() else None
+            return {
+                "error": str(he),
+                "status_code": status_code,
+                "endpoint": endpoint,
+            }
+        except Exception as e:
+            logger.exception(f"{type(e)} Exception for {url}: {e}")
+            return {"error": str(e), "endpoint": endpoint}
+    return {"error": "Unknown error", "endpoint": endpoint}

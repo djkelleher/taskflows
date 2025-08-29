@@ -5,7 +5,7 @@ from typing import Optional
 
 import click
 from click import Group
-from taskflows.admin.api_client import execute_command_on_servers
+from taskflows.admin.api import execute_command_on_servers
 from taskflows.entrypoints import async_entrypoint
 
 from .api import srv_api, start_api_srv

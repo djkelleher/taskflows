@@ -4,6 +4,8 @@
 loki preset log archive/retention.
 fix loki log json encoding
 API functions to free functions and support local host with no API
+distributed -- queue, service templates?
+
 
 taskflows is a Python library that provides robust task management, scheduling, and alerting capabilities. It allows you to convert regular functions into managed tasks with logging, alerts, retries, and more. taskflows also supports creating system services that run on specified schedules with flexible constraints.
 
