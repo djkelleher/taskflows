@@ -99,14 +99,14 @@ class Dashboard:
         if not loki_uid:
             logger.error("Loki datasource not found in Grafana")
             return
-            
+
         # Check if dashboard already exists and get its version
         search_resp = requests.get(
             f"http://{config.grafana}/api/search",
             params={"query": self.title},
             headers={"Authorization": f"Bearer {self._api_key}"},
         )
-        
+
         existing_version = None
         if search_resp.status_code == 200:
             dashboards = search_resp.json()
@@ -120,21 +120,23 @@ class Dashboard:
                     if existing_resp.status_code == 200:
                         existing_version = existing_resp.json()["dashboard"]["version"]
                     break
-        
+
         dashboard = self._create_gl_dashboard(loki_uid)
-        
+
         # Set version if dashboard exists
         if existing_version is not None:
             dashboard.version = existing_version
-        
+
         # Prepare the dashboard data
         dashboard_data = {"dashboard": dashboard}
         if existing_version is not None:
             dashboard_data["overwrite"] = True
-        
+
         resp = requests.post(
             f"http://{config.grafana}/api/dashboards/db",
-            data=json.dumps(dashboard_data, cls=DashboardEncoder, indent=2).encode("utf-8"),
+            data=json.dumps(dashboard_data, cls=DashboardEncoder, indent=2).encode(
+                "utf-8"
+            ),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
@@ -166,7 +168,7 @@ class Dashboard:
                     return ds.get("uid")
 
     def _create_gl_dashboard(self, loki_uid: str) -> GLDashboard:
-        
+
         gl_panels = []
         y_pos = 0
 
@@ -184,17 +186,17 @@ class Dashboard:
 
                 # Build the base query for simplified log setup
                 expr = '{service_name="' + panel.service.name + '"}'
-                
+
                 title = panel.service.name
 
                 if isinstance(panel, (LogsCountPlot, LogsTextSearch)):
                     title = panel.title
                     expr += f' |= "{panel.text}"'
-                
+
                 # All logs now use the same simplified format with proper Unicode characters
                 # With Drop_Single_Key On, the log line is just the MESSAGE content
                 # Add service name as prefix (timestamps are shown by Grafana UI)
-                #expr += ' | line_format "[{{.service_name}}] {{__line__}}"'
+                # expr += ' | line_format "[{{.service_name}}] {{__line__}}"'
                 # expr += ' | line_format "[{{.service_name}}] {{.MESSAGE}}"'
 
                 width = int(panel.width_fr * 24)
@@ -240,11 +242,7 @@ class Dashboard:
                         prettifyLogMessage=False,
                         timeFrom=panel.time_from,
                         timeShift=panel.time_shift,
-                        extraJson={
-                            "options": {
-                                "infiniteScrolling": True
-                            }
-                        },
+                        extraJson={"options": {"infiniteScrolling": True}},
                     )
                     gl_panels.append(logs_panel)
 
@@ -268,7 +266,7 @@ class Dashboard:
             time=Time("now-24h", "now"),
             timePicker=TimePicker(
                 refreshIntervals=["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h"],
-                timeOptions=["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"]
+                timeOptions=["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"],
             ),
             timezone="browser",
             version=20,

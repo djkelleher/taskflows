@@ -10,8 +10,11 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 from taskflows.admin.api import app
-from taskflows.admin.security import (SecurityConfig, calculate_hmac_signature,
-                                      generate_hmac_secret)
+from taskflows.admin.security import (
+    SecurityConfig,
+    calculate_hmac_signature,
+    generate_hmac_secret,
+)
 
 
 class TestAPIAuthentication(unittest.TestCase):
@@ -22,7 +25,7 @@ class TestAPIAuthentication(unittest.TestCase):
         """Set up test client and mock security config."""
         cls.client = TestClient(app)
         cls.hmac_secret = generate_hmac_secret()
-        
+
         # Mock security config
         cls.mock_security_config = SecurityConfig(
             enable_hmac=True,
@@ -34,9 +37,11 @@ class TestAPIAuthentication(unittest.TestCase):
             enable_security_headers=True,
             log_security_events=True,
         )
-        
+
         # Patch the security config
-        cls.patcher = patch("taskflows.admin.api.security_config", cls.mock_security_config)
+        cls.patcher = patch(
+            "taskflows.admin.api.security_config", cls.mock_security_config
+        )
         cls.patcher.start()
 
     @classmethod
@@ -80,7 +85,7 @@ class TestAPIAuthentication(unittest.TestCase):
             ("POST", "/remove", {"match": "test"}),
             ("GET", "/show/test"),
         ]
-        
+
         for method, endpoint, *body in endpoints:
             with self.subTest(endpoint=endpoint):
                 if method == "GET":
@@ -88,10 +93,18 @@ class TestAPIAuthentication(unittest.TestCase):
                 elif method == "POST":
                     response = self.client.post(endpoint, json=body[0] if body else {})
                 elif method == "DELETE":
-                    response = self.client.delete(endpoint, json=body[0] if body else {})
-                
-                self.assertEqual(response.status_code, 401, f"Endpoint {endpoint} should require auth")
-                self.assertIn("HMAC signature and timestamp required", response.json()["detail"])
+                    response = self.client.delete(
+                        endpoint, json=body[0] if body else {}
+                    )
+
+                self.assertEqual(
+                    response.status_code,
+                    401,
+                    f"Endpoint {endpoint} should require auth",
+                )
+                self.assertIn(
+                    "HMAC signature and timestamp required", response.json()["detail"]
+                )
 
     def test_endpoints_with_valid_auth_succeed(self):
         """Test that all endpoints work with valid authentication."""
@@ -102,24 +115,50 @@ class TestAPIAuthentication(unittest.TestCase):
                     with patch("taskflows.admin.api.get_tasks_db") as mock_db:
                         # Mock database
                         mock_table = MagicMock()
-                        mock_table.columns = [MagicMock(name="task_name"), MagicMock(name="started")]
+                        mock_table.columns = [
+                            MagicMock(name="task_name"),
+                            MagicMock(name="started"),
+                        ]
                         mock_db.return_value.task_runs_table = mock_table
-                        
+
                         with patch("taskflows.admin.api.engine.begin") as mock_engine:
                             mock_conn = MagicMock()
                             mock_conn.execute.return_value.fetchall.return_value = []
                             mock_engine.return_value.__enter__.return_value = mock_conn
-                            
-                            with patch("taskflows.admin.api.get_unit_files", return_value=[]):
-                                with patch("taskflows.admin.api.get_unit_file_states", return_value={}):
-                                    with patch("taskflows.admin.api.class_inst", return_value=[]):
-                                        with patch("taskflows.admin.api.reload_unit_files"):
-                                            with patch("taskflows.admin.api._start_service"):
-                                                with patch("taskflows.admin.api._stop_service"):
-                                                    with patch("taskflows.admin.api._restart_service"):
-                                                        with patch("taskflows.admin.api._enable_service"):
-                                                            with patch("taskflows.admin.api._disable_service"):
-                                                                with patch("taskflows.admin.api._remove_service", return_value=0):
+
+                            with patch(
+                                "taskflows.admin.api.get_unit_files", return_value=[]
+                            ):
+                                with patch(
+                                    "taskflows.admin.api.get_unit_file_states",
+                                    return_value={},
+                                ):
+                                    with patch(
+                                        "taskflows.admin.api.class_inst",
+                                        return_value=[],
+                                    ):
+                                        with patch(
+                                            "taskflows.admin.api.reload_unit_files"
+                                        ):
+                                            with patch(
+                                                "taskflows.admin.api._start_service"
+                                            ):
+                                                with patch(
+                                                    "taskflows.admin.api._stop_service"
+                                                ):
+                                                    with patch(
+                                                        "taskflows.admin.api._restart_service"
+                                                    ):
+                                                        with patch(
+                                                            "taskflows.admin.api._enable_service"
+                                                        ):
+                                                            with patch(
+                                                                "taskflows.admin.api._disable_service"
+                                                            ):
+                                                                with patch(
+                                                                    "taskflows.admin.api._remove_service",
+                                                                    return_value=0,
+                                                                ):
                                                                     self._test_all_endpoints_with_auth()
 
     def _test_all_endpoints_with_auth(self):
@@ -141,24 +180,31 @@ class TestAPIAuthentication(unittest.TestCase):
             ("POST", "/remove", {"match": "test"}, 200),
             ("GET", "/show/test", None, 200),
         ]
-        
+
         for method, endpoint, body, expected_status in test_cases:
             with self.subTest(endpoint=endpoint):
                 body_str = json.dumps(body) if body else ""
                 headers = self.generate_hmac_headers(body_str)
-                
+
                 if body:
                     headers["Content-Type"] = "application/json"
-                
+
                 if method == "GET":
                     response = self.client.get(endpoint, headers=headers)
                 elif method == "POST":
-                    response = self.client.post(endpoint, data=body_str, headers=headers)
+                    response = self.client.post(
+                        endpoint, data=body_str, headers=headers
+                    )
                 elif method == "DELETE":
-                    response = self.client.delete(endpoint, data=body_str, headers=headers)
-                
-                self.assertEqual(response.status_code, expected_status, 
-                               f"Endpoint {endpoint} failed with auth: {response.text}")
+                    response = self.client.delete(
+                        endpoint, data=body_str, headers=headers
+                    )
+
+                self.assertEqual(
+                    response.status_code,
+                    expected_status,
+                    f"Endpoint {endpoint} failed with auth: {response.text}",
+                )
 
     def test_invalid_hmac_signature_fails(self):
         """Test that invalid HMAC signatures are rejected."""
@@ -189,7 +235,9 @@ class TestAPIAuthentication(unittest.TestCase):
         }
         response = self.client.get("/list", headers=headers)
         self.assertEqual(response.status_code, 401)
-        self.assertIn("HMAC signature and timestamp required", response.json()["detail"])
+        self.assertIn(
+            "HMAC signature and timestamp required", response.json()["detail"]
+        )
 
     def test_missing_signature_fails(self):
         """Test that missing signature is rejected."""
@@ -198,7 +246,9 @@ class TestAPIAuthentication(unittest.TestCase):
         }
         response = self.client.get("/list", headers=headers)
         self.assertEqual(response.status_code, 401)
-        self.assertIn("HMAC signature and timestamp required", response.json()["detail"])
+        self.assertIn(
+            "HMAC signature and timestamp required", response.json()["detail"]
+        )
 
     def test_body_tampering_detected(self):
         """Test that body tampering is detected via HMAC."""
@@ -206,11 +256,11 @@ class TestAPIAuthentication(unittest.TestCase):
         body_str = json.dumps(original_body)
         headers = self.generate_hmac_headers(body_str)
         headers["Content-Type"] = "application/json"
-        
+
         # Send different body than what was signed
         tampered_body = {"match": "tampered"}
         tampered_str = json.dumps(tampered_body)
-        
+
         response = self.client.post("/start", data=tampered_str, headers=headers)
         self.assertEqual(response.status_code, 401)
         self.assertIn("Invalid HMAC signature", response.json()["detail"])
@@ -220,13 +270,13 @@ class TestAPIAuthentication(unittest.TestCase):
         # Test with query parameters (should fail without auth)
         response = self.client.post("/start?match=test")
         self.assertEqual(response.status_code, 401)
-        
+
         # Test with body parameters and auth
         body = {"match": "test"}
         body_str = json.dumps(body)
         headers = self.generate_hmac_headers(body_str)
         headers["Content-Type"] = "application/json"
-        
+
         with patch("taskflows.admin.api.get_unit_files", return_value=[]):
             with patch("taskflows.admin.api._start_service"):
                 response = self.client.post("/start", data=body_str, headers=headers)
@@ -236,7 +286,7 @@ class TestAPIAuthentication(unittest.TestCase):
         """Test that security headers are added to responses."""
         headers = self.generate_hmac_headers()
         response = self.client.get("/list", headers=headers)
-        
+
         expected_headers = {
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
@@ -244,10 +294,13 @@ class TestAPIAuthentication(unittest.TestCase):
             "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
             "Content-Security-Policy": "default-src 'self'",
         }
-        
+
         for header, value in expected_headers.items():
-            self.assertEqual(response.headers.get(header), value, 
-                           f"Security header {header} not set correctly")
+            self.assertEqual(
+                response.headers.get(header),
+                value,
+                f"Security header {header} not set correctly",
+            )
 
 
 if __name__ == "__main__":

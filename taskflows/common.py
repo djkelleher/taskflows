@@ -14,6 +14,7 @@ services_data_dir.mkdir(parents=True, exist_ok=True)
 
 systemd_dir = Path.home().joinpath(".config", "systemd", "user")
 
+
 class Config(BaseSettings):
     """S3 configuration. Variables will be loaded from environment variables if set."""
 
@@ -98,14 +99,10 @@ def load_service_files(files: List[Path]):
     srv_files = defaultdict(list)
     for file in files:
         file = Path(file)
-        srv_name = re.sub(
-            f"^(?:stop-)?{_SYSTEMD_FILE_PREFIX}", "", file.stem
+        srv_name = re.sub(f"^(?:stop-)?{_SYSTEMD_FILE_PREFIX}", "", file.stem)
+        srv_files[srv_name].append(
+            {"path": str(file), "content": file.read_text(), "name": file.name}
         )
-        srv_files[srv_name].append({
-            "path": str(file),
-            "content": file.read_text(),
-            "name": file.name
-        })
     return srv_files
 
 

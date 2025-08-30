@@ -30,6 +30,7 @@ async def test_on_task_start(monkeypatch, request, db):
     await task_logger.on_task_start()
     # Get table from module instead of class
     from taskflows.db import task_runs_table
+
     table = task_runs_table
     query = sa.select(table.c.task_name, table.c.started).where(
         table.c.task_name == task_logger.name
@@ -49,6 +50,7 @@ async def test_on_task_error(monkeypatch, request, db):
     await task_logger.on_task_error(error)
     # Get table from module instead of class
     from taskflows.db import task_errors_table
+
     table = task_errors_table
     query = sa.select(table).where(table.c.task_name == task_logger.name)
     async with engine.begin() as conn:
@@ -70,6 +72,7 @@ async def test_on_task_finish(monkeypatch, request, db):
     )
     # Get table from module instead of class
     from taskflows.db import task_runs_table
+
     table = task_runs_table
     query = sa.select(table).where(table.c.task_name == task_logger.name)
     async with engine.begin() as conn:

@@ -1,6 +1,7 @@
 """
 Simple test to verify the async database implementation works correctly.
 """
+
 import asyncio
 import os
 import tempfile
@@ -27,6 +28,7 @@ async def sample_async_task():
 def sample_sync_task():
     """Sample sync task running in async context with database logging."""
     import time
+
     time.sleep(0.1)  # Simulate sync work
     return "sync_result"
 

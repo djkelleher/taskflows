@@ -1,4 +1,3 @@
-
 import logging
 import traceback
 from contextlib import asynccontextmanager
@@ -49,6 +48,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown (if needed)
 
+
 app = FastAPI(title="Services Daemon API", lifespan=lifespan)
 
 
@@ -56,7 +56,11 @@ app = FastAPI(title="Services Daemon API", lifespan=lifespan)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     logger.error(
-        "Unhandled exception %s %s: %s%s", request.method, request.url.path, exc, f"\n{tb}" if tb else ""
+        "Unhandled exception %s %s: %s%s",
+        request.method,
+        request.url.path,
+        exc,
+        f"\n{tb}" if tb else "",
     )
     payload = {
         "detail": str(exc),
@@ -83,7 +87,6 @@ async def add_security_headers(request: Request, call_next):
         response.headers["Content-Security-Policy"] = "default-src 'self'"
         logger.debug(f"Security headers added to response for {request.url.path}")
     return response
-
 
 
 # HMAC validation middleware
@@ -170,14 +173,12 @@ async def list_services_endpoint(
     return await list_services(match=match, as_json=True)
 
 
-
 @app.get("/status")
 async def status_endpoint(
     match: Optional[str] = Query(None),
     running: bool = Query(False),
 ):
     return await status(match=match, running=running, as_json=True)
-
 
 
 @app.get("/logs/{service_name}")
@@ -188,13 +189,11 @@ async def logs_endpoint(
     return await logs(service_name=service_name, n_lines=n_lines, as_json=True)
 
 
-
 @app.get("/show/{match}")
 async def show_endpoint(
     match: str,
 ):
     return await show(match=match, as_json=True)
-
 
 
 @app.post("/create")
@@ -203,7 +202,10 @@ async def create_endpoint(
     include: Optional[str] = Body(None, embed=True),
     exclude: Optional[str] = Body(None, embed=True),
 ):
-    return await create(search_in=search_in, include=include, exclude=exclude, as_json=True)
+    return await create(
+        search_in=search_in, include=include, exclude=exclude, as_json=True
+    )
+
 
 @app.post("/start")
 async def start_endpoint(
@@ -212,6 +214,7 @@ async def start_endpoint(
     services: bool = Body(False, embed=True),
 ):
     return await start(match=match, timers=timers, services=services, as_json=True)
+
 
 @app.post("/stop")
 async def stop_endpoint(
@@ -237,6 +240,7 @@ async def enable_endpoint(
 ):
     return await enable(match=match, timers=timers, services=services, as_json=True)
 
+
 @app.post("/disable")
 async def disable_endpoint(
     match: str = Body(..., embed=True),
@@ -245,10 +249,10 @@ async def disable_endpoint(
 ):
     return await disable(match=match, timers=timers, services=services, as_json=True)
 
+
 @app.post("/remove")
 async def remove_endpoint(match: str = Body(..., embed=True)):
     return await remove(match=match, as_json=True)
-
 
 
 @click.command("start")
@@ -280,9 +284,9 @@ srv_api = Service(
     enabled=True,
 )
 
+
 def start_api_srv():
     if not srv_api.exists:
         logger.info("Creating and starting srv-api service")
         srv_api.create()
     srv_api.start()
-

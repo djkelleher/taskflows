@@ -1,4 +1,3 @@
-
 import json
 import socket
 from collections import defaultdict
@@ -47,14 +46,16 @@ from .security import load_security_config, security_config
 
 HOSTNAME = socket.gethostname()
 
+
 def with_hostname(data: dict) -> dict:
     logger.debug(f"with_hostname called: {data}")
     return {**data, "hostname": HOSTNAME}
 
 
-def get_unit_files(unit_type: Optional[Literal["service", "timer"]] = None,
+def get_unit_files(
+    unit_type: Optional[Literal["service", "timer"]] = None,
     match: Optional[str] = None,
-    states: Optional[str | Sequence[str]] = None
+    states: Optional[str | Sequence[str]] = None,
 ):
     # don't alter internal services
     protected_units = {"taskflows-srv-api", "stop-taskflows-srv-api"}
@@ -65,6 +66,7 @@ def get_unit_files(unit_type: Optional[Literal["service", "timer"]] = None,
         if stem not in protected_units:
             kept.append(f)
     return kept
+
 
 def health_check(host: Optional[str] = None) -> StatusIndicator:
     """Call the /health endpoint and return a StatusIndicator component.
@@ -84,7 +86,7 @@ def health_check(host: Optional[str] = None) -> StatusIndicator:
         return StatusIndicator("Service Healthy", color="green")
     else:
         return StatusIndicator("Service Unhealthy", color="red")
-    
+
 
 async def list_servers() -> Table:
     """list servers.
@@ -109,7 +111,10 @@ async def list_servers() -> Table:
 
 
 async def task_history(
-    host: Optional[str] = None, limit: int = 3, match: Optional[str] = None, as_json: bool = False
+    host: Optional[str] = None,
+    limit: int = 3,
+    match: Optional[str] = None,
+    as_json: bool = False,
 ) -> Table:
     """Call the /history endpoint and return a Table component.
 
@@ -128,7 +133,9 @@ async def task_history(
         task_names_query = sa.select(table.c.task_name).distinct()
 
         if match:
-            task_names_query = task_names_query.where(table.c.task_name.like(f"%{match}%"))
+            task_names_query = task_names_query.where(
+                table.c.task_name.like(f"%{match}%")
+            )
 
         query = (
             sa.select(table)
@@ -161,7 +168,7 @@ async def task_history(
 
     if as_json:
         return data
-    
+
     if "error" in data:
         return Table([{"Error": data["error"]}], title="Task History - Error")
 
@@ -174,7 +181,6 @@ async def task_history(
         return Table([], title=f"{title} (None)")
 
     return Table(history, title=title)
-
 
 
 async def list_services(
@@ -207,7 +213,7 @@ async def list_services(
 
     if as_json:
         return data
-    
+
     if "error" in data:
         return Table([{"Error": data["error"]}], title="Service List - Error")
 
@@ -224,9 +230,11 @@ async def list_services(
     return Table(service_rows, title=f"{title} ({len(services)})")
 
 
-
 async def status(
-    host: Optional[str] = None, match: Optional[str] = None, running: bool = False, as_json: bool = False
+    host: Optional[str] = None,
+    match: Optional[str] = None,
+    running: bool = False,
+    as_json: bool = False,
 ) -> Table:
     """Call the /status endpoint and return a Table component.
 
@@ -384,7 +392,7 @@ async def status(
             result.append(output_row)
         logger.debug(f"status returning {len(result)} rows")
         data = with_hostname({"status": result})
-        
+
     else:
         # Call via API
         params = {"running": running}
@@ -411,7 +419,10 @@ async def status(
 
 
 async def logs(
-    host: Optional[str] = None, service_name: Optional[str] = None, n_lines: Optional[int] = None, as_json: bool = False
+    host: Optional[str] = None,
+    service_name: Optional[str] = None,
+    n_lines: Optional[int] = None,
+    as_json: bool = False,
 ) -> CodeBlock:
     """Call the /logs/{service_name} endpoint and return a CodeBlock component.
 
@@ -436,11 +447,13 @@ async def logs(
     else:
         # Call via API
         params = {"n_lines": n_lines} if n_lines else {}
-        data = call_api(host, f"/logs/{service_name}", method="GET", timeout=30, params=params)
-    
+        data = call_api(
+            host, f"/logs/{service_name}", method="GET", timeout=30, params=params
+        )
+
     if as_json:
         return data
-    
+
     if "error" in data:
         return CodeBlock(f"Error fetching logs: {data['error']}", language="text")
 
@@ -448,7 +461,9 @@ async def logs(
     return CodeBlock(logs_content, language="text", show_line_numbers=False)
 
 
-async def show(host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False) -> Table:
+async def show(
+    host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False
+) -> Table:
     """Call the /show/{match} endpoint and return a Table component.
 
     Args:
@@ -475,10 +490,10 @@ async def show(host: Optional[str] = None, match: Optional[str] = None, as_json:
     else:
         # Call via API
         data = call_api(host, f"/show/{match}", method="GET", timeout=30)
-    
+
     if as_json:
         return data
-    
+
     if "error" in data:
         return Table(
             [{"Error": data["error"]}], title=f"Service Files for '{match}' - Error"
@@ -510,7 +525,7 @@ async def create(
     search_in: Optional[str] = None,
     include: Optional[str] = None,
     exclude: Optional[str] = None,
-    as_json: bool = False
+    as_json: bool = False,
 ) -> Table:
     """Call the /create endpoint and return a Table component.
 
@@ -552,10 +567,14 @@ async def create(
         print(f"Total services: {len(services)}")
         if include:
             services = [s for s in services if fnmatchcase(name=s.name, pat=include)]
-            dashboards = [d for d in dashboards if fnmatchcase(name=d.title, pat=include)]
+            dashboards = [
+                d for d in dashboards if fnmatchcase(name=d.title, pat=include)
+            ]
 
         if exclude:
-            services = [s for s in services if not fnmatchcase(name=s.name, pat=exclude)]
+            services = [
+                s for s in services if not fnmatchcase(name=s.name, pat=exclude)
+            ]
             dashboards = [
                 d for d in dashboards if not fnmatchcase(name=d.title, pat=exclude)
             ]
@@ -583,10 +602,10 @@ async def create(
         if exclude:
             data["exclude"] = exclude
         result = call_api(host, "/create", method="POST", json_data=data, timeout=30)
-    
+
     if as_json:
         return result
-    
+
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Create - Error")
 
@@ -606,7 +625,7 @@ async def start(
     match: Optional[str] = None,
     timers: bool = False,
     services: bool = False,
-    as_json: bool = False
+    as_json: bool = False,
 ) -> Table:
     """Call the /start endpoint and return a Table component.
 
@@ -643,10 +662,10 @@ async def start(
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
         result = call_api(host, "/start", method="POST", json_data=data, timeout=30)
-    
+
     if as_json:
         return result
-    
+
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Start - Error")
 
@@ -660,7 +679,7 @@ async def stop(
     match: Optional[str] = None,
     timers: bool = False,
     services: bool = False,
-    as_json: bool = False
+    as_json: bool = False,
 ) -> Table:
     """Call the /stop endpoint and return a Table component.
 
@@ -697,10 +716,10 @@ async def stop(
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
         result = call_api(host, "/stop", method="POST", json_data=data, timeout=30)
-    
+
     if as_json:
         return result
-    
+
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Stop - Error")
 
@@ -709,7 +728,9 @@ async def stop(
     return Table(rows, title=f"Stopped Items ({len(rows)})")
 
 
-async def restart(host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False) -> Table:
+async def restart(
+    host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False
+) -> Table:
     """Call the /restart endpoint and return a Table component.
 
     Args:
@@ -737,10 +758,10 @@ async def restart(host: Optional[str] = None, match: Optional[str] = None, as_js
         # Call via API
         data = {"match": match}
         result = call_api(host, "/restart", method="POST", json_data=data, timeout=30)
-    
+
     if as_json:
         return result
-    
+
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Restart - Error")
 
@@ -749,7 +770,9 @@ async def restart(host: Optional[str] = None, match: Optional[str] = None, as_js
     return Table(rows, title=f"Restarted Items ({len(rows)})")
 
 
-async def remove(host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False) -> Table:
+async def remove(
+    host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False
+) -> Table:
     """Call the /remove endpoint and return a Table component.
 
     Args:
@@ -780,10 +803,10 @@ async def remove(host: Optional[str] = None, match: Optional[str] = None, as_jso
         # Call via API
         data = {"match": match}
         result = call_api(host, "/remove", method="POST", json_data=data, timeout=30)
-    
+
     if as_json:
         return result
-    
+
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Remove - Error")
 
@@ -797,7 +820,7 @@ async def disable(
     match: Optional[str] = None,
     timers: bool = False,
     services: bool = False,
-    as_json: bool = False
+    as_json: bool = False,
 ) -> Table:
     """Call the /disable endpoint and return a Table component.
 
@@ -836,10 +859,10 @@ async def disable(
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
         result = call_api(host, "/disable", method="POST", json_data=data, timeout=30)
-    
+
     if as_json:
         return result
-    
+
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Disable - Error")
 
@@ -847,12 +870,13 @@ async def disable(
     rows = [{"Disabled": item} for item in disabled]
     return Table(rows, title=f"Disabled Items ({len(rows)})")
 
+
 async def enable(
     host: Optional[str] = None,
     match: Optional[str] = None,
     timers: bool = False,
     services: bool = False,
-    as_json: bool = False
+    as_json: bool = False,
 ) -> Table:
     """Call the /enable endpoint and return a Table component.
 
@@ -889,16 +913,17 @@ async def enable(
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
         result = call_api(host, "/enable", method="POST", json_data=data, timeout=30)
-    
+
     if as_json:
         return result
-    
+
     if "error" in result:
         return Table([{"Error": result["error"]}], title="Enable - Error")
 
     enabled = result.get("enabled", [])
     rows = [{"Enabled": item} for item in enabled]
     return Table(rows, title=f"Enabled Items ({len(rows)})")
+
 
 @cache
 def get_public_ipv4() -> Optional[str]:
@@ -929,14 +954,12 @@ def get_public_ipv4() -> Optional[str]:
     logger.warning("get_public_ipv4: Failed to determine public IPv4 address")
     return None
 
-    
-
 
 async def upsert_server(
     hostname: Optional[str] = None, public_ipv4: Optional[str] = None
 ) -> None:
     """Upsert server information to the database.
-    
+
     Args:
         hostname: Server hostname, defaults to current machine hostname
         public_ipv4: Server public IP, defaults to detected IP
@@ -954,7 +977,6 @@ async def upsert_server(
         last_updated=datetime.now(timezone.utc),
     )
     logger.info(f"Updated server info: hostname={hostname}, public_ipv4={public_ipv4}")
-
 
 
 async def execute_command_on_servers(
@@ -1049,14 +1071,19 @@ async def execute_command_on_servers(
 
 
 def call_api(
-    server, endpoint: str, method: str = "get", params=None, json_data=None, timeout: int = 10
+    server,
+    endpoint: str,
+    method: str = "get",
+    params=None,
+    json_data=None,
+    timeout: int = 10,
 ) -> dict:
     method = method.lower()
     if isinstance(server, dict):
         server = server["address"]
     if not server.startswith("http"):
         server = f"http://{server}"
-    url = server.rstrip("/")+endpoint
+    url = server.rstrip("/") + endpoint
     logger.info(f"{method.upper()} {url} params={params} json_data={json_data}")
 
     def build_headers(cfg) -> Dict[str, str]:
@@ -1104,17 +1131,30 @@ def call_api(
             MAX_TB_LINES = 40
             try:
                 data = resp.json()
-                if isinstance(data, dict) and "traceback" in data and isinstance(data["traceback"], str):
+                if (
+                    isinstance(data, dict)
+                    and "traceback" in data
+                    and isinstance(data["traceback"], str)
+                ):
                     lines = data["traceback"].splitlines()
                     if len(lines) > MAX_TB_LINES:
-                        data["traceback"] = "\n".join(lines[:MAX_TB_LINES]) + f"\n... truncated {len(lines) - MAX_TB_LINES} lines ..."
+                        data["traceback"] = (
+                            "\n".join(lines[:MAX_TB_LINES])
+                            + f"\n... truncated {len(lines) - MAX_TB_LINES} lines ..."
+                        )
                 text = json.dumps(data, indent=2, ensure_ascii=False)
                 if len(text) > MAX_TOTAL:
-                    text = text[:MAX_TOTAL] + f"\n... truncated {len(text) - MAX_TOTAL} chars ..."
+                    text = (
+                        text[:MAX_TOTAL]
+                        + f"\n... truncated {len(text) - MAX_TOTAL} chars ..."
+                    )
             except Exception:
                 text = resp.text or ""
                 if len(text) > MAX_TOTAL:
-                    return text[:MAX_TOTAL] + f"\n... truncated {len(text) - MAX_TOTAL} chars ..."
+                    return (
+                        text[:MAX_TOTAL]
+                        + f"\n... truncated {len(text) - MAX_TOTAL} chars ..."
+                    )
             logger.error(
                 "HTTPError status=%s url=%s error=%s\nResponse body:\n%s",
                 getattr(resp, "status_code", None),
@@ -1122,7 +1162,9 @@ def call_api(
                 he,
                 text,
             )
-            status_code = getattr(resp, 'status_code', None) if 'resp' in locals() else None
+            status_code = (
+                getattr(resp, "status_code", None) if "resp" in locals() else None
+            )
             return {
                 "error": str(he),
                 "status_code": status_code,

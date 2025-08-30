@@ -107,7 +107,9 @@ class TasksDB:
             async with engine.begin() as conn:
                 # Check if schema exists
                 result = await conn.run_sync(
-                    lambda sync_conn: sync_conn.dialect.has_schema(sync_conn, schema_name)
+                    lambda sync_conn: sync_conn.dialect.has_schema(
+                        sync_conn, schema_name
+                    )
                 )
                 if not result:
                     logger.info("Creating schema '%s'", schema_name)
@@ -140,17 +142,17 @@ class TasksDB:
             await conn.execute(statement)
 
 
+_tasks_db = None
 
-_tasks_db = None 
 
 async def get_tasks_db():
     """
     Get a synchronous TasksDB instance (compatibility wrapper).
-    
+
     This is a synchronous wrapper that can be used in contexts where
     async/await is not available. Note that this requires the async
     database to have been initialized already.
-    
+
     :return: A TasksDB instance.
     """
     global _tasks_db

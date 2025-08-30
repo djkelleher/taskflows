@@ -263,10 +263,10 @@ async def run_command(command_string: str, user_id: str = "") -> str:
         servers = await list_servers()
         if not servers:
             servers = None  # Will use default localhost:7777
-        
+
         # Execute command and handle the new return type Dict[str, MsgComp]
         return await execute_command_on_servers(command, servers=servers, **kwargs)
-     
+
     except Exception as e:
         logger.error(f"Error executing command '{command_string}': {e}")
         return f"❌ Error executing command: {str(e)}"

@@ -1,4 +1,3 @@
-
 from functools import lru_cache
 from itertools import cycle
 from typing import Optional
@@ -18,6 +17,7 @@ from .security import (
 )
 
 cli = Group("admin")
+
 
 @cli.group
 def api():
@@ -110,6 +110,7 @@ def security_status():
     )
     click.echo(f"  Config file: {config_file}")
 
+
 @cli.command
 @click.option(
     "-l",
@@ -178,7 +179,9 @@ async def list_services(match: Optional[str] = None, server: tuple = ()):
     help="Server(s) to query. Can be specified multiple times. If not specified, queries all registered servers.",
 )
 @async_entrypoint(blocking=True)
-async def status(match: Optional[str] = None, running: bool = False, server: tuple = ()):
+async def status(
+    match: Optional[str] = None, running: bool = False, server: tuple = ()
+):
     """Show status of services from specified servers."""
     kwargs = {}
     if match:

@@ -18,9 +18,10 @@ TaskEvent = Literal["start", "error", "finish"]
 
 class _RuntimeManager:
     """Singleton manager for the async runtime and blocking portal."""
+
     _instance = None
     _lock = threading.Lock()
-    
+
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
@@ -28,13 +29,13 @@ class _RuntimeManager:
                     cls._instance = super().__new__(cls)
                     cls._instance._initialized = False
         return cls._instance
-    
+
     def __init__(self):
         if not self._initialized:
             self._portal: Optional[BlockingPortal] = None
             self._thread: Optional[threading.Thread] = None
             self._initialized = True
-    
+
     def get_portal(self) -> BlockingPortal:
         """Get or create the blocking portal for running async code from sync context."""
         if self._portal is None or not self._thread.is_alive():
@@ -42,25 +43,25 @@ class _RuntimeManager:
                 if self._portal is None or not self._thread.is_alive():
                     self._start_runtime()
         return self._portal
-    
+
     def _start_runtime(self):
         """Start the async runtime in a background thread."""
         portal_holder = {}
         ready_event = threading.Event()
-        
+
         def run_async_runtime():
             async def main():
                 async with anyio.from_thread.BlockingPortal() as portal:
-                    portal_holder['portal'] = portal
+                    portal_holder["portal"] = portal
                     ready_event.set()
                     await portal.sleep_until_stopped()
-            
-            anyio.run(main, backend='asyncio')
-        
+
+            anyio.run(main, backend="asyncio")
+
         self._thread = threading.Thread(target=run_async_runtime, daemon=True)
         self._thread.start()
         ready_event.wait(timeout=5)
-        self._portal = portal_holder.get('portal')
+        self._portal = portal_holder.get("portal")
         if not self._portal:
             raise RuntimeError("Failed to initialize async runtime")
 
@@ -111,10 +112,10 @@ class TaskLogger:
         self.error_msg_max_length = error_msg_max_length
         self.errors = []
         self.db = None
-        
+
         if self.db_record:
             self.db = await get_tasks_db()
-        
+
         return self
 
     async def on_task_start(self):
@@ -225,7 +226,7 @@ class TaskLogger:
                     level=(ContentType.IMPORTANT if success else ContentType.ERROR),
                 )
             ]
-            
+
             if return_value is not None:
                 components.append(
                     Text(
@@ -234,7 +235,7 @@ class TaskLogger:
                         level=ContentType.IMPORTANT,
                     )
                 )
-            
+
             if self.errors:
                 components.append(
                     Text(
@@ -253,7 +254,7 @@ class TaskLogger:
                             max_length=self.error_msg_max_length,
                         )
                     )
-            
+
             await send_alert(content=components, send_to=send_to)
 
         # if there were any errors and the task is required, raise an error
@@ -309,19 +310,22 @@ async def _async_task_wrapper(
             # Check if function is async
             if asyncio.iscoroutinefunction(func):
                 if timeout:
-                    result = await asyncio.wait_for(func(*args, **kwargs), timeout=timeout)
+                    result = await asyncio.wait_for(
+                        func(*args, **kwargs), timeout=timeout
+                    )
                 else:
                     result = await func(*args, **kwargs)
             else:
                 # For sync functions, run them in a thread pool
                 if timeout:
                     result = await asyncio.wait_for(
-                        asyncio.to_thread(func, *args, **kwargs), 
-                        timeout=timeout
+                        asyncio.to_thread(func, *args, **kwargs), timeout=timeout
                     )
                 else:
                     result = await asyncio.to_thread(func, *args, **kwargs)
-            await task_logger.on_task_finish(success=True, retries=i, return_value=result)
+            await task_logger.on_task_finish(
+                success=True, retries=i, return_value=result
+            )
             return result
         except Exception as exp:
             msg = f"Error executing task {task_logger.name}. Retries remaining: {retries-i}.\n({type(exp)}) -- {exp}"
@@ -355,7 +359,7 @@ async def run_task(
         alerts (Optional[Sequence[Alerts]], optional): Alert configurations / destinations.
         logger (Optional[Logger], optional): Logger to use for error logging.
         **kwargs: Keyword arguments to pass to the function.
-    
+
     Returns:
         The result of the function execution.
     """
@@ -364,7 +368,7 @@ async def run_task(
         if not isinstance(alerts, (list, tuple)):
             alerts = [alerts]
         alerts = [a if isinstance(a, Alerts) else Alerts(send_to=a) for a in alerts]
-    
+
     task_logger = await TaskLogger.create(
         name=name or func.__name__,
         required=required,
@@ -410,7 +414,7 @@ def task(
     def task_decorator(func):
         # Check if the function is async
         is_async = asyncio.iscoroutinefunction(func)
-        
+
         async def async_wrapper(*args, **kwargs):
             task_logger = await TaskLogger.create(
                 name=name or func.__name__,
@@ -427,7 +431,7 @@ def task(
                 *args,
                 **kwargs,
             )
-        
+
         def sync_wrapper(*args, **kwargs):
             # Smart wrapper that works with uvloop and existing event loops
             try:
@@ -439,8 +443,8 @@ def task(
                 # No running loop, use the portal
                 portal = _runtime_manager.get_portal()
                 return portal.call(async_wrapper, *args, **kwargs)
-        
+
         # Return the appropriate wrapper based on whether the function is async
         return async_wrapper if is_async else sync_wrapper
 
-    return task_decorator 
+    return task_decorator

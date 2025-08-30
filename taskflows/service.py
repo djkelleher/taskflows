@@ -45,7 +45,7 @@ class ServiceRegistry:
     @property
     def services(self):
         return list(self._services.values())
-    
+
     def create(self):
         for s in self.services:
             s.create()
@@ -148,7 +148,11 @@ class Venv:
     @abstractmethod
     def create_env_command(self, command: str) -> str:
         home = Path.home()
-        exes = (home.joinpath("mambaforge", "bin", "mamba"), home.joinpath("miniforge3", "bin", "mamba"), home.joinpath("miniconda3", "condabin", "conda"))
+        exes = (
+            home.joinpath("mambaforge", "bin", "mamba"),
+            home.joinpath("miniforge3", "bin", "mamba"),
+            home.joinpath("miniconda3", "condabin", "conda"),
+        )
         for exe in exes:
             if exe.is_file():
                 # Use stdbuf to force line buffering on stdout and stderr and ensure
@@ -240,15 +244,17 @@ class Service:
     def __post_init__(self):
         self._pkl_funcs = []
         self.env = self.env or {}
-        self.env['PYTHONUNBUFFERED'] = "1"
+        self.env["PYTHONUNBUFFERED"] = "1"
         # Handle Docker container environments
         if isinstance(self.environment, DockerContainer):
             """Setup Docker-specific service configuration."""
             container = self.environment
-            
+
             # Sync names between service and container
             if not container.name and not self.name:
-                raise ValueError("Either service name or container name must be provided")
+                raise ValueError(
+                    "Either service name or container name must be provided"
+                )
             elif not container.name:
                 container.name = self.name
             elif not self.name:
@@ -259,7 +265,7 @@ class Service:
             services_volume = Volume(
                 host_path=services_data_dir,
                 container_path=str(services_data_dir),  # Same path in container
-                read_only=True
+                read_only=True,
             )
             # Add to container volumes
             if container.volumes is None:
@@ -268,7 +274,7 @@ class Service:
                 container.volumes = [container.volumes, services_volume]
             else:
                 container.volumes = list(container.volumes) + [services_volume]
-            
+
             logger.info("Using name '%s' for service and container", self.name)
             # TODO check for callable start command.
             if container.persisted:
@@ -286,7 +292,7 @@ class Service:
                 # Set up Docker-specific systemd entries
                 self.slice = f"{self.name}.slice"
             else:
-                #Setup for Docker run service (ephemeral container).
+                # Setup for Docker run service (ephemeral container).
                 self.start_command = f"_run_docker_service {self.name}"
                 self.stop_command = f"docker stop {self.name}"
                 self.restart_command = f"docker restart {self.name}"
@@ -298,7 +304,7 @@ class Service:
             raise ValueError("Service name is required")
         if not self.start_command:
             raise ValueError("Service start_command is required")
-        
+
         for attr in ("start_command", "stop_command", "restart_command"):
             if cmd := getattr(self, attr):
                 if not isinstance(cmd, str):
@@ -383,10 +389,10 @@ class Service:
             )
             self.unit_entries.update(rp.unit_entries)
             self.service_entries.update(rp.service_entries)
-        
+
         # Add Docker-specific service entries if using Docker environment
         if isinstance(self.environment, DockerContainer):
-            #if self.environment.persisted:
+            # if self.environment.persisted:
             # Docker start service entries
             self.service_entries.add(f"Slice={self.slice}")
             # Let docker handle the signal
@@ -438,7 +444,6 @@ class Service:
     def exists(self) -> bool:
         return all(os.path.exists(f) for f in self.unit_files)
 
-
     def start(self):
         """Start this service."""
         _start_service(self.unit_files)
@@ -487,9 +492,9 @@ class Service:
                 container.create(cgroup_parent=self.slice)
             else:
                 # For run services, pickle the service for later use
-                services_data_dir.joinpath(f"{self.name}#_docker_run_srv.pickle").write_bytes(
-                    cloudpickle.dumps(self)
-                )
+                services_data_dir.joinpath(
+                    f"{self.name}#_docker_run_srv.pickle"
+                ).write_bytes(cloudpickle.dumps(self))
 
         self.enable(timers_only=not self.enabled)
         # Start timers now
@@ -499,7 +504,7 @@ class Service:
 
     def logs(self):
         return service_logs(self.name)
-    
+
     def show_files(self):
         pprint(dict(load_service_files(self.unit_files)))
 
@@ -534,7 +539,9 @@ class Service:
         if self.stop_schedule:
             service = [f"ExecStart=systemctl --user stop {os.path.basename(srv_file)}"]
             # Pass unit entries to stop service as well to maintain consistency
-            self._write_service_file(unit=self.unit_entries, service=service, is_stop_unit=True)
+            self._write_service_file(
+                unit=self.unit_entries, service=service, is_stop_unit=True
+            )
 
     @property
     def base_file_stem(self) -> str:
@@ -554,13 +561,13 @@ class Service:
         else:
             description = self.description or f"Service for {self.name}"
         content.append(f"Description={description}")
-        
+
         # Add any additional unit entries
         if unit:
             # Convert set to list if needed
             unit_list = list(unit) if isinstance(unit, set) else unit
             content.extend(unit_list)
-        
+
         # Convert service set to list if needed
         service_list = list(service) if isinstance(service, set) else service
         content += [
@@ -605,17 +612,17 @@ class Service:
             meta["schedule"] = self.start_schedule
         meta = ", ".join(f"{k}={v}" for k, v in meta.items())
         return f"{self.__class__.__name__}({meta})"
-    
+
 
 def service_logs(service_name: str, n_lines: int = 1000):
     """Get logs command data for a service.
-    
+
     This function returns the journalctl command that would be used to view logs
     for the specified service.
-    
+
     Args:
         service_name (str): The name of the service to show logs for.
-    
+
     Returns:
         dict: Dictionary containing the service name and journalctl command.
     """
@@ -624,13 +631,14 @@ def service_logs(service_name: str, n_lines: int = 1000):
         "--user",
         "-u",
         f"{_SYSTEMD_FILE_PREFIX}{service_name}",
-        "-n", str(n_lines)  # Return only the latest log lines
+        "-n",
+        str(n_lines),  # Return only the latest log lines
     ]
     result = subprocess.run(
         cmd,
         capture_output=True,  # capture stdout & stderr
-        text=True,            # decode to str instead of bytes
-        check=True            # raise CalledProcessError on non-zero exit
+        text=True,  # decode to str instead of bytes
+        check=True,  # raise CalledProcessError on non-zero exit
     )
     txt = []
     if result.stderr:
@@ -638,7 +646,6 @@ def service_logs(service_name: str, n_lines: int = 1000):
     if result.stdout:
         txt.append(result.stdout)
     return "\n\n".join(txt).strip()
-
 
 
 @cache
@@ -892,7 +899,9 @@ def _remove_service(service_files: Sequence[str], timer_files: Sequence[str]):
 
     service_files = valid_file_paths(service_files)
     timer_files = valid_file_paths(timer_files)
-    logger.info("Removing %i services and %i timers", len(service_files), len(timer_files))
+    logger.info(
+        "Removing %i services and %i timers", len(service_files), len(timer_files)
+    )
     files = service_files + timer_files
     _stop_service(files)
     _disable_service(files)
@@ -917,5 +926,9 @@ def _remove_service(service_files: Sequence[str], timer_files: Sequence[str]):
     for file in files:
         logger.info("Deleting %s", file)
         file.unlink()
-    logger.info("Finished removing %i services and %i timers", len(service_files), len(timer_files))
+    logger.info(
+        "Finished removing %i services and %i timers",
+        len(service_files),
+        len(timer_files),
+    )
     reload_unit_files()
