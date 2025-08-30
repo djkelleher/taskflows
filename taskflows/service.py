@@ -7,16 +7,20 @@ from datetime import datetime
 from functools import cache
 from pathlib import Path
 from pprint import pformat, pprint
-from typing import (Callable, Dict, List, Literal, Optional, Sequence, Set,
-                    Union)
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Set, Union
 
 import cloudpickle
 import dbus
 from pydantic.dataclasses import dataclass as pdataclass
 
-from .common import (_SYSTEMD_FILE_PREFIX, extract_service_name,
-                     load_service_files, logger, services_data_dir,
-                     systemd_dir)
+from .common import (
+    _SYSTEMD_FILE_PREFIX,
+    extract_service_name,
+    load_service_files,
+    logger,
+    services_data_dir,
+    systemd_dir,
+)
 from .constraints import *
 from .docker import *
 from .exec import PickledFunction
@@ -249,8 +253,24 @@ class Service:
                 container.name = self.name
             elif not self.name:
                 self.name = container.name
+
+            # Mount the same directory path in container as on host
+            # This simplifies the setup and ensures consistency
+            services_volume = Volume(
+                host_path=services_data_dir,
+                container_path=str(services_data_dir),  # Same path in container
+                read_only=True
+            )
+            # Add to container volumes
+            if container.volumes is None:
+                container.volumes = [services_volume]
+            elif isinstance(container.volumes, Volume):
+                container.volumes = [container.volumes, services_volume]
+            else:
+                container.volumes = list(container.volumes) + [services_volume]
             
             logger.info("Using name '%s' for service and container", self.name)
+            # TODO check for callable start command.
             if container.persisted:
                 # this is a persistent container, started wiht 'docker start'
                 # Handle restart policy migration from container to systemd

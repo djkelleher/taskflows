@@ -3,16 +3,15 @@ from collections import defaultdict
 from pathlib import Path
 from typing import List, Optional
 
-from loguru import logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from textdistance import lcsseq
 
 # _SYSTEMD_FILE_PREFIX = "taskflows-"
 _SYSTEMD_FILE_PREFIX = "taskflows-"
 
-
-services_data_dir = Path.home() / ".taskflows"
+services_data_dir = Path("/opt/taskflows/data")
 services_data_dir.mkdir(parents=True, exist_ok=True)
+
 systemd_dir = Path.home().joinpath(".config", "systemd", "user")
 
 class Config(BaseSettings):

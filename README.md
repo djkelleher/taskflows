@@ -3,9 +3,13 @@
 ## TODO
 loki preset log archive/retention.
 fix loki log json encoding
-API functions to free functions and support local host with no API
+API functions to free functions and support lorcal host with no API
 distributed -- queue, service templates?
+dbus cli fallback
 
+review the current service function serializarion. it doesn't currently work on docker becaude the serialized file needs to be mounted to docker container. can we set this up to automatically mount the volume? also review the whole process to see if there are ways we can make it simpler/more robust. look at exec.py and other files
+
+####
 
 taskflows is a Python library that provides robust task management, scheduling, and alerting capabilities. It allows you to convert regular functions into managed tasks with logging, alerts, retries, and more. taskflows also supports creating system services that run on specified schedules with flexible constraints.
 

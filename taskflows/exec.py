@@ -69,6 +69,6 @@ def _run_docker_service(name: str):
     path = services_data_dir / f"{name}#_docker_run_srv.pickle"
     logger.info("Loading service from %s", path)
     service = cloudpickle.loads(path.read_bytes())
-    container = service.container
+    container = service.environment
     logger.info("Running docker container %s", container.name)
     container.run()

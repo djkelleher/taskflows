@@ -21,6 +21,8 @@ class LogsPanelConfig(BaseModel):
     width_fr: Optional[float] = (
         None  # Fraction of the width (e.g., 0.5 for half-width, 1.0 for full-width)
     )
+    time_from: Optional[str] = None  # e.g., "now-1h", "now-7d", "now-30m"
+    time_shift: Optional[str] = None  # e.g., "1d" to compare with yesterday
 
     @property
     def height_no(self) -> int:
@@ -211,6 +213,8 @@ class Dashboard:
                         ],
                         gridPos=GridPos(h=panel.height_no, w=width, x=x_pos, y=y_pos),
                         dataSource=loki_uid,
+                        timeFrom=panel.time_from,
+                        timeShift=panel.time_shift,
                     )
                     gl_panels.append(graph_panel)
                 else:
@@ -234,6 +238,8 @@ class Dashboard:
                         dedupStrategy="none",
                         enableLogDetails=True,
                         prettifyLogMessage=False,
+                        timeFrom=panel.time_from,
+                        timeShift=panel.time_shift,
                         extraJson={
                             "options": {
                                 "infiniteScrolling": True
