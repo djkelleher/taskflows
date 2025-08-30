@@ -282,7 +282,7 @@ srv_api = Service(
 
 def start_api_srv():
     if not srv_api.exists:
-        logging.info("Creating and starting srv-api service")
+        logger.info("Creating and starting srv-api service")
         srv_api.create()
     srv_api.start()
 

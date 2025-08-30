@@ -11,8 +11,7 @@ from slack_bolt import Ack, App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk.errors import SlackApiError
 
-from taskflows.admin.api import execute_command_on_servers
-from taskflows.admin.core import list_servers
+from taskflows.admin.core import execute_command_on_servers, list_servers
 from taskflows.common import logger  # noqa: F401 (keep single import)
 
 # list_servers function removed - all Slack functions are now async
@@ -217,7 +216,7 @@ async def run_command(command_string: str, user_id: str = "") -> str:
         command = args[0]
 
         # Map command args to kwargs based on command type
-        kwargs = {"format_for_slack": True}
+        kwargs = {"as_json": False}  # We want formatted output for Slack
 
         if command == "history":
             # Parse limit if provided
@@ -264,7 +263,10 @@ async def run_command(command_string: str, user_id: str = "") -> str:
         servers = await list_servers()
         if not servers:
             servers = None  # Will use default localhost:7777
-        return execute_command_on_servers(command, servers=servers, **kwargs)
+        
+        # Execute command and handle the new return type Dict[str, MsgComp]
+        return await execute_command_on_servers(command, servers=servers, **kwargs)
+     
     except Exception as e:
         logger.error(f"Error executing command '{command_string}': {e}")
         return f"❌ Error executing command: {str(e)}"
@@ -1043,21 +1045,21 @@ async def create_service_selection_modal(action_type: str) -> dict:
 
 
 @app.action("start_service_modal")
-def handle_start_service_modal(ack, body, client):
+async def handle_start_service_modal(ack, body, client):
     """Show modal for starting a service."""
     ack()
 
-    modal = create_service_selection_modal("start")
+    modal = await create_service_selection_modal("start")
 
     client.views_open(trigger_id=body["trigger_id"], view=modal)
 
 
 @app.action("stop_service_modal")
-def handle_stop_service_modal(ack, body, client):
+async def handle_stop_service_modal(ack, body, client):
     """Show modal for stopping a service."""
     ack()
 
-    modal = create_service_selection_modal("stop")
+    modal = await create_service_selection_modal("stop")
 
     client.views_open(trigger_id=body["trigger_id"], view=modal)
 
