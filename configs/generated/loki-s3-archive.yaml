@@ -1,0 +1,193 @@
+auth_enabled: true
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+  log_format: json
+  http_server_read_timeout: 60s
+  http_server_write_timeout: 60s
+
+common:
+  instance_addr: 0.0.0.0
+  path_prefix: /loki
+  storage:
+    s3:
+      endpoint: ${S3_ENDPOINT}
+      bucketnames: ${S3_BUCKET}
+      region: ${S3_REGION:-us-east-1}
+      access_key_id: ${S3_ACCESS_KEY}
+      secret_access_key: ${S3_SECRET_KEY}
+      insecure: false
+      sse_encryption: true
+      s3forcepathstyle: false
+  replication_factor: 3
+  ring:
+    kvstore:
+      store: consul
+      consul:
+        host: ${CONSUL_HOST:-consul}:8500
+        prefix: loki/
+
+ingester:
+  lifecycler:
+    address: 0.0.0.0
+    ring:
+      kvstore:
+        store: consul
+      replication_factor: 3
+    final_sleep: 30s
+  chunk_encoding: gzip
+  chunk_idle_period: 1h
+  chunk_retain_period: 5m
+  wal:
+    enabled: true
+    dir: /loki/wal
+    replay_memory_ceiling: 4GB
+  concurrent_flushes: 64
+  max_chunk_age: 4h
+  flush_on_shutdown: true
+
+distributor:
+  ring:
+    kvstore:
+      store: consul
+
+frontend:
+  max_outstanding_per_tenant: 1024
+  compress_responses: true
+
+query_scheduler:
+  max_outstanding_requests_per_tenant: 1024
+
+querier:
+  max_concurrent: 64
+  tail_max_duration: 2h
+  extra_query_delay: 0s
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+      row_shards: 16
+
+ruler:
+  storage:
+    type: s3
+    s3:
+      endpoint: ${S3_ENDPOINT}
+      bucketnames: ${S3_BUCKET}-rules
+      region: ${S3_REGION:-us-east-1}
+      access_key_id: ${S3_ACCESS_KEY}
+      secret_access_key: ${S3_SECRET_KEY}
+  rule_path: /tmp/scratch
+  alertmanager_url: ${ALERTMANAGER_URL:-http://alertmanager:9093}
+  ring:
+    kvstore:
+      store: consul
+  enable_api: true
+  enable_sharding: true
+
+analytics:
+  reporting_enabled: false
+
+limits_config:
+  ingestion_rate_mb: 256
+  ingestion_burst_size_mb: 512
+  max_streams_per_user: 100000
+  max_line_size: 1MB
+  max_entries_limit_per_query: 20000
+  
+  max_query_length: 12000h
+  max_query_parallelism: 128
+  max_query_series: 2000
+  
+  retention_period: 90d
+  
+  max_concurrent_tail_requests: 50
+  max_cache_freshness_per_query: 15m
+  
+  reject_old_samples: true
+  reject_old_samples_max_age: 504h
+  
+  creation_grace_period: 30m
+  unordered_writes: true
+
+compactor:
+  working_directory: /tmp/loki/retention
+  compaction_interval: 30m
+  retention_enabled: true
+  retention_delete_delay: 12h
+  retention_delete_worker_count: 500
+  delete_request_store: s3
+  apply_retention_interval: 6h
+
+
+storage_config:
+  aws:
+    endpoint: ${S3_ENDPOINT}
+    bucketnames: ${S3_BUCKET}
+    region: ${S3_REGION:-us-east-1}
+    access_key_id: ${S3_ACCESS_KEY}
+    secret_access_key: ${S3_SECRET_KEY}
+    insecure: false
+    sse_encryption: true
+    s3forcepathstyle: false
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+    cache_ttl: 48h
+    shared_store: s3
+
+chunk_store_config:
+  chunk_cache_config:
+    embedded_cache:
+      enabled: true
+      max_size_mb: 4096
+      ttl: 2h
+    redis:
+      endpoint: ${REDIS_ENDPOINT:-redis:6379}
+      password: ${REDIS_PASSWORD}
+      db: 0
+      expiration: 2h
+  write_dedupe_cache_config:
+    embedded_cache:
+      enabled: true
+      max_size_mb: 1024
+      ttl: 2h
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 2048
+        ttl: 2h
+      redis:
+        endpoint: ${REDIS_ENDPOINT:-redis:6379}
+        password: ${REDIS_PASSWORD}
+        db: 1
+        expiration: 2h
+  cache_results: true
+  max_retries: 15
+  split_queries_by_interval: 12h
+
+memberlist:
+  node_name: ${HOSTNAME}
+  bind_port: 7946
+  join_members:
+    - ${LOKI_MEMBERLIST_JOIN}
+  abort_if_cluster_join_fails: false
+
+tracing:
+  enabled: true
+  jaeger:
+    agent_host: ${JAEGER_AGENT_HOST:-jaeger}
+    agent_port: 6831
+    sampler_type: probabilistic
+    sampler_param: 0.1

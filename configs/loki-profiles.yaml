@@ -1,0 +1,709 @@
+# Loki Configuration Profiles
+# Each profile represents a different deployment scenario with specific retention and storage strategies
+
+profiles:
+  # Local filesystem with short retention (development/testing)
+  local-dev:
+    description: "Local development with filesystem storage and 7-day retention"
+    auth_enabled: false
+    server:
+      http_port: 3100
+      grpc_port: 9096
+      log_level: debug
+      log_format: json
+      read_timeout: 30s
+      write_timeout: 30s
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      replication_factor: 1
+      ring_store: inmemory
+    storage:
+      backend: filesystem
+      filesystem:
+        chunks_dir: /loki/chunks
+        rules_dir: /loki/rules
+      tsdb:
+        active_index_dir: /loki/tsdb-index
+        cache_location: /loki/tsdb-cache
+        cache_ttl: 24h
+    ingester:
+      address: 127.0.0.1
+      ring_store: inmemory
+      replication_factor: 1
+      final_sleep: 0s
+      chunk_encoding: snappy
+      chunk_idle_period: 5m
+      chunk_retain_period: 30s
+      max_chunk_age: 2h
+      concurrent_flushes: 16
+      wal:
+        enabled: true
+        dir: /loki/wal
+        replay_memory_ceiling: 1GB
+    distributor:
+      ring_store: inmemory
+    frontend:
+      max_outstanding: 256
+      compress_responses: true
+    query_scheduler:
+      max_outstanding: 256
+    querier:
+      max_concurrent: 16
+      tail_max_duration: 1h
+      extra_query_delay: 0s
+    schema:
+      from_date: "2020-10-24"
+      store: tsdb
+      version: v13
+      index_prefix: index_
+      index_period: 24h
+    ruler:
+      storage_type: local
+      local_dir: /loki/rules
+      rule_path: /tmp/scratch
+      ring_store: inmemory
+      enable_api: true
+      enable_sharding: false
+    analytics:
+      reporting_enabled: false
+    limits:
+      ingestion_rate_mb: 64
+      ingestion_burst_size_mb: 128
+      max_streams_per_user: 10000
+      max_line_size: 256KB
+      max_entries_limit_per_query: 5000
+      max_query_length: 12000h
+      max_query_parallelism: 32
+      max_query_series: 500
+      max_concurrent_tail_requests: 10
+      max_cache_freshness_per_query: 10m
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      creation_grace_period: 10m
+      unordered_writes: true
+    retention:
+      enabled: true
+      period: 7d
+    compactor:
+      working_dir: /tmp/loki/retention
+      interval: 10m
+      delete_delay: 2h
+      delete_workers: 150
+    cache:
+      chunk:
+        enabled: true
+        max_size_mb: 1024
+        ttl: 1h
+      query:
+        enabled: true
+        max_size_mb: 512
+        ttl: 1h
+        cache_results: true
+    query_range:
+      max_retries: 5
+    tracing:
+      enabled: false
+
+  # S3-compatible storage with 30-day retention
+  s3-standard:
+    description: "S3-compatible storage with 30-day retention and moderate performance"
+    auth_enabled: false
+    server:
+      http_port: 3100
+      grpc_port: 9096
+      log_level: info
+      log_format: json
+      read_timeout: 30s
+      write_timeout: 30s
+    common:
+      instance_addr: 0.0.0.0
+      path_prefix: /loki
+      replication_factor: 1
+      ring_store: inmemory
+    storage:
+      backend: s3
+      s3:
+        endpoint: "${S3_ENDPOINT}"  # e.g., s3.amazonaws.com or minio.local:9000
+        bucket: "${S3_BUCKET}"
+        region: "${S3_REGION:-us-east-1}"
+        access_key: "${S3_ACCESS_KEY}"
+        secret_key: "${S3_SECRET_KEY}"
+        insecure: false
+        sse_encryption: true
+        force_path_style: true  # Required for MinIO and other S3-compatible stores
+      tsdb:
+        active_index_dir: /loki/tsdb-index
+        cache_location: /loki/tsdb-cache
+        cache_ttl: 24h
+    ingester:
+      address: 0.0.0.0
+      ring_store: inmemory
+      replication_factor: 1
+      final_sleep: 0s
+      chunk_encoding: snappy
+      chunk_idle_period: 30m
+      chunk_retain_period: 1m
+      max_chunk_age: 2h
+      concurrent_flushes: 32
+      flush_on_shutdown: true
+      wal:
+        enabled: true
+        dir: /loki/wal
+        replay_memory_ceiling: 2GB
+    distributor:
+      ring_store: inmemory
+    frontend:
+      max_outstanding: 512
+      compress_responses: true
+    query_scheduler:
+      max_outstanding: 512
+    querier:
+      max_concurrent: 32
+      tail_max_duration: 1h
+      extra_query_delay: 0s
+    schema:
+      from_date: "2020-10-24"
+      store: tsdb
+      version: v13
+      index_prefix: index_
+      index_period: 24h
+    ruler:
+      storage_type: s3
+      s3:
+        bucket: "${S3_BUCKET}-rules"
+      rule_path: /tmp/scratch
+      ring_store: inmemory
+      enable_api: true
+      enable_sharding: false
+      alertmanager_url: "${ALERTMANAGER_URL:-http://alertmanager:9093}"
+    analytics:
+      reporting_enabled: false
+    limits:
+      ingestion_rate_mb: 128
+      ingestion_burst_size_mb: 256
+      max_streams_per_user: 50000
+      max_line_size: 512KB
+      max_entries_limit_per_query: 10000
+      max_query_length: 12000h
+      max_query_parallelism: 64
+      max_query_series: 1000
+      max_concurrent_tail_requests: 20
+      max_cache_freshness_per_query: 10m
+      reject_old_samples: true
+      reject_old_samples_max_age: 336h
+      creation_grace_period: 10m
+      unordered_writes: true
+    retention:
+      enabled: true
+      period: 30d
+    compactor:
+      working_dir: /tmp/loki/retention
+      interval: 10m
+      delete_delay: 2h
+      delete_workers: 300
+      apply_retention_interval: 1h
+    cache:
+      chunk:
+        enabled: true
+        max_size_mb: 2048
+        ttl: 1h
+      query:
+        enabled: true
+        max_size_mb: 1024
+        ttl: 1h
+        cache_results: true
+      write_dedupe_enabled: true
+      write_dedupe_max_size_mb: 512
+      write_dedupe_ttl: 1h
+    query_range:
+      max_retries: 10
+      split_queries_by_interval: 24h
+    tracing:
+      enabled: false
+
+  # S3 with long-term archival (90 days)
+  s3-archive:
+    description: "S3 storage with 90-day retention for compliance and archival"
+    auth_enabled: true
+    server:
+      http_port: 3100
+      grpc_port: 9096
+      log_level: info
+      log_format: json
+      read_timeout: 60s
+      write_timeout: 60s
+    common:
+      instance_addr: 0.0.0.0
+      path_prefix: /loki
+      replication_factor: 3
+      ring_store: consul
+      consul:
+        host: "${CONSUL_HOST:-consul}"
+        port: 8500
+        prefix: "loki/"
+    storage:
+      backend: s3
+      s3:
+        endpoint: "${S3_ENDPOINT}"
+        bucket: "${S3_BUCKET}"
+        region: "${S3_REGION:-us-east-1}"
+        access_key: "${S3_ACCESS_KEY}"
+        secret_key: "${S3_SECRET_KEY}"
+        insecure: false
+        sse_encryption: true
+        force_path_style: false
+      tsdb:
+        active_index_dir: /loki/tsdb-index
+        cache_location: /loki/tsdb-cache
+        cache_ttl: 48h
+    ingester:
+      address: 0.0.0.0
+      ring_store: consul
+      replication_factor: 3
+      final_sleep: 30s
+      chunk_encoding: gzip  # Better compression for long-term storage
+      chunk_idle_period: 1h
+      chunk_retain_period: 5m
+      max_chunk_age: 4h
+      concurrent_flushes: 64
+      flush_on_shutdown: true
+      wal:
+        enabled: true
+        dir: /loki/wal
+        replay_memory_ceiling: 4GB
+    distributor:
+      ring_store: consul
+    frontend:
+      max_outstanding: 1024
+      compress_responses: true
+    query_scheduler:
+      max_outstanding: 1024
+    querier:
+      max_concurrent: 64
+      tail_max_duration: 2h
+      extra_query_delay: 0s
+    schema:
+      from_date: "2020-10-24"
+      store: tsdb
+      version: v13
+      index_prefix: index_
+      index_period: 24h
+      row_shards: 16
+    ruler:
+      storage_type: s3
+      s3:
+        bucket: "${S3_BUCKET}-rules"
+      rule_path: /tmp/scratch
+      ring_store: consul
+      enable_api: true
+      enable_sharding: true
+      alertmanager_url: "${ALERTMANAGER_URL:-http://alertmanager:9093}"
+    analytics:
+      reporting_enabled: false
+    limits:
+      ingestion_rate_mb: 256
+      ingestion_burst_size_mb: 512
+      max_streams_per_user: 100000
+      max_line_size: 1MB
+      max_entries_limit_per_query: 20000
+      max_query_length: 12000h
+      max_query_parallelism: 128
+      max_query_series: 2000
+      max_concurrent_tail_requests: 50
+      max_cache_freshness_per_query: 15m
+      reject_old_samples: true
+      reject_old_samples_max_age: 504h  # 21 days
+      creation_grace_period: 30m
+      unordered_writes: true
+    retention:
+      enabled: true
+      period: 90d
+    compactor:
+      working_dir: /tmp/loki/retention
+      interval: 30m
+      delete_delay: 12h
+      delete_workers: 500
+      apply_retention_interval: 6h
+    cache:
+      chunk:
+        enabled: true
+        max_size_mb: 4096
+        ttl: 2h
+        redis:
+          endpoint: "${REDIS_ENDPOINT:-redis:6379}"
+          password: "${REDIS_PASSWORD}"
+          db: 0
+          expiration: 2h
+      query:
+        enabled: true
+        max_size_mb: 2048
+        ttl: 2h
+        cache_results: true
+        redis:
+          endpoint: "${REDIS_ENDPOINT:-redis:6379}"
+          password: "${REDIS_PASSWORD}"
+          db: 1
+          expiration: 2h
+      write_dedupe_enabled: true
+      write_dedupe_max_size_mb: 1024
+      write_dedupe_ttl: 2h
+    query_range:
+      max_retries: 15
+      split_queries_by_interval: 12h
+    memberlist:
+      enabled: true
+      node_name: "${HOSTNAME}"
+      bind_port: 7946
+      join_members:
+        - "${LOKI_MEMBERLIST_JOIN}"
+      abort_if_join_fails: false
+    tracing:
+      enabled: true
+      jaeger:
+        agent_host: "${JAEGER_AGENT_HOST:-jaeger}"
+        agent_port: 6831
+        sampler_type: probabilistic
+        sampler_param: 0.1
+
+  # GCS (Google Cloud Storage) configuration
+  gcs-production:
+    description: "Google Cloud Storage with 60-day retention for production workloads"
+    auth_enabled: true
+    server:
+      http_port: 3100
+      grpc_port: 9096
+      log_level: info
+      log_format: json
+      read_timeout: 45s
+      write_timeout: 45s
+    common:
+      instance_addr: 0.0.0.0
+      path_prefix: /loki
+      replication_factor: 3
+      ring_store: etcd
+      etcd:
+        endpoints:
+          - "${ETCD_ENDPOINT_1:-etcd-1:2379}"
+          - "${ETCD_ENDPOINT_2:-etcd-2:2379}"
+          - "${ETCD_ENDPOINT_3:-etcd-3:2379}"
+        dial_timeout: 10s
+    storage:
+      backend: gcs
+      gcs:
+        bucket: "${GCS_BUCKET}"
+        service_account: "${GCS_SERVICE_ACCOUNT}"
+      tsdb:
+        active_index_dir: /loki/tsdb-index
+        cache_location: /loki/tsdb-cache
+        cache_ttl: 36h
+    ingester:
+      address: 0.0.0.0
+      ring_store: etcd
+      replication_factor: 3
+      final_sleep: 30s
+      chunk_encoding: snappy
+      chunk_idle_period: 45m
+      chunk_retain_period: 2m
+      max_chunk_age: 3h
+      concurrent_flushes: 48
+      flush_on_shutdown: true
+      wal:
+        enabled: true
+        dir: /loki/wal
+        replay_memory_ceiling: 3GB
+    distributor:
+      ring_store: etcd
+    frontend:
+      max_outstanding: 768
+      compress_responses: true
+    query_scheduler:
+      max_outstanding: 768
+    querier:
+      max_concurrent: 48
+      tail_max_duration: 1h
+      extra_query_delay: 0s
+    schema:
+      from_date: "2020-10-24"
+      store: tsdb
+      version: v13
+      index_prefix: index_
+      index_period: 24h
+      row_shards: 8
+    ruler:
+      storage_type: gcs
+      rule_path: /tmp/scratch
+      ring_store: etcd
+      enable_api: true
+      enable_sharding: true
+      alertmanager_url: "${ALERTMANAGER_URL:-http://alertmanager:9093}"
+    analytics:
+      reporting_enabled: false
+    limits:
+      ingestion_rate_mb: 200
+      ingestion_burst_size_mb: 400
+      max_streams_per_user: 75000
+      max_line_size: 768KB
+      max_entries_limit_per_query: 15000
+      max_query_length: 12000h
+      max_query_parallelism: 96
+      max_query_series: 1500
+      max_concurrent_tail_requests: 30
+      max_cache_freshness_per_query: 12m
+      reject_old_samples: true
+      reject_old_samples_max_age: 432h  # 18 days
+      creation_grace_period: 20m
+      unordered_writes: true
+    retention:
+      enabled: true
+      period: 60d
+    compactor:
+      working_dir: /tmp/loki/retention
+      interval: 20m
+      delete_delay: 6h
+      delete_workers: 400
+      apply_retention_interval: 3h
+    cache:
+      chunk:
+        enabled: true
+        max_size_mb: 3072
+        ttl: 90m
+        memcached:
+          addresses: "${MEMCACHED_ADDRESSES:-memcached:11211}"
+          timeout: 100ms
+          expiration: 90m
+      query:
+        enabled: true
+        max_size_mb: 1536
+        ttl: 90m
+        cache_results: true
+        memcached:
+          addresses: "${MEMCACHED_ADDRESSES:-memcached:11211}"
+          timeout: 100ms
+          expiration: 90m
+      write_dedupe_enabled: true
+      write_dedupe_max_size_mb: 768
+      write_dedupe_ttl: 90m
+    query_range:
+      max_retries: 12
+      split_queries_by_interval: 18h
+    memberlist:
+      enabled: true
+      node_name: "${HOSTNAME}"
+      bind_port: 7946
+      join_members:
+        - "${LOKI_MEMBERLIST_JOIN}"
+      abort_if_join_fails: true
+    tracing:
+      enabled: true
+      otlp:
+        endpoint: "${OTLP_ENDPOINT:-otel-collector:4317}"
+        insecure: false
+
+  # Azure Blob Storage configuration
+  azure-enterprise:
+    description: "Azure Blob Storage with 45-day retention for enterprise deployments"
+    auth_enabled: true
+    server:
+      http_port: 3100
+      grpc_port: 9096
+      log_level: info
+      log_format: json
+      read_timeout: 40s
+      write_timeout: 40s
+    common:
+      instance_addr: 0.0.0.0
+      path_prefix: /loki
+      replication_factor: 2
+      ring_store: inmemory
+    storage:
+      backend: azure
+      azure:
+        account_name: "${AZURE_ACCOUNT_NAME}"
+        account_key: "${AZURE_ACCOUNT_KEY}"
+        container: "${AZURE_CONTAINER}"
+        endpoint_suffix: "blob.core.windows.net"
+      tsdb:
+        active_index_dir: /loki/tsdb-index
+        cache_location: /loki/tsdb-cache
+        cache_ttl: 30h
+    ingester:
+      address: 0.0.0.0
+      ring_store: inmemory
+      replication_factor: 2
+      final_sleep: 15s
+      chunk_encoding: snappy
+      chunk_idle_period: 40m
+      chunk_retain_period: 90s
+      max_chunk_age: 2h30m
+      concurrent_flushes: 40
+      flush_on_shutdown: true
+      wal:
+        enabled: true
+        dir: /loki/wal
+        replay_memory_ceiling: 2560MB
+    distributor:
+      ring_store: inmemory
+    frontend:
+      max_outstanding: 640
+      compress_responses: true
+    query_scheduler:
+      max_outstanding: 640
+    querier:
+      max_concurrent: 40
+      tail_max_duration: 1h
+      extra_query_delay: 0s
+    schema:
+      from_date: "2020-10-24"
+      store: tsdb
+      version: v13
+      index_prefix: index_
+      index_period: 24h
+    ruler:
+      storage_type: azure
+      rule_path: /tmp/scratch
+      ring_store: inmemory
+      enable_api: true
+      enable_sharding: false
+      alertmanager_url: "${ALERTMANAGER_URL:-http://alertmanager:9093}"
+    analytics:
+      reporting_enabled: false
+    limits:
+      ingestion_rate_mb: 160
+      ingestion_burst_size_mb: 320
+      max_streams_per_user: 60000
+      max_line_size: 640KB
+      max_entries_limit_per_query: 12000
+      max_query_length: 12000h
+      max_query_parallelism: 80
+      max_query_series: 1200
+      max_concurrent_tail_requests: 25
+      max_cache_freshness_per_query: 11m
+      reject_old_samples: true
+      reject_old_samples_max_age: 360h  # 15 days
+      creation_grace_period: 15m
+      unordered_writes: true
+    retention:
+      enabled: true
+      period: 45d
+    compactor:
+      working_dir: /tmp/loki/retention
+      interval: 15m
+      delete_delay: 4h
+      delete_workers: 350
+      apply_retention_interval: 2h
+    cache:
+      chunk:
+        enabled: true
+        max_size_mb: 2560
+        ttl: 75m
+      query:
+        enabled: true
+        max_size_mb: 1280
+        ttl: 75m
+        cache_results: true
+      write_dedupe_enabled: true
+      write_dedupe_max_size_mb: 640
+      write_dedupe_ttl: 75m
+    query_range:
+      max_retries: 11
+      split_queries_by_interval: 20h
+    tracing:
+      enabled: false
+
+  # Minimal configuration without retention (stream processing)
+  stream-processing:
+    description: "Minimal config for stream processing without long-term storage"
+    auth_enabled: false
+    server:
+      http_port: 3100
+      grpc_port: 9096
+      log_level: warn
+      log_format: json
+      read_timeout: 20s
+      write_timeout: 20s
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      replication_factor: 1
+      ring_store: inmemory
+    storage:
+      backend: filesystem
+      filesystem:
+        chunks_dir: /tmp/loki/chunks
+        rules_dir: /tmp/loki/rules
+      tsdb:
+        active_index_dir: /tmp/loki/tsdb-index
+        cache_location: /tmp/loki/tsdb-cache
+        cache_ttl: 12h
+    ingester:
+      address: 127.0.0.1
+      ring_store: inmemory
+      replication_factor: 1
+      final_sleep: 0s
+      chunk_encoding: none  # No compression for real-time processing
+      chunk_idle_period: 1m
+      chunk_retain_period: 10s
+      max_chunk_age: 30m
+      concurrent_flushes: 8
+      wal:
+        enabled: false  # Disable WAL for speed
+    distributor:
+      ring_store: inmemory
+    frontend:
+      max_outstanding: 128
+      compress_responses: false
+    query_scheduler:
+      max_outstanding: 128
+    querier:
+      max_concurrent: 8
+      tail_max_duration: 30m
+      extra_query_delay: 0s
+    schema:
+      from_date: "2020-10-24"
+      store: tsdb
+      version: v13
+      index_prefix: index_
+      index_period: 24h
+    ruler:
+      storage_type: local
+      local_dir: /tmp/loki/rules
+      rule_path: /tmp/scratch
+      ring_store: inmemory
+      enable_api: false
+      enable_sharding: false
+    analytics:
+      reporting_enabled: false
+    limits:
+      ingestion_rate_mb: 32
+      ingestion_burst_size_mb: 64
+      max_streams_per_user: 5000
+      max_line_size: 128KB
+      max_entries_limit_per_query: 2500
+      max_query_length: 24h
+      max_query_parallelism: 16
+      max_query_series: 250
+      max_concurrent_tail_requests: 5
+      max_cache_freshness_per_query: 5m
+      reject_old_samples: true
+      reject_old_samples_max_age: 24h
+      creation_grace_period: 5m
+      unordered_writes: false
+    retention:
+      enabled: true
+      period: 1h  # Very short retention
+    compactor:
+      working_dir: /tmp/loki/retention
+      interval: 5m
+      delete_delay: 10m
+      delete_workers: 50
+    cache:
+      chunk:
+        enabled: false
+      query:
+        enabled: false
+        cache_results: false
+    query_range:
+      max_retries: 3
+    tracing:
+      enabled: false
