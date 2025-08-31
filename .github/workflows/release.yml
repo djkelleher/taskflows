@@ -66,10 +66,10 @@ jobs:
         body: |
           ## What's Changed
 
-          This release includes version ${{ steps.version.outputs.current_version }} of alert-msgs.
+          This release includes version ${{ steps.version.outputs.current_version }} of taskflows.
 
           ### 🚀 Published to:
-          - **PyPI**: `pip install alert-msgs==${{ steps.version.outputs.current_version }}`
+          - **PyPI**: `pip install taskflows==${{ steps.version.outputs.current_version }}`
 
           ### 📚 Documentation:
           - [API Reference](https://github.com/${{ github.repository }}/tree/main/docs/api/)
@@ -88,7 +88,7 @@ jobs:
           const commentBody = `🚀 **Published Version ${{ steps.version.outputs.current_version }}**
 
           Successfully published to:
-          - **PyPI**: \`pip install alert-msgs==${{ steps.version.outputs.current_version }}\`
+          - **PyPI**: \`pip install taskflows==${{ steps.version.outputs.current_version }}\`
 
           📚 [Documentation](https://github.com/${{ github.repository }}/tree/main/docs/)
           📋 [Release Notes](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.current_version }})`;

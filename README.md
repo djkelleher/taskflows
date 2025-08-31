@@ -2,6 +2,7 @@
 
 ## TODO
 cgroup sharing
+
 I want to make a couple different loki config files so that we have different options for log archive/retention. I definitely want log rotation to s3 / other s3 compatible object stores. and I also want drop after specified number of days policy that we currently have now. is there other common configs that you would suggest? maybe we can use a jinja template to create the configs?
 
 fix loki log json encoding
