@@ -12,8 +12,8 @@ import requests
 import sqlalchemy as sa
 from alert_msgs.components import CodeBlock, Map, MsgComp, StatusIndicator, Table, Text
 
-# from dl.databases.timescale import pgconn
-from dynamic_imports import class_inst
+# from trading.databases.timescale import pgconn
+from dynamic_imports import find_instances
 from fastapi import status
 
 from taskflows.admin.security import security_config
@@ -554,14 +554,14 @@ async def create(
             f"create called with search_in={search_in}, include={include}, exclude={exclude}"
         )
         # Now that deploy.py uses services, let's use the original approach
-        services = class_inst(class_type=Service, search_in=search_in)
+        services = find_instances(class_type=Service, search_in=search_in)
         print(f"Found {len(services)} services")
 
-        for sr in class_inst(class_type=ServiceRegistry, search_in=search_in):
+        for sr in find_instances(class_type=ServiceRegistry, search_in=search_in):
             print(f"ServiceRegistry found with {len(sr.services)} services")
             services.extend(sr.services)
 
-        dashboards = class_inst(class_type=Dashboard, search_in=search_in)
+        dashboards = find_instances(class_type=Dashboard, search_in=search_in)
         print(f"Found {len(dashboards)} dashboards")
 
         print(f"Total services: {len(services)}")
@@ -1065,7 +1065,7 @@ async def execute_command_on_servers(
         hostname = server["address"] or "localhost"
         # pass hostname (normalized) directly as host parameter
         # If address is None, it will use local functions
-        results[hostname] = func(host=server["address"], **kwargs)
+        results[hostname] = await func(host=server["address"], **kwargs)
 
     return results
 
@@ -1121,7 +1121,7 @@ def call_api(
                 if new_cfg.hmac_secret != cfg.hmac_secret:
                     cfg = new_cfg
                     headers = build_headers(cfg)
-                    logger.info("Retrying %s after HMAC secret reload", url)
+                    logger.info(f"Retrying {url} after HMAC secret reload")
                     continue
             resp.raise_for_status()
             return resp.json()

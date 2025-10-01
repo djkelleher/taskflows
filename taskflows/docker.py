@@ -27,13 +27,13 @@ def get_docker_client(user_host: Optional[str] = None):
 def apply_container_action(
     container_name: str, action: Literal["start", "restart", "stop"]
 ):
-    logger.info("%sing %s container.", action, container_name)
+    logger.info(f"{action}ing {container_name} container.")
     client = get_docker_client()
     try:
         container = client.containers.get(container_name)
     except docker.errors.NotFound:
         logger.error(
-            "Container %s not found. Can not %s container", container_name, action
+            f"Container {container_name} not found. Can not {action} container"
         )
         return
     getattr(container, action)()
@@ -118,11 +118,11 @@ class DockerImage:
             img = None
         if img is not None:
             if not force_recreate:
-                logger.warning("Will not recreate image: %s", self.tag)
+                logger.warning(f"Will not recreate image: {self.tag}")
                 return img
-            logger.warning("Removing existing image: %s", self.tag)
+            logger.warning(f"Removing existing image: {self.tag}")
             client.images.remove(self.tag, force=True)
-        logger.info("Building image %s", self.tag)
+        logger.info(f"Building image {self.tag}")
         built_img, log = client.images.build(**asdict(self))
         fmt_log = []
         for row in log:
@@ -437,14 +437,14 @@ class DockerContainer:
             self.command = PickledFunction(self.command, self.name, "command")
         cfg = self._params()
         cfg.update(kwargs)
-        logger.info("Creating Docker container %s: %s", self.name, cfg)
+        logger.info(f"Creating Docker container {self.name}: {cfg}")
         client = get_docker_client()
         try:
             return client.containers.create(**cfg)
         except docker.errors.ImageNotFound:
             if isinstance(self.image, DockerImage):
                 raise
-            logger.info("Pulling Docker image %s", self.image)
+            logger.info(f"Pulling Docker image {self.image}")
             image_and_tag = self.image.split(":")
             if len(image_and_tag) == 1:
                 client.images.pull(image)
@@ -465,7 +465,7 @@ class DockerContainer:
         # remove the container when it has finished running.
         # cfg["remove"] = True
         cfg["detach"] = True
-        logger.info("Running Docker container: %s", cfg)
+        logger.info(f"Running Docker container: {cfg}")
         return get_docker_client().containers.run(**cfg)
 
     def delete(self):
@@ -525,5 +525,5 @@ def delete_docker_container(container_name: str, force: bool = True) -> bool:
     except docker.errors.NotFound:
         return False
     container.remove(force=force)
-    logger.info("Removed Docker container: %s", container_name)
+    logger.info(f"Removed Docker container: {container_name}")
     return True

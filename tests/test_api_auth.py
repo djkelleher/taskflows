@@ -9,6 +9,7 @@ from typing import Dict, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
+
 from taskflows.admin.api import app
 from taskflows.admin.security import (
     SecurityConfig,
@@ -134,7 +135,7 @@ class TestAPIAuthentication(unittest.TestCase):
                                     return_value={},
                                 ):
                                     with patch(
-                                        "taskflows.admin.api.class_inst",
+                                        "taskflows.admin.api.find_instances",
                                         return_value=[],
                                     ):
                                         with patch(
@@ -304,4 +305,5 @@ class TestAPIAuthentication(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    unittest.main()
     unittest.main()

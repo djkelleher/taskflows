@@ -39,7 +39,7 @@ class PickledFunction:
 
     def write(self):
         file = services_data_dir.joinpath(f"{self.name}#_{self.attr}.pickle")
-        logger.info("Writing pickled function: %s", file)
+        logger.info(f"Writing pickled function: {file}")
         file.write_bytes(cloudpickle.dumps(self.func))
 
     def __str__(self):
@@ -67,8 +67,8 @@ def _deserialize_and_call(name: str, attr: str):
 def _run_docker_service(name: str):
     """Import Docker container and run it. (This is an installed function)"""
     path = services_data_dir / f"{name}#_docker_run_srv.pickle"
-    logger.info("Loading service from %s", path)
+    logger.info(f"Loading service from {path}")
     service = cloudpickle.loads(path.read_bytes())
     container = service.environment
-    logger.info("Running docker container %s", container.name)
+    logger.info(f"Running docker container {container.name}")
     container.run()

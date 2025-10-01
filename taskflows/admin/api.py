@@ -6,7 +6,7 @@ from typing import Optional
 import click
 import uvicorn
 
-# from dl.databases.timescale import pgconn
+# from trading.databases.timescale import pgconn
 from fastapi import Body, FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
 

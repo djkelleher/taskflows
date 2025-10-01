@@ -6,6 +6,10 @@ from typing import List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from textdistance import lcsseq
 
+from quicklogs import get_logger
+
+logger = get_logger("taskflows")
+
 # _SYSTEMD_FILE_PREFIX = "taskflows-"
 _SYSTEMD_FILE_PREFIX = "taskflows-"
 
@@ -107,4 +111,5 @@ def load_service_files(files: List[Path]):
 
 
 def extract_service_name(unit: str | Path) -> str:
+    return re.sub(f"^{_SYSTEMD_FILE_PREFIX}", "", Path(unit).stem)
     return re.sub(f"^{_SYSTEMD_FILE_PREFIX}", "", Path(unit).stem)

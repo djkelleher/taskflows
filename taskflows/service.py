@@ -275,7 +275,7 @@ class Service:
             else:
                 container.volumes = list(container.volumes) + [services_volume]
 
-            logger.info("Using name '%s' for service and container", self.name)
+            logger.info(f"Using name '{self.name}' for service and container")
             # TODO check for callable start command.
             if container.persisted:
                 # this is a persistent container, started wiht 'docker start'
@@ -476,7 +476,7 @@ class Service:
 
     def create(self, defer_reload: bool = False):
         """Create this service."""
-        logger.info("Creating service %s", self)
+        logger.info(f"Creating service {self}")
         # Remove old version if exists
         self.remove()
         self._write_timer_units()
@@ -592,9 +592,9 @@ class Service:
             file_stem = f"stop-{file_stem}"
         file = systemd_dir / f"{file_stem}.{unit_type}"
         if file.exists():
-            logger.warning("Replacing existing unit: %s", file)
+            logger.warning(f"Replacing existing unit: {file}")
         else:
-            logger.info("Creating new unit: %s", file)
+            logger.info(f"Creating new unit: {file}")
         file.write_text(content)
         return str(file)
 
@@ -771,9 +771,9 @@ def get_unit_file_states(
     states = states or []
     pattern = _make_unit_match_pattern(unit_type=unit_type, match=match)
     files = list(systemd_manager().ListUnitFilesByPatterns(states, [pattern]))
-    logger.debug("Found %i units matching: %s", len(files), pattern)
+    logger.debug(f"Found {len(files)} units matching: {pattern}")
     if not files:
-        logger.error("No taskflows unit files found matching: %s", pattern)
+        logger.error(f"No taskflows unit files found matching: {pattern}")
     return {str(file): str(state) for file, state in files}
 
 
@@ -799,7 +799,7 @@ def get_units(
         "job_path",
     ]
     units = [{k: str(v) for k, v in zip(fields, f)} for f in files]
-    logger.debug("Found %i units matching: %s", len(units), pattern)
+    logger.debug(f"Found {len(units)} units matching: {pattern}")
     return units
 
 
@@ -822,7 +822,7 @@ def _start_service(files: Sequence[str]):
         sf = os.path.basename(sf)
         if sf.startswith("stop-"):
             continue
-        logger.info("Running: %s", sf)
+        logger.info(f"Running: {sf}")
         mgr.StartUnit(sf, "replace")
 
 
@@ -830,11 +830,11 @@ def _stop_service(files: Sequence[str]):
     mgr = systemd_manager()
     for sf in files:
         sf = os.path.basename(sf)
-        logger.info("Stopping: %s", sf)
+        logger.info(f"Stopping: {sf}")
         try:
             mgr.StopUnit(sf, "replace")
         except dbus.exceptions.DBusException as err:
-            logger.warning("Could not stop %s: (%s) %s", sf, type(err), err)
+            logger.warning(f"Could not stop {sf}: ({type(err)}) {err}")
 
         # remove any failed status caused by stopping service.
         # mgr.ResetFailedUnit(sf)
@@ -846,16 +846,16 @@ def _restart_service(files: Sequence[str]):
     units = [u for u in units if u.startswith(_SYSTEMD_FILE_PREFIX)]
     mgr = systemd_manager()
     for sf in units:
-        logger.info("Restarting: %s", sf)
+        logger.info(f"Restarting: {sf}")
         try:
             mgr.RestartUnit(sf, "replace")
         except dbus.exceptions.DBusException as err:
-            logger.warning("Could not restart %s: (%s) %s", sf, type(err), err)
+            logger.warning(f"Could not restart {sf}: ({type(err)}) {err}")
 
 
 def _enable_service(files: Sequence[str]):
     mgr = systemd_manager()
-    logger.info("Enabling: %s", pformat(files))
+    logger.info(f"Enabling: {pformat(files)}")
 
     def enable_files(files, is_retry=False):
         try:
@@ -863,7 +863,7 @@ def _enable_service(files: Sequence[str]):
             # The second one controls whether symlinks pointing to other units shall be replaced if necessary.
             mgr.EnableUnitFiles(files, False, True)
         except dbus.exceptions.DBusException as err:
-            logger.warning("Could not enable %s: (%s) %s", files, type(err), err)
+            logger.warning(f"Could not enable {files}: ({type(err)}) {err}")
             if not is_retry and len(files) > 1:
                 for file in files:
                     enable_files([file], is_retry=True)
@@ -874,7 +874,7 @@ def _enable_service(files: Sequence[str]):
 def _disable_service(files: Sequence[str]):
     mgr = systemd_manager()
     files = [os.path.basename(f) for f in files]
-    logger.info("Disabling: %s", pformat(files))
+    logger.info(f"Disabling: {pformat(files)}")
 
     def disable_files(files, is_retry=False):
         try:
@@ -882,9 +882,9 @@ def _disable_service(files: Sequence[str]):
             # The second one controls whether symlinks pointing to other units shall be replaced if necessary.
             for meta in mgr.DisableUnitFiles(files, False):
                 # meta has: the type of the change (one of symlink or unlink), the file name of the symlink and the destination of the symlink.
-                logger.info("%s %s %s", *meta)
+                logger.info(f"{meta[0]} {meta[1]} {meta[2]}")
         except dbus.exceptions.DBusException as err:
-            logger.warning("Could not disable %s: (%s) %s", files, type(err), err)
+            logger.warning(f"Could not disable {files}: ({type(err)}) {err}")
             if not is_retry and len(files) > 1:
                 for file in files:
                     disable_files([file], is_retry=True)
@@ -908,12 +908,12 @@ def _remove_service(service_files: Sequence[str], timer_files: Sequence[str]):
     container_names = set()
     mgr = systemd_manager()
     for srv_file in service_files:
-        logger.info("Cleaning cache and runtime directories: %s.", srv_file)
+        logger.info(f"Cleaning cache and runtime directories: {srv_file}.")
         try:
             # the possible values are "configuration", "state", "logs", "cache", "runtime", "fdstore", and "all".
             mgr.CleanUnit(srv_file.name, ["all"])
         except dbus.exceptions.DBusException as err:
-            logger.warning("Could not clean %s: (%s) %s", srv_file, type(err), err)
+            logger.warning(f"Could not clean {srv_file}: ({type(err)}) {err}")
         container_name = re.search(
             r"docker (?:start|stop) ([\w-]+)", srv_file.read_text()
         )
@@ -924,7 +924,7 @@ def _remove_service(service_files: Sequence[str], timer_files: Sequence[str]):
     for srv in service_files:
         files.extend(services_data_dir.glob(f"{extract_service_name(srv)}#*.pickle"))
     for file in files:
-        logger.info("Deleting %s", file)
+        logger.info(f"Deleting {file}")
         file.unlink()
     logger.info(
         "Finished removing %i services and %i timers",
