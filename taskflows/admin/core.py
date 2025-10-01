@@ -17,7 +17,7 @@ from dynamic_imports import find_instances
 from fastapi import status
 
 from taskflows.admin.security import security_config
-from taskflows.common import load_service_files, logger, sort_service_names
+from taskflows.common import config, load_service_files, logger, sort_service_names
 from taskflows.dashboard import Dashboard
 from taskflows.db import engine, get_tasks_db, servers_table
 from taskflows.service import (
@@ -48,7 +48,7 @@ HOSTNAME = socket.gethostname()
 
 
 def with_hostname(data: dict) -> dict:
-    logger.debug(f"with_hostname called: {data}")
+    #logger.debug(f"with_hostname called: {data}")
     return {**data, "hostname": HOSTNAME}
 
 

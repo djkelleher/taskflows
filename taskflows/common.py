@@ -27,7 +27,7 @@ class Config(BaseSettings):
     display_timezone: str = "UTC"
     fluent_bit: str = "localhost:24224"
     grafana: str = "localhost:3000"
-    grafana_api_key: Optional[str] = None
+    grafana_api_key: Optional[str] = "glsa_VniUlEqrercPN778JfFtLg5t66MrfXh2_a99ba588"
 
     model_config = SettingsConfigDict(env_prefix="taskflows_")
 
@@ -111,5 +111,4 @@ def load_service_files(files: List[Path]):
 
 
 def extract_service_name(unit: str | Path) -> str:
-    return re.sub(f"^{_SYSTEMD_FILE_PREFIX}", "", Path(unit).stem)
     return re.sub(f"^{_SYSTEMD_FILE_PREFIX}", "", Path(unit).stem)
