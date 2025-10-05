@@ -240,6 +240,8 @@ class Service:
     conflicts: Optional[ServicesT] = None
     # description of this service.
     description: Optional[str] = None
+    # cgroup configuration for resource limits
+    cgroup_config: Optional['CgroupConfig'] = None
 
     def __post_init__(self):
         self._pkl_funcs = []
@@ -276,6 +278,13 @@ class Service:
                 container.volumes = list(container.volumes) + [services_volume]
 
             logger.info(f"Using name '{self.name}' for service and container")
+            
+            # Apply cgroup configuration to container if not already set
+            if self.cgroup_config and not container.cgroup_config:
+                container.cgroup_config = self.cgroup_config
+            
+            # Set up slice for systemd resource management
+            self.slice = f"{self.name}.slice"
             # TODO check for callable start command.
             if container.persisted:
                 # this is a persistent container, started wiht 'docker start'
@@ -289,13 +298,13 @@ class Service:
                 self.start_command = f"docker start -a {self.name}"
                 self.stop_command = f"docker stop -t 30 {self.name}"
                 self.restart_command = f"docker restart {self.name}"
-                # Set up Docker-specific systemd entries
-                self.slice = f"{self.name}.slice"
             else:
                 # Setup for Docker run service (ephemeral container).
-                self.start_command = f"_run_docker_service {self.name}"
+                # Use the docker CLI command directly for systemd service
+                self.start_command = container.docker_run_cli_command()
                 self.stop_command = f"docker stop {self.name}"
                 self.restart_command = f"docker restart {self.name}"
+                
         elif self.restart_policy == "unless-stopped":
             # not a valid systemd policy (only docker)
             self.restart_policy = "always"
@@ -389,6 +398,13 @@ class Service:
             )
             self.unit_entries.update(rp.unit_entries)
             self.service_entries.update(rp.service_entries)
+            
+        # Add cgroup configuration directives to systemd service
+        if self.cgroup_config:
+            cgroup_directives = self.cgroup_config.to_systemd_directives()
+            
+            for key, value in cgroup_directives.items():
+                self.service_entries.add(f"{key}={value}")
 
         # Add Docker-specific service entries if using Docker environment
         if isinstance(self.environment, DockerContainer):
@@ -396,6 +412,7 @@ class Service:
             # Docker start service entries
             self.service_entries.add(f"Slice={self.slice}")
             # Let docker handle the signal
+            # TODO change this?
             self.service_entries.add("KillMode=none")
             # Remove SIGTERM since KillMode=none
             self.service_entries.discard("KillSignal=SIGTERM")
@@ -404,7 +421,9 @@ class Service:
             # SIGKILL and docker error code
             self.service_entries.add("RestartForceExitStatus=137 255")
             self.service_entries.add("Delegate=yes")
-            self.service_entries.add("TasksMax=infinity")
+            # Only set TasksMax=infinity if not already set by cgroup config
+            if not any("TasksMax=" in entry for entry in self.service_entries):
+                self.service_entries.add("TasksMax=infinity")
             # Drop duplicate log stream in journalctl
             self.service_entries.add("StandardOutput=null")
             self.service_entries.add("StandardError=null")
@@ -490,11 +509,8 @@ class Service:
             if container.persisted:
                 # For start services, create container with cgroup parent
                 container.create(cgroup_parent=self.slice)
-            else:
-                # For run services, pickle the service for later use
-                services_data_dir.joinpath(
-                    f"{self.name}#_docker_run_srv.pickle"
-                ).write_bytes(cloudpickle.dumps(self))
+            # For run services, no need to do anything here since
+            # the docker run command is directly in the systemd service file
 
         self.enable(timers_only=not self.enabled)
         # Start timers now
