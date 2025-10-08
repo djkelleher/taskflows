@@ -33,7 +33,7 @@ taskflows is a Python library that provides robust task management, scheduling, 
 
 ### Prerequisites
 ```bash
-sudo apt install dbus
+sudo apt install dbus libdbus-1-dev
 loginctl enable-linger
 ```
 
