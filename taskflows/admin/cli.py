@@ -1,3 +1,10 @@
+import os
+
+# Set logger level to CRITICAL (50) to show exceptions only
+# This MUST be set before any taskflows imports that use the logger
+os.environ['TASKFLOWS_LEVEL'] = '50'
+os.environ['QUICKLOGS_LEVEL'] = '50'
+
 from functools import lru_cache
 from itertools import cycle
 from typing import Optional
