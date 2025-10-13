@@ -394,7 +394,8 @@ class Service:
         if isinstance(self.environment, DockerContainer):
             # if self.environment.persisted:
             # Docker start service entries
-            self.service_entries.add(f"Slice={self.slice}")
+            if hasattr(self, 'slice'):
+                self.service_entries.add(f"Slice={self.slice}")
             # Let docker handle the signal
             self.service_entries.add("KillMode=none")
             # Remove SIGTERM since KillMode=none

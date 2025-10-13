@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import sqlalchemy as sa
-from alert_msgs.components import CodeBlock, Map, MsgComp, StatusIndicator, Table, Text
+from alert_msgs.components import Map, MsgComp, Table, Text, as_code_block
 
 # from dl.databases.timescale import pgconn
 from dynamic_imports import class_inst
@@ -68,24 +68,24 @@ def get_unit_files(
     return kept
 
 
-def health_check(host: Optional[str] = None) -> StatusIndicator:
+def health_check(host: Optional[str] = None) -> Text:
     """Call the /health endpoint and return a StatusIndicator component.
 
     Args:
         host (str): Host address of the admin API server. If None, calls local function.
 
     Returns:
-        StatusIndicator: Component showing health status
+        Text: Component showing health status
     """
     # Call via API
     data = call_api(host, "/health", method="GET", timeout=10)
 
     if "error" in data:
-        return StatusIndicator(f"Service Error: {data['error']}", color="red")
+        return Text(f"🔴 Service Error: {data['error']}")
     elif data.get("status") == "ok":
-        return StatusIndicator("Service Healthy", color="green")
+        return Text("🟢 Service Healthy")
     else:
-        return StatusIndicator("Service Unhealthy", color="red")
+        return Text("🔴 Service Unhealthy")
 
 
 async def list_servers() -> Table:
@@ -423,7 +423,7 @@ async def logs(
     service_name: Optional[str] = None,
     n_lines: Optional[int] = None,
     as_json: bool = False,
-) -> CodeBlock:
+) -> Text:
     """Call the /logs/{service_name} endpoint and return a CodeBlock component.
 
     Args:
@@ -433,12 +433,12 @@ async def logs(
         as_json (bool): Return raw JSON data instead of CodeBlock component
 
     Returns:
-        CodeBlock: Component showing service logs
+        Text: Component showing service logs
     """
     if not service_name:
         if as_json:
             return {"error": "service_name is required"}
-        return CodeBlock("Error: service_name is required", language="text")
+        return Text(as_code_block("Error: service_name is required"))
 
     if host is None:
         # Call local free function
@@ -455,10 +455,10 @@ async def logs(
         return data
 
     if "error" in data:
-        return CodeBlock(f"Error fetching logs: {data['error']}", language="text")
+        return Text(as_code_block(f"Error fetching logs: {data['error']}"))
 
     logs_content = data.get("logs", "No logs available")
-    return CodeBlock(logs_content, language="text", show_line_numbers=False)
+    return Text(as_code_block(logs_content))
 
 
 async def show(

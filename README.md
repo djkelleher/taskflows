@@ -250,7 +250,7 @@ This module provides optimized logging configurations for the journald → Fluen
 ### Basic Usage
 
 ```python
-from dl.loggers import get_struct_logger, configure_loki_logging
+from quicklogs import get_struct_logger, configure_loki_logging
 
 # Configure logging for Loki (call once at startup)
 configure_loki_logging(
@@ -269,7 +269,7 @@ logger.info("user_action", user_id=123, action="login", ip="192.168.1.1")
 ### Request Context
 
 ```python
-from dl.loggers import set_request_context, clear_request_context, generate_request_id
+from quicklogs import set_request_context, clear_request_context, generate_request_id
 
 # In your request handler
 request_id = generate_request_id()
