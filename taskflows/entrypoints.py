@@ -96,7 +96,7 @@ class ShutdownHandler:
         :param context: A dictionary containing information about the
             exception.
         """
-        logger.error("Uncaught coroutine exception: %s", pformat(context))
+        logger.error(f"Uncaught coroutine exception: {pformat(context)}")
         # Extract the exception object from the context
         exception = context.get("exception")
         if exception:
@@ -106,11 +106,11 @@ class ShutdownHandler:
                     type(exception), exception, exception.__traceback__
                 )
             )
-            logger.error("Exception traceback:\n%s", tb)
+            logger.error(f"Exception traceback:\n{tb}")
         else:
             # Log the message if no exception is provided
             message = context.get("message", "No exception object found in context")
-            logger.error("Error message: %s", message)
+            logger.error(f"Error message: {message}")
 
         if self.shutdown_on_exception and (self._shutdown_task is None):
             self._create_shutdown_task(1)
@@ -127,7 +127,7 @@ class ShutdownHandler:
             signum (int): The signal number that was received.
         """
         signame = signal.Signals(signum).name if signum is not None else "Unknown"
-        logger.warning("Caught signal %i (%s). Shutting down.", signum, signame)
+        logger.warning(f"Caught signal {signum} ({signame}). Shutting down.")
         await self.shutdown(0)
 
     def _create_shutdown_task(self, exit_code: int):
@@ -160,24 +160,21 @@ class ShutdownHandler:
         Args:
             exit_code (int): The exit code to use when terminating the program.
         """
-        logger.info("Shutting down. Exit code: %s", exit_code)
+        logger.info(f"Shutting down. Exit code: {exit_code}")
         # Execute all registered shutdown callbacks
         for cb in self.callbacks:
-            logger.info("Calling shutdown callback: %s", cb)
+            logger.info(f"Calling shutdown callback: {cb}")
             try:
                 # Wait up to 5 seconds for each callback to complete
                 await asyncio.wait_for(cb(), timeout=5)
             except Exception as err:
                 # Log any exceptions that occur in the callbacks
                 logger.exception(
-                    "%s error in shutdown callback %s: %s",
-                    type(err),
-                    cb,
-                    err,
+                    f"{type(err)} error in shutdown callback {cb}: {err}"
                 )
         # Cancel all outstanding tasks in the event loop
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        logger.info("Cancelling %i outstanding tasks", len(tasks))
+        logger.info(f"Cancelling {len(tasks)} outstanding tasks")
         for task in tasks:
             # Cancel the task to prevent it from running after we've stopped
             # the event loop
@@ -185,7 +182,7 @@ class ShutdownHandler:
         # Stop the event loop to prevent any new tasks from being scheduled
         self.loop.stop()
         # Exit the program with the specified exit code
-        logger.info("Exiting %s", exit_code)
+        logger.info(f"Exiting {exit_code}")
         sys.exit(exit_code)
 
 
@@ -208,7 +205,7 @@ def async_entrypoint(blocking: bool = False, shutdown_on_exception: bool = True)
         sdh.shutdown_on_exception = shutdown_on_exception
 
         async def async_entrypoint_async(*args, **kwargs):
-            logger.info("Running main task: %s", f)
+            logger.info(f"Running main task: {f}")
             try:
                 await f(*args, **kwargs)
                 if blocking:

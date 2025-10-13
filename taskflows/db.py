@@ -112,7 +112,7 @@ class TasksDB:
                     )
                 )
                 if not result:
-                    logger.info("Creating schema '%s'", schema_name)
+                    logger.info(f"Creating schema '{schema_name}'")
                     await conn.execute(sa.schema.CreateSchema(schema_name))
 
         # Create the tables if they do not exist

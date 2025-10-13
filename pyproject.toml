@@ -31,6 +31,15 @@ dependencies = [
 pytest = "*"
 pytest-asyncio = "*"
 
+
+[tool.poetry.scripts]
+tf = 'taskflows.admin.cli:cli'
+_start_srv_api = 'taskflows.admin.api:_start_api_cmd'
+_run_docker_service = 'taskflows.exec:_run_docker_service'
+_deserialize_and_call = 'taskflows.exec:_deserialize_and_call'
+_run_function = 'taskflows.exec:_run_function'
+
+
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"

@@ -153,7 +153,7 @@ class Dashboard:
     def _api_key(self):
         if api_key := config.grafana_api_key:
             return api_key
-        raise RuntimeError("DLSERVICES_GRAFANA_API_KEY is not set")
+        raise RuntimeError("TASKFLOWS_GRAFANA_API_KEY is not set")
 
     def _get_loki_datasource_uid(self):
         """Get the UID of the Loki datasource from Grafana"""

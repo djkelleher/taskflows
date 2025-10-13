@@ -6,11 +6,10 @@ from pathlib import Path
 from typing import List, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from quicklogs import get_logger
 from textdistance import lcsseq
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger("taskflows")
 
 # _SYSTEMD_FILE_PREFIX = "taskflows-"
 _SYSTEMD_FILE_PREFIX = "taskflows-"
@@ -30,7 +29,7 @@ class Config(BaseSettings):
     display_timezone: str = "UTC"
     fluent_bit: str = "localhost:24224"
     grafana: str = "localhost:3000"
-    grafana_api_key: Optional[str] = None
+    grafana_api_key: Optional[str] = "glsa_VniUlEqrercPN778JfFtLg5t66MrfXh2_a99ba588"
 
     model_config = SettingsConfigDict(env_prefix="taskflows_")
 
