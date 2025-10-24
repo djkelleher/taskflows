@@ -264,7 +264,7 @@ async def run_command(command_string: str, user_id: str = "") -> str:
         if not servers:
             servers = None  # Will use default localhost:7777
 
-        # Execute command and handle the new return type Dict[str, MsgComp]
+        # Execute command and handle the new return type Dict[str, Component]
         return await execute_command_on_servers(command, servers=servers, **kwargs)
 
     except Exception as e:

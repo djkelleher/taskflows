@@ -10,7 +10,14 @@ from zoneinfo import ZoneInfo
 
 import requests
 import sqlalchemy as sa
-from alert_msgs.components import CodeBlock, Map, MsgComp, StatusIndicator, Table, Text
+from alert_msgs.components import (
+    CodeBlock,
+    Component,
+    Map,
+    StatusIndicator,
+    Table,
+    Text,
+)
 
 # from trading.databases.timescale import pgconn
 from dynamic_imports import find_instances
@@ -981,7 +988,7 @@ async def upsert_server(
 
 async def execute_command_on_servers(
     command: str, servers=None, **kwargs
-) -> Dict[str, MsgComp]:
+) -> Dict[str, Component]:
     """
     Execute a command on specified servers and return JSON responses.
 
@@ -993,7 +1000,7 @@ async def execute_command_on_servers(
         **kwargs: JSON parameters to forward to the API
 
     Returns:
-        Dictionary mapping hostname to MsgComp response
+        Dictionary mapping hostname to Component response
     """
     # Normalize servers argument
     if not servers:
