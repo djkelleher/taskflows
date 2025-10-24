@@ -1,19 +1,21 @@
+import logging
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from textdistance import lcsseq
-
 from quicklogs import get_logger
+from textdistance import lcsseq
 
 logger = get_logger("taskflows")
 
 # _SYSTEMD_FILE_PREFIX = "taskflows-"
 _SYSTEMD_FILE_PREFIX = "taskflows-"
 
-services_data_dir = Path("/opt/taskflows/data")
+# Allow configuring data directory via environment variable for testing
+services_data_dir = Path(os.environ.get("TASKFLOWS_DATA_DIR", "/opt/taskflows/data"))
 services_data_dir.mkdir(parents=True, exist_ok=True)
 
 systemd_dir = Path.home().joinpath(".config", "systemd", "user")
