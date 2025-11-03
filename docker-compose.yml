@@ -5,7 +5,7 @@ services:
     network_mode: host
     command: -config.file=/etc/loki/loki-config.yaml
     volumes:
-      - ./configs/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - ./configs/loki/generated/loki-local-dev.yaml:/etc/loki/loki-config.yaml:ro
       - loki-data:/loki
     restart: unless-stopped
     healthcheck:
@@ -34,9 +34,9 @@ services:
       - /run/systemd/journal:/run/systemd/journal:ro
       - /run/user/1000/systemd/journal:/run/user/1000/systemd/journal:ro
       - /etc/machine-id:/etc/machine-id:ro
-      - ./configs/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
-      - ./configs/parsers.conf:/fluent-bit/etc/parsers.conf:ro
-      - ./configs/scripts:/fluent-bit/etc/scripts:ro
+      - ./configs/fluent_bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./configs/fluent_bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      - ./configs/fluent_bit/scripts:/fluent-bit/etc/scripts:ro
       - fluent-bit-state:/var/log
     user: "0"  # Run as root to access system journal
     cap_add:

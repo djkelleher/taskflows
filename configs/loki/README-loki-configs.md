@@ -13,7 +13,7 @@ This directory contains a flexible Jinja2-based template system for generating L
 
 ### 1. **local-dev**
 - **Storage**: Local filesystem
-- **Retention**: 7 days
+- **Retention**: 30 days
 - **Use Case**: Development and testing environments
 - **Features**: Debug logging, minimal resource usage, WAL enabled
 

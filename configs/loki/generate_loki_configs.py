@@ -81,18 +81,6 @@ def validate_config(config: Dict[str, Any], profile_name: str) -> bool:
             if not s3_config.get(field):
                 errors.append(f"Missing required S3 field: storage.s3.{field}")
     
-    elif backend == 'gcs':
-        gcs_config = storage.get('gcs', {})
-        if not gcs_config.get('bucket'):
-            errors.append("Missing required GCS field: storage.gcs.bucket")
-    
-    elif backend == 'azure':
-        azure_config = storage.get('azure', {})
-        required_azure = ['account_name', 'account_key', 'container']
-        for field in required_azure:
-            if not azure_config.get(field):
-                errors.append(f"Missing required Azure field: storage.azure.{field}")
-    
     if errors:
         print(f"\nValidation errors for profile '{profile_name}':", file=sys.stderr)
         for error in errors:
