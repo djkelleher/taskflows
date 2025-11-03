@@ -833,11 +833,24 @@ def _make_unit_match_pattern(
     return re.sub(r"\*{2,}", "*", pattern)
 
 
+def is_stop_service(unit_file: str) -> bool:
+    """Check if a unit file is a stop service.
+
+    Args:
+        unit_file: Unit file path or filename
+
+    Returns:
+        True if the unit is a stop service (starts with "stop-")
+    """
+    filename = os.path.basename(unit_file) if os.path.sep in unit_file else unit_file
+    return filename.startswith("stop-")
+
+
 def _start_service(files: Sequence[str]):
     mgr = systemd_manager()
     for sf in files:
         sf = os.path.basename(sf)
-        if sf.startswith("stop-"):
+        if is_stop_service(sf):
             continue
         logger.info(f"Running: {sf}")
         mgr.StartUnit(sf, "replace")
@@ -860,7 +873,7 @@ def _stop_service(files: Sequence[str]):
 def _restart_service(files: Sequence[str]):
     units = [os.path.basename(f) for f in files]
     # don't restart "stop" units
-    units = [u for u in units if u.startswith(_SYSTEMD_FILE_PREFIX)]
+    units = [u for u in units if not is_stop_service(u)]
     mgr = systemd_manager()
     for sf in units:
         logger.info(f"Restarting: {sf}")
