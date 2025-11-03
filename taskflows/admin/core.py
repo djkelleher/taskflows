@@ -10,14 +10,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 import sqlalchemy as sa
-from alert_msgs.components import (
-    CodeBlock,
-    Component,
-    Map,
-    StatusIndicator,
-    Table,
-    Text,
-)
+from alert_msgs.components import Component, Map, Table, Text
+from alert_msgs.utils import as_code_block
 
 # from trading.databases.timescale import pgconn
 from dynamic_imports import find_instances

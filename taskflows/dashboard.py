@@ -161,11 +161,28 @@ class Dashboard:
             f"http://{config.grafana}/api/datasources",
             headers={"Authorization": f"Bearer {self._api_key}"},
         )
-        if resp.status_code == 200:
-            datasources = resp.json()
-            for ds in datasources:
-                if ds.get("type") == "loki":
-                    return ds.get("uid")
+        if resp.status_code == 401:
+            logger.error(
+                "Grafana API authentication failed. The API key may be invalid or expired. "
+                "Please create a new API key and update TASKFLOWS_GRAFANA_API_KEY"
+            )
+            return None
+        elif resp.status_code != 200:
+            logger.error(
+                f"Failed to get datasources from Grafana: {resp.status_code} - {resp.text}"
+            )
+            return None
+
+        datasources = resp.json()
+        for ds in datasources:
+            if ds.get("type") == "loki":
+                logger.debug(f"Found Loki datasource with UID: {ds.get('uid')}")
+                return ds.get("uid")
+
+        logger.warning(
+            "Loki datasource not found in Grafana. "
+            "Make sure the datasource is provisioned or create it manually in Grafana."
+        )
 
     def _create_gl_dashboard(self, loki_uid: str) -> GLDashboard:
 

@@ -29,7 +29,7 @@ class Config(BaseSettings):
     display_timezone: str = "UTC"
     fluent_bit: str = "localhost:24224"
     grafana: str = "localhost:3000"
-    grafana_api_key: Optional[str] = "glsa_VniUlEqrercPN778JfFtLg5t66MrfXh2_a99ba588"
+    grafana_api_key: Optional[str] = "glsa_eNGkj4CK08K3Huj4UyuS5TfD0eCcHOoZ_633dd6e8"
 
     model_config = SettingsConfigDict(env_prefix="taskflows_")
 

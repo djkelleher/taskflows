@@ -1,23 +1,5 @@
 # taskflows: Task Management, Scheduling, and Alerting System
 
-## TODO
-cgroup sharing
-
-I want to make a couple different loki config files so that we have different options for log archive/retention. I definitely want log rotation to s3 / other s3 compatible object stores. and I also want drop after specified number of days policy that we currently have now. is there other common configs that you would suggest? maybe we can use a jinja template to create the configs?
-
-fix loki log json encoding
-distributed -- queue, service templates?
-
-review the current service function serializarion. it doesn't currently work on docker becaude the serialized file needs to be mounted to docker container. can we set this up to automatically mount the volume? also review the whole process to see if there are ways we can make it simpler/more robust. look at exec.py and other files
-
-
-
-look at @unified_service_manager.py. This is a demo example that I need to integrate into the main application. e.g. udates need to be applied to @taskflows/docker.py and maybe others. I simultaneously need to tweak the current      │
-│   logic: for 'docker run', I want to use the docker CLI. the service might have to read the docker run command from a file if the length of the command is past limits. for everything other than docker run service command, we should    │
-│   use the python docker API, like is currently done in the DockerContainer class                                                                                                                                                           │
-╰───────────────────────────────────────────────────────────────────────────────────
-####
-
 taskflows is a Python library that provides robust task management, scheduling, and alerting capabilities. It allows you to convert regular functions into managed tasks with logging, alerts, retries, and more. taskflows also supports creating system services that run on specified schedules with flexible constraints.
 
 ## Features
