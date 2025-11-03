@@ -1,0 +1,18 @@
+# TaskFlows Cloud Deployment Dependencies
+#
+# Install these for full cloud deployment support:
+#   pip install -r requirements-cloud.txt
+
+# Required for AWS Lambda (boto3 backend)
+boto3>=1.34.0
+
+# Required for Pulumi (recommended for production)
+pulumi>=3.100.0
+pulumi-aws>=6.20.0
+
+# For improved function serialization
+cloudpickle>=3.0.0
+
+# Optional but recommended for production deployments
+docker>=7.0.0  # For Docker-based dependency builds
+pydantic>=2.0.0  # For configuration validation
