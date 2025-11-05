@@ -11,6 +11,7 @@ from typing import Optional
 
 import click
 from click import Group
+from rich.console import Console
 
 from taskflows.admin.core import execute_command_on_servers
 from taskflows.entrypoints import async_entrypoint
@@ -24,6 +25,11 @@ from .security import (
 )
 
 cli = Group("admin")
+
+
+def get_console_with_wrap() -> Console:
+    """Create a Rich Console with soft wrapping enabled for better text display."""
+    return Console(soft_wrap=True)
 
 
 @cli.group
@@ -180,6 +186,13 @@ async def list_services(match: Optional[str] = None, server: tuple = ()):
     help="Only show running services.",
 )
 @click.option(
+    "-a",
+    "--all",
+    "show_all",
+    is_flag=True,
+    help="Show all services including stop-* and restart-* services.",
+)
+@click.option(
     "--server",
     "-s",
     multiple=True,
@@ -187,7 +200,7 @@ async def list_services(match: Optional[str] = None, server: tuple = ()):
 )
 @async_entrypoint(blocking=True)
 async def status(
-    match: Optional[str] = None, running: bool = False, server: tuple = ()
+    match: Optional[str] = None, running: bool = False, show_all: bool = False, server: tuple = ()
 ):
     """Show status of services from specified servers."""
     kwargs = {}
@@ -195,10 +208,14 @@ async def status(
         kwargs["match"] = match
     if running:
         kwargs["running"] = running
+    if show_all:
+        kwargs["all"] = show_all
 
     results = await execute_command_on_servers("status", servers=server, **kwargs)
+    console = get_console_with_wrap()
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        console.print(f"[bold]{hostname}:[/bold]")
+        result.console(console)
 
 
 @cli.command

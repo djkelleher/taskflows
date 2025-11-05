@@ -9,7 +9,6 @@ from pathlib import Path
 from pprint import pformat, pprint
 from typing import Callable, Dict, List, Literal, Optional, Sequence, Set, Union
 
-import cloudpickle
 import dbus
 from pydantic.dataclasses import dataclass as pdataclass
 
@@ -178,6 +177,8 @@ class Service:
     start_schedule: Optional[Schedule | Sequence[Schedule]] = None
     # when the service should be stopped.
     stop_schedule: Optional[Schedule | Sequence[Schedule]] = None
+    # when the service should be restarted.
+    restart_schedule: Optional[Schedule | Sequence[Schedule]] = None
     # command to execute when the service is restarted.
     restart_command: Optional[str] = None
     # signal used to stop the service.
@@ -444,6 +445,8 @@ class Service:
             files.append(f"{file_stem}.timer")
         if self.stop_schedule:
             files.append(f"stop-{file_stem}.timer")
+        if self.restart_schedule:
+            files.append(f"restart-{file_stem}.timer")
         return [os.path.join(systemd_dir, f) for f in files]
 
     @property
@@ -453,6 +456,8 @@ class Service:
         files = [f"{file_stem}.service"]
         if self.stop_schedule:
             files.append(f"stop-{file_stem}.service")
+        if self.restart_schedule:
+            files.append(f"restart-{file_stem}.service")
         return [os.path.join(systemd_dir, f) for f in files]
 
     @property
@@ -487,18 +492,28 @@ class Service:
         """Disable this service."""
         _disable_service(self.unit_files)
 
-    def remove(self):
-        """Remove this service."""
+    def remove(self, preserve_container: bool = False):
+        """Remove this service.
+
+        Args:
+            preserve_container: If True, don't delete the Docker container (for persisted containers)
+        """
         _remove_service(
             service_files=self.service_files,
             timer_files=self.timer_files,
+            preserve_container=preserve_container,
         )
 
     def create(self, defer_reload: bool = False):
         """Create this service."""
         logger.info(f"Creating service {self}")
         # Remove old version if exists
-        self.remove()
+        # For persisted Docker containers, preserve the container
+        preserve_container = (
+            isinstance(self.environment, DockerContainer)
+            and self.environment.persisted
+        )
+        self.remove(preserve_container=preserve_container)
         self._write_timer_units()
         self._write_service_units()
         for func in self._pkl_funcs:
@@ -508,8 +523,13 @@ class Service:
             # Create Docker container if needed.
             container = self.environment
             if container.persisted:
-                # For start services, create container with cgroup parent
-                container.create(cgroup_parent=self.slice)
+                # For persisted containers, only create if it doesn't already exist
+                # This preserves state and avoids unnecessary recreation
+                if not container.exists:
+                    logger.info(f"Creating persisted Docker container: {container.name}")
+                    container.create(cgroup_parent=self.slice)
+                else:
+                    logger.info(f"Persisted Docker container already exists: {container.name}")
             # For run services, no need to do anything here since
             # the docker run command is directly in the systemd service file
 
@@ -526,9 +546,10 @@ class Service:
         pprint(dict(load_service_files(self.unit_files)))
 
     def _write_timer_units(self):
-        for is_stop_timer, schedule in (
-            (False, self.start_schedule),
-            (True, self.stop_schedule),
+        for prefix, schedule in (
+            (None, self.start_schedule),
+            ("stop", self.stop_schedule),
+            ("restart", self.restart_schedule),
         ):
             if schedule is None:
                 continue
@@ -540,13 +561,13 @@ class Service:
                 timer.update(schedule.unit_entries)
             content = [
                 "[Unit]",
-                f"Description={'stop ' if is_stop_timer else ''}timer for {self.name}",
+                f"Description={prefix + ' ' if prefix else ''}timer for {self.name}",
                 "[Timer]",
                 *timer,
                 "[Install]",
                 "WantedBy=timers.target",
             ]
-            self._write_systemd_file("timer", "\n".join(content), is_stop_timer)
+            self._write_systemd_file("timer", "\n".join(content), prefix=prefix)
 
     def _write_service_units(self):
         srv_file = self._write_service_file(
@@ -557,7 +578,13 @@ class Service:
             service = [f"ExecStart=systemctl --user stop {os.path.basename(srv_file)}"]
             # Pass unit entries to stop service as well to maintain consistency
             self._write_service_file(
-                unit=self.unit_entries, service=service, is_stop_unit=True
+                unit=self.unit_entries, service=service, prefix="stop"
+            )
+        if self.restart_schedule:
+            service = [f"ExecStart=systemctl --user restart {os.path.basename(srv_file)}"]
+            # Pass unit entries to restart service as well to maintain consistency
+            self._write_service_file(
+                unit=self.unit_entries, service=service, prefix="restart"
             )
 
     @property
@@ -568,13 +595,13 @@ class Service:
         self,
         unit: Optional[Union[List[str], Set[str]]] = None,
         service: Optional[Union[List[str], Set[str]]] = None,
-        is_stop_unit: bool = False,
+        prefix: Optional[str] = None,
     ):
         # Always include [Unit] section with description
         content = ["[Unit]"]
         # Add description based on service type
-        if is_stop_unit:
-            description = f"Stop service for {self.name}"
+        if prefix:
+            description = f"{prefix.capitalize()} service for {self.name}"
         else:
             description = self.description or f"Service for {self.name}"
         content.append(f"Description={description}")
@@ -594,19 +621,19 @@ class Service:
             "WantedBy=default.target",
         ]
         return self._write_systemd_file(
-            "service", "\n".join(content), is_stop_unit=is_stop_unit
+            "service", "\n".join(content), prefix=prefix
         )
 
     def _write_systemd_file(
         self,
         unit_type: Literal["timer", "service"],
         content: str,
-        is_stop_unit: bool = False,
+        prefix: Optional[str] = None,
     ) -> str:
         systemd_dir.mkdir(parents=True, exist_ok=True)
         file_stem = self.base_file_stem
-        if is_stop_unit:
-            file_stem = f"stop-{file_stem}"
+        if prefix:
+            file_stem = f"{prefix}-{file_stem}"
         file = systemd_dir / f"{file_stem}.{unit_type}"
         if file.exists():
             logger.warning(f"Replacing existing unit: {file}")
@@ -833,27 +860,26 @@ def _make_unit_match_pattern(
     return re.sub(r"\*{2,}", "*", pattern)
 
 
-def is_stop_service(unit_file: str) -> bool:
-    """Check if a unit file is a stop service.
+def is_start_service(unit_file: str) -> bool:
+    """Check if a unit file is a main start service (not an auxiliary stop/restart service).
 
     Args:
         unit_file: Unit file path or filename
 
     Returns:
-        True if the unit is a stop service (starts with "stop-")
+        True if the unit is the main service (doesn't start with "stop-" or "restart-")
     """
     filename = os.path.basename(unit_file) if os.path.sep in unit_file else unit_file
-    return filename.startswith("stop-")
+    return not (filename.startswith("stop-") or filename.startswith("restart-"))
 
 
 def _start_service(files: Sequence[str]):
     mgr = systemd_manager()
     for sf in files:
         sf = os.path.basename(sf)
-        if is_stop_service(sf):
-            continue
-        logger.info(f"Running: {sf}")
-        mgr.StartUnit(sf, "replace")
+        if is_start_service(sf):
+            logger.info(f"Running: {sf}")
+            mgr.StartUnit(sf, "replace")
 
 
 def _stop_service(files: Sequence[str]):
@@ -872,8 +898,8 @@ def _stop_service(files: Sequence[str]):
 
 def _restart_service(files: Sequence[str]):
     units = [os.path.basename(f) for f in files]
-    # don't restart "stop" units
-    units = [u for u in units if not is_stop_service(u)]
+    # only restart main service units
+    units = [u for u in units if is_start_service(u)]
     mgr = systemd_manager()
     for sf in units:
         logger.info(f"Restarting: {sf}")
@@ -922,7 +948,7 @@ def _disable_service(files: Sequence[str]):
     disable_files(files)
 
 
-def _remove_service(service_files: Sequence[str], timer_files: Sequence[str]):
+def _remove_service(service_files: Sequence[str], timer_files: Sequence[str], preserve_container: bool = False):
     def valid_file_paths(files):
         files = [Path(f) for f in files]
         return [f for f in files if f.is_file()]
@@ -930,7 +956,7 @@ def _remove_service(service_files: Sequence[str], timer_files: Sequence[str]):
     service_files = valid_file_paths(service_files)
     timer_files = valid_file_paths(timer_files)
     logger.info(
-        "Removing %i services and %i timers", len(service_files), len(timer_files)
+        f"Removing {len(service_files)} services and {len(timer_files)} timers"
     )
     files = service_files + timer_files
     _stop_service(files)
@@ -949,16 +975,17 @@ def _remove_service(service_files: Sequence[str], timer_files: Sequence[str]):
         )
         if container_name:
             container_names.add(container_name.group(1))
-    for cname in container_names:
-        delete_docker_container(cname)
+    if not preserve_container:
+        for cname in container_names:
+            delete_docker_container(cname)
+    else:
+        logger.info(f"Preserving Docker containers: {container_names}")
     for srv in service_files:
         files.extend(services_data_dir.glob(f"{extract_service_name(srv)}#*.pickle"))
     for file in files:
         logger.info(f"Deleting {file}")
         file.unlink()
     logger.info(
-        "Finished removing %i services and %i timers",
-        len(service_files),
-        len(timer_files),
+        f"Finished removing {len(service_files)} services and {len(timer_files)} timers"
     )
     reload_unit_files()

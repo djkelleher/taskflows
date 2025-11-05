@@ -177,8 +177,9 @@ async def list_services_endpoint(
 async def status_endpoint(
     match: Optional[str] = Query(None),
     running: bool = Query(False),
+    all: bool = Query(False),
 ):
-    return await status(match=match, running=running, as_json=True)
+    return await status(match=match, running=running, all=all, as_json=True)
 
 
 @app.get("/logs/{service_name}")

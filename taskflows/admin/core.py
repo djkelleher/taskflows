@@ -235,6 +235,7 @@ async def status(
     host: Optional[str] = None,
     match: Optional[str] = None,
     running: bool = False,
+    all: bool = False,
     as_json: bool = False,
 ) -> Table:
     """Call the /status endpoint and return a Table component.
@@ -243,6 +244,7 @@ async def status(
         host (str): Host address of the admin API server. If None, calls local function.
         match (str): Optional pattern to filter services
         running (bool): Only show running services
+        all (bool): Show all services including stop-* and restart-* services
 
     Returns:
         Table: Table showing service status
@@ -301,6 +303,7 @@ async def status(
             "Service",
             "description",
             "Service\nEnabled",
+            "Timer\nEnabled",
             "load_state",
             "active_state",
             "sub_state",
@@ -309,7 +312,6 @@ async def status(
             "Last Finish",
             "Next Start",
             "Timers",
-            "Timer\nEnabled",
         ]
 
         # Gather service states
@@ -357,6 +359,10 @@ async def status(
             if running and row.get("active_state") != "active":
                 continue
 
+            # Filter out stop-* and restart-* services unless all flag is set
+            if not all and (srv_name.startswith("stop-") or srv_name.startswith("restart-")):
+                continue
+
             # Format timers
             timers = [
                 f"{t['base']}({t['spec']})" for t in row.get("Timers Calendar", [])
@@ -396,7 +402,7 @@ async def status(
 
     else:
         # Call via API
-        params = {"running": running}
+        params = {"running": running, "all": all}
         if match:
             params["match"] = match
         data = call_api(host, "/status", method="GET", params=params, timeout=10)
