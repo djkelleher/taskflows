@@ -44,6 +44,7 @@ class ShutdownHandler:
         self.loop = asyncio.get_event_loop_policy().get_event_loop()
         self.callbacks = []
         self._shutdown_task = None
+        self._exit_code = None
         self.loop.set_exception_handler(self._loop_exception_handle)
         for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             self.loop.add_signal_handler(
@@ -153,9 +154,8 @@ class ShutdownHandler:
         This method executes the shutdown process in the following steps:
 
         1. Execute all registered shutdown callbacks.
-        2. Cancel all outstanding tasks in the event loop.
-        3. Stop the event loop.
-        4. Exit the program with the specified exit code.
+        2. Store the exit code for later use.
+        3. Schedule loop stop to occur after this task completes.
 
         Args:
             exit_code (int): The exit code to use when terminating the program.
@@ -172,18 +172,12 @@ class ShutdownHandler:
                 logger.exception(
                     f"{type(err)} error in shutdown callback {cb}: {err}"
                 )
-        # Cancel all outstanding tasks in the event loop
-        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        logger.info(f"Cancelling {len(tasks)} outstanding tasks")
-        for task in tasks:
-            # Cancel the task to prevent it from running after we've stopped
-            # the event loop
-            task.cancel()
-        # Stop the event loop to prevent any new tasks from being scheduled
-        self.loop.stop()
-        # Exit the program with the specified exit code
-        logger.info(f"Exiting {exit_code}")
-        sys.exit(exit_code)
+        # Store the exit code for retrieval after event loop completes
+        self._exit_code = exit_code
+        # Schedule loop stop to happen after this coroutine completes
+        # This allows the current task to finish before the loop stops
+        logger.info(f"Scheduling event loop stop. Exit code: {exit_code}")
+        self.loop.call_soon(self.loop.stop)
 
 
 @cache
@@ -217,10 +211,24 @@ def async_entrypoint(blocking: bool = False, shutdown_on_exception: bool = True)
         @wraps(f)
         def wrapper(*args, **kwargs):
             task = loop.create_task(async_entrypoint_async(*args, **kwargs))
-            if blocking:
-                loop.run_until_complete(task)
-            else:
-                loop.run_forever()
+            try:
+                if blocking:
+                    loop.run_until_complete(task)
+                else:
+                    loop.run_forever()
+            finally:
+                # After loop stops, just close it
+                # The loop shutdown already handled task cancellation via _shutdown()
+                try:
+                    if not loop.is_closed():
+                        loop.close()
+                except Exception as e:
+                    # Log but don't fail on cleanup errors
+                    logger.debug(f"Error closing event loop: {e}")
+
+                # Exit with the stored exit code if shutdown was requested
+                if sdh._exit_code is not None:
+                    sys.exit(sdh._exit_code)
 
         return wrapper
 

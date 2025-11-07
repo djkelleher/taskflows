@@ -33,6 +33,7 @@ from taskflows.service import (
     extract_service_name,
     get_schedule_info,
     get_unit_file_states,
+    is_start_service,
 )
 from taskflows.service import get_unit_files as _get_unit_files
 from taskflows.service import (
@@ -758,6 +759,8 @@ async def restart(
         # Call local free function
         logger.info(f"restart called with match={match}")
         files = get_unit_files(match=match, unit_type="service")
+        # Filter out stop-* and restart-* auxiliary services
+        files = [f for f in files if is_start_service(f)]
         _restart_service(files)
         logger.info(f"restart restarted {len(files)} units")
         result = with_hostname({"restarted": files})
