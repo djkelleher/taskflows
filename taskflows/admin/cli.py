@@ -1,9 +1,9 @@
 import os
 
-# Set logger level to CRITICAL (50) to show exceptions only
+# Configure CLI logging to only log to file (no terminal output)
 # This MUST be set before any taskflows imports that use the logger
-os.environ['TASKFLOWS_LEVEL'] = '50'
-os.environ['QUICKLOGS_LEVEL'] = '50'
+os.environ['TASKFLOWS_NO_TERMINAL'] = '1'
+os.environ['TASKFLOWS_FILE_DIR'] = '/opt/taskflows/data/logs'
 
 from functools import lru_cache
 from itertools import cycle
@@ -12,6 +12,7 @@ from typing import Optional
 import click
 from click import Group
 from rich.console import Console
+from alert_msgs.components import Table
 
 from taskflows.admin.core import execute_command_on_servers
 from taskflows.entrypoints import async_entrypoint
@@ -150,7 +151,12 @@ async def history(limit: int, match: Optional[str] = None, server: tuple = ()):
 
     results = await execute_command_on_servers("history", servers=server, **kwargs)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command(name="list")
@@ -170,7 +176,12 @@ async def list_services(match: Optional[str] = None, server: tuple = ()):
 
     results = await execute_command_on_servers("list", servers=server, **kwargs)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command
@@ -214,8 +225,12 @@ async def status(
     results = await execute_command_on_servers("status", servers=server, **kwargs)
     console = get_console_with_wrap()
     for hostname, result in results.items():
-        console.print(f"[bold]{hostname}:[/bold]")
-        result.console(console)
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console(console)
+        else:
+            console.print(f"[bold]{hostname}:[/bold]")
+            result.console(console)
 
 
 @cli.command
@@ -238,7 +253,12 @@ async def logs(service_name: str, n_lines: int, server: Optional[str] = None):
         "logs", servers=server, service_name=service_name, n_lines=n_lines
     )
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command(name="create")
@@ -272,7 +292,12 @@ async def cli_create(search_in, include, exclude, server: tuple = ()):
 
     results = await execute_command_on_servers("create", servers=server, **kwargs)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command
@@ -304,7 +329,12 @@ async def start(
 
     results = await execute_command_on_servers("start", servers=server, **kwargs)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command
@@ -336,7 +366,12 @@ async def stop(
 
     results = await execute_command_on_servers("stop", servers=server, **kwargs)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command
@@ -351,7 +386,12 @@ async def restart(match: str, server: Optional[str] = None):
     """Restart services on specified server."""
     results = await execute_command_on_servers("restart", servers=server, match=match)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command
@@ -383,7 +423,12 @@ async def enable(
 
     results = await execute_command_on_servers("enable", servers=server, **kwargs)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command
@@ -415,7 +460,12 @@ async def disable(
 
     results = await execute_command_on_servers("disable", servers=server, **kwargs)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command
@@ -430,7 +480,12 @@ async def remove(match: str, server: Optional[str] = None):
     """Remove services/timers on specified server."""
     results = await execute_command_on_servers("remove", servers=server, match=match)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 @cli.command
@@ -446,7 +501,12 @@ async def show(match: str, server: tuple = ()):
     """Show service file contents from specified servers."""
     results = await execute_command_on_servers("show", servers=server, match=match)
     for hostname, result in results.items():
-        click.echo(f"{hostname}: {result.console()}")
+        # Tables already have Host column, Text results need hostname prefix
+        if isinstance(result, Table):
+            result.console()
+        else:
+            click.echo(f"{hostname}:")
+            result.console()
 
 
 def table_column_colors():

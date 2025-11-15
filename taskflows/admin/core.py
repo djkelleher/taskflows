@@ -757,12 +757,10 @@ async def restart(
 
     if host is None:
         # Call local free function
-        logger.info(f"restart called with match={match}")
         files = get_unit_files(match=match, unit_type="service")
         # Filter out stop-* and restart-* auxiliary services
         files = [f for f in files if is_start_service(f)]
         _restart_service(files)
-        logger.info(f"restart restarted {len(files)} units")
         result = with_hostname({"restarted": files})
     else:
         # Call via API
@@ -1003,7 +1001,8 @@ async def execute_command_on_servers(
         **kwargs: JSON parameters to forward to the API
 
     Returns:
-        Dictionary mapping hostname to Component response
+        Dictionary mapping hostname to Component response.
+        If all results are Tables, they will be concatenated with a Host column.
     """
     # Normalize servers argument
     if not servers:
@@ -1076,6 +1075,26 @@ async def execute_command_on_servers(
         # pass hostname (normalized) directly as host parameter
         # If address is None, it will use local functions
         results[hostname] = await func(host=server["address"], **kwargs)
+
+    # If all results are Tables, concatenate them with Host column
+    if len(results) > 0 and all(isinstance(r, Table) for r in results.values()):
+        combined_rows = []
+        combined_title = None
+
+        for hostname, table in results.items():
+            # Extract title from first table
+            if combined_title is None and table.title:
+                combined_title = table.title.value if hasattr(table.title, 'value') else str(table.title)
+
+            # Add Host column to each row
+            for row in table.rows:
+                row_with_host = {"Host": hostname, **row}
+                combined_rows.append(row_with_host)
+
+        # Create combined table with Host as first column
+        combined_table = Table(combined_rows, title=combined_title)
+        # Return single result
+        return {"_combined": combined_table}
 
     return results
 

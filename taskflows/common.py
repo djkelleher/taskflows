@@ -9,6 +9,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from quicklogs import get_logger
 from textdistance import lcsseq
 
+# Set default logging configuration if not already set
+# This ensures logs go to both terminal and file by default
+# CLI will override these to disable terminal output
+if 'TASKFLOWS_FILE_DIR' not in os.environ:
+    os.environ['TASKFLOWS_FILE_DIR'] = '/opt/taskflows/data/logs'
+if 'TASKFLOWS_NO_TERMINAL' not in os.environ:
+    os.environ['TASKFLOWS_NO_TERMINAL'] = '0'  # Enable terminal by default
+
+# Initialize logger - it will use environment variables set above
 logger = get_logger("taskflows")
 
 # _SYSTEMD_FILE_PREFIX = "taskflows-"
