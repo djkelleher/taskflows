@@ -376,7 +376,14 @@ async def _async_task_wrapper(
     Wraps a task function with retry and timeout logic, and logs the result
     of the task using the provided logger.
     """
+    import time
+
+    from taskflows.metrics import task_count, task_duration, task_errors, task_retries
+
     await task_logger.on_task_start()
+    start_time = time.time()
+    status = "failure"  # Default status
+
     for i in range(retries + 1):
         try:
             # Check if function is async
@@ -404,11 +411,40 @@ async def _async_task_wrapper(
             await task_logger.on_task_finish(
                 success=True, retries=i, return_value=result
             )
+            # Track success metrics
+            status = "success"
+            task_count.labels(task_name=task_logger.name, status="success").inc()
+            duration = time.time() - start_time
+            task_duration.labels(task_name=task_logger.name, status="success").observe(duration)
             return result
+        except TimeoutError as exp:
+            msg = f"Task {task_logger.name} timed out. Retries remaining: {retries-i}.\n({type(exp)}) -- {exp}"
+            logger.exception(msg)
+            await task_logger.on_task_error(exp)
+            if i < retries:
+                task_retries.labels(task_name=task_logger.name).inc()
+            else:
+                # Final timeout failure
+                status = "timeout"
+                task_errors.labels(task_name=task_logger.name, error_type="timeout").inc()
+                task_count.labels(task_name=task_logger.name, status="timeout").inc()
         except Exception as exp:
             msg = f"Error executing task {task_logger.name}. Retries remaining: {retries-i}.\n({type(exp)}) -- {exp}"
             logger.exception(msg)
             await task_logger.on_task_error(exp)
+            if i < retries:
+                task_retries.labels(task_name=task_logger.name).inc()
+            else:
+                # Final failure
+                error_type = type(exp).__name__
+                task_errors.labels(task_name=task_logger.name, error_type=error_type).inc()
+                task_count.labels(task_name=task_logger.name, status="failure").inc()
+
+    # Track final duration for failures
+    if status != "success":
+        duration = time.time() - start_time
+        task_duration.labels(task_name=task_logger.name, status=status).observe(duration)
+
     await task_logger.on_task_finish(success=False, retries=retries)
 
 

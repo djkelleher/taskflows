@@ -20,10 +20,26 @@ from .common import (
     services_data_dir,
     systemd_dir,
 )
-from .constraints import *
-from .docker import *
+from .constraints import (
+    CgroupConfig,
+    CPUPressure,
+    CPUs,
+    HardwareConstraint,
+    IOPressure,
+    Memory,
+    MemoryPressure,
+    SystemLoadConstraint,
+)
+from .docker import (
+    DockerContainer,
+    DockerImage,
+    Ulimit,
+    Volume,
+    delete_docker_container,
+    get_docker_client,
+)
 from .exec import PickledFunction
-from .schedule import *
+from .schedule import Calendar, Periodic, Schedule
 
 ServiceT = Union[str, "Service"]
 ServicesT = Union[ServiceT, Sequence[ServiceT]]
@@ -245,6 +261,23 @@ class Service:
     cgroup_config: Optional['CgroupConfig'] = None
 
     def __post_init__(self):
+        # SECURITY: Validate service name to prevent injection
+        from taskflows.security_validation import validate_service_name, validate_env_file_path
+
+        try:
+            self.name = validate_service_name(self.name)
+        except Exception as e:
+            logger.error(f"Invalid service name '{self.name}': {e}")
+            raise
+
+        # SECURITY: Validate env_file path to prevent directory traversal
+        if self.env_file:
+            try:
+                self.env_file = str(validate_env_file_path(self.env_file, allow_nonexistent=True))
+            except Exception as e:
+                logger.error(f"Invalid env_file path: {e}")
+                raise
+
         self._pkl_funcs = []
         self.env = self.env or {}
         self.env["PYTHONUNBUFFERED"] = "1"
@@ -891,21 +924,33 @@ def is_start_service(unit_file: str) -> bool:
 
 
 def _start_service(files: Sequence[str]):
+    from taskflows.metrics import service_state
+
     mgr = systemd_manager()
     for sf in files:
         sf = os.path.basename(sf)
         if is_start_service(sf):
+            service_name = extract_service_name(sf)
             logger.info(f"Running: {sf}")
             mgr.StartUnit(sf, "replace")
+            # Track service state change
+            service_state.labels(service_name=service_name, state="active").set(1)
+            service_state.labels(service_name=service_name, state="inactive").set(0)
 
 
 def _stop_service(files: Sequence[str]):
+    from taskflows.metrics import service_state
+
     mgr = systemd_manager()
     for sf in files:
         sf = os.path.basename(sf)
+        service_name = extract_service_name(sf)
         logger.info(f"Stopping: {sf}")
         try:
             mgr.StopUnit(sf, "replace")
+            # Track service state change
+            service_state.labels(service_name=service_name, state="inactive").set(1)
+            service_state.labels(service_name=service_name, state="active").set(0)
         except dbus.exceptions.DBusException as err:
             logger.warning(f"Could not stop {sf}: ({type(err)}) {err}")
 
@@ -914,14 +959,19 @@ def _stop_service(files: Sequence[str]):
 
 
 def _restart_service(files: Sequence[str]):
+    from taskflows.metrics import service_restarts
+
     units = [os.path.basename(f) for f in files]
     # only restart main service units
     units = [u for u in units if is_start_service(u)]
     mgr = systemd_manager()
     for sf in units:
+        service_name = extract_service_name(sf)
         logger.info(f"Restarting: {sf}")
         try:
             mgr.RestartUnit(sf, "replace")
+            # Track restart
+            service_restarts.labels(service_name=service_name, reason="manual").inc()
         except dbus.exceptions.DBusException as err:
             logger.warning(f"Could not restart {sf}: ({type(err)}) {err}")
 

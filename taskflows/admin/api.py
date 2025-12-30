@@ -27,8 +27,8 @@ from taskflows.admin.core import (
     stop,
     task_history,
     upsert_server,
-    with_hostname,
 )
+from taskflows.admin.utils import with_hostname
 from taskflows.admin.security import security_config, validate_hmac_request
 from taskflows.common import Config, logger
 from taskflows.service import RestartPolicy, Service, Venv
@@ -51,7 +51,15 @@ async def lifespan(app: FastAPI):
     # Shutdown (if needed)
 
 
-app = FastAPI(title="Services Daemon API", lifespan=lifespan)
+app = FastAPI(
+    title="Taskflows Services API",
+    description="Service management, task scheduling, and monitoring",
+    version="0.1.0",
+    docs_url="/docs",  # Enable Swagger UI
+    redoc_url="/redoc",  # Enable ReDoc
+    openapi_url="/openapi.json",
+    lifespan=lifespan,
+)
 
 # Add CORS middleware if UI is enabled
 if os.getenv("TASKFLOWS_ENABLE_UI"):
@@ -63,6 +71,11 @@ if os.getenv("TASKFLOWS_ENABLE_UI"):
         allow_methods=security_config.allowed_methods,
         allow_headers=security_config.allowed_headers,
     )
+
+# Add Prometheus middleware for metrics collection
+from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
+
+app.add_middleware(PrometheusMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -225,11 +238,22 @@ async def jwt_validation(request: Request, call_next):
         )
 
 
-@app.get("/health")
+@app.get("/health", tags=["monitoring"])
 async def health_check_endpoint():
     """Health check logic as a free function."""
     logger.info("health check called")
     return with_hostname({"status": "ok"})
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint():
+    """Expose Prometheus metrics."""
+    from fastapi.responses import Response
+    from prometheus_client import generate_latest
+
+    return Response(
+        content=generate_latest(), media_type="text/plain; version=0.0.4; charset=utf-8"
+    )
 
 
 @app.get("/list-servers")

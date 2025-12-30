@@ -344,6 +344,20 @@ class DockerContainer:
     # automatically detect the serveras version. Default:
     version: Optional[str] = None
 
+    def __post_init__(self):
+        """Validate security-sensitive fields."""
+        # Validate env_file path to prevent directory traversal
+        if self.env_file:
+            from taskflows.security_validation import validate_env_file_path
+
+            try:
+                self.env_file = str(validate_env_file_path(self.env_file, allow_nonexistent=True))
+            except Exception as e:
+                from taskflows.common import logger
+
+                logger.error(f"Invalid env_file path: {e}")
+                raise
+
     def _ensure_name(self) -> str:
         """Ensure container has a name, generating one if needed."""
         if self.name is None:
@@ -557,9 +571,12 @@ class DockerContainer:
             try:
                 cmd.extend(shlex.split(self.command))
             except ValueError as e:
-                # Fall back to simple split if shlex fails (unclosed quotes, etc.)
-                logger.warning(f"Failed to parse command with shlex: {e}, using simple split")
-                cmd.extend(self.command.split())
+                # SECURITY: Do not fall back to unsafe split - fail hard
+                raise ValueError(
+                    f"Invalid command syntax: {e}. "
+                    "Commands must use proper shell quoting. "
+                    f"Got: {self.command!r}"
+                ) from e
         
         # Return the command string
         return " ".join(cmd)
