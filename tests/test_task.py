@@ -137,12 +137,23 @@ def test_loki_query_url_default_time_range():
     end_time = datetime.now(timezone.utc)
     url = build_loki_query_url(task_name, end_time=end_time)
 
-    # Extract timestamps from URL
+    # Extract timestamps from URL - decode first since it's URL-encoded
     import re
-    from_match = re.search(r'"from":"(\d+)"', url)
-    to_match = re.search(r'"to":"(\d+)"', url)
+    from urllib.parse import unquote
 
-    assert from_match and to_match
+    decoded_url = unquote(url)
+
+    # Try quoted format: "from":"1234567890"
+    from_match = re.search(r'["\']from["\']\s*:\s*["\'](\d+)["\']', decoded_url)
+    to_match = re.search(r'["\']to["\']\s*:\s*["\'](\d+)["\']', decoded_url)
+
+    # Try unquoted format: from=1234567890 or from:1234567890
+    if not from_match:
+        from_match = re.search(r'from[=:](\d+)', decoded_url)
+    if not to_match:
+        to_match = re.search(r'to[=:](\d+)', decoded_url)
+
+    assert from_match and to_match, f"Could not find timestamps in decoded URL: {decoded_url[:200]}"
     from_ts = int(from_match.group(1))
     to_ts = int(to_match.group(1))
 
@@ -151,7 +162,7 @@ def test_loki_query_url_default_time_range():
     expected_diff = 3600 * 1000  # 1 hour in milliseconds
 
     # Allow 1 second tolerance for execution time
-    assert abs(time_diff_ms - expected_diff) < 1000
+    assert abs(time_diff_ms - expected_diff) < 1000, f"Time diff: {time_diff_ms}ms, expected: {expected_diff}ms"
 
 
 def test_loki_query_url_with_explicit_times():
