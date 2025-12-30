@@ -1,4 +1,5 @@
 import base64
+import shlex
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -343,7 +344,8 @@ class DockerContainer:
     # automatically detect the serveras version. Default:
     version: Optional[str] = None
 
-    def get_name(self) -> str:
+    def _ensure_name(self) -> str:
+        """Ensure container has a name, generating one if needed."""
         if self.name is None:
             if isinstance(self.image, DockerImage):
                 img_name = self.image.tag
@@ -352,12 +354,19 @@ class DockerContainer:
             command_id = xxh32(str(self.command)).hexdigest()
             self.name = f"{img_name}-{command_id}"
         return self.name
+
+    @property
+    def name_or_generated(self) -> str:
+        """Get container name, generating if needed."""
+        return self._ensure_name()
     
 
     @property
     def exists(self):
         try:
-            get_docker_client().containers.get(self.get_name())
+            # Use self.name if already set, otherwise generate it
+            name = self.name if self.name else self._ensure_name()
+            get_docker_client().containers.get(name)
             return True
         except docker.errors.NotFound:
             return False
@@ -373,7 +382,7 @@ class DockerContainer:
             Container: The created Docker container.
         """
         # create default container name if one wasn't assigned.
-        self.get_name()
+        self._ensure_name()
         # remove any existing container with this name.
         self.delete()
         # if image is not build, it must be built.
@@ -405,13 +414,13 @@ class DockerContainer:
         """Build the docker run CLI command string for this container."""
         # Build docker run command
         cmd = ["docker", "run"]
-        
+
         # Handle command
         if self.command and not isinstance(self.command, str):
             self.command = f"_run_function {base64.b64encode(cloudpickle.dumps(self.command)).decode('utf-8')}"
-        
+
         # Container name
-        container_name = self.get_name()
+        container_name = self._ensure_name()
         cmd.extend(["--name", container_name])
         
         # Auto-remove container
@@ -544,10 +553,13 @@ class DockerContainer:
         
         # Command
         if self.command:
-            if " " in self.command:
+            # Use shlex.split() for proper shell parsing
+            try:
+                cmd.extend(shlex.split(self.command))
+            except ValueError as e:
+                # Fall back to simple split if shlex fails (unclosed quotes, etc.)
+                logger.warning(f"Failed to parse command with shlex: {e}, using simple split")
                 cmd.extend(self.command.split())
-            else:
-                cmd.append(self.command)
         
         # Return the command string
         return " ".join(cmd)

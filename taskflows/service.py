@@ -416,9 +416,13 @@ class Service:
         # Add cgroup configuration directives to systemd service
         if self.cgroup_config:
             cgroup_directives = self.cgroup_config.to_systemd_directives()
-            
+
             for key, value in cgroup_directives.items():
-                self.service_entries.add(f"{key}={value}")
+                # Remove numeric suffix for systemd output
+                # IOReadBandwidthMax_0 -> IOReadBandwidthMax
+                # This allows multiple device directives to work correctly
+                directive_name = key.rsplit('_', 1)[0] if key[-1].isdigit() else key
+                self.service_entries.add(f"{directive_name}={value}")
 
         # Add Docker-specific service entries if using Docker environment
         if isinstance(self.environment, DockerContainer):
@@ -494,7 +498,7 @@ class Service:
         """Restart this service."""
         _restart_service(self.service_files)
 
-    def enable(self, timers_only: bool):
+    def enable(self, timers_only: bool = False):
         """Enable this service."""
         if timers_only:
             _enable_service(self.timer_files)

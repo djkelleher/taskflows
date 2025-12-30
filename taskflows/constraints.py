@@ -324,24 +324,25 @@ class CgroupConfig:
             directives["IOWeight"] = str(io_weight)
 
         # Device bandwidth limits - enhanced mapping
+        # Systemd allows multiple IOReadBandwidthMax/IOWriteBandwidthMax directives
         if self.device_read_bps:
-            for dev, bps in self.device_read_bps.items():
-                directives["IOReadBandwidthMax"] = f"{dev} {bps}"
+            for i, (dev, bps) in enumerate(self.device_read_bps.items()):
+                directives[f"IOReadBandwidthMax_{i}"] = f"{dev} {bps}"
         if self.device_write_bps:
-            for dev, bps in self.device_write_bps.items():
-                directives["IOWriteBandwidthMax"] = f"{dev} {bps}"
-                
+            for i, (dev, bps) in enumerate(self.device_write_bps.items()):
+                directives[f"IOWriteBandwidthMax_{i}"] = f"{dev} {bps}"
+
         # Convert IOPS to approximate bandwidth if no bandwidth limits set
         if self.device_read_iops and not self.device_read_bps:
-            for dev, iops in self.device_read_iops.items():
+            for i, (dev, iops) in enumerate(self.device_read_iops.items()):
                 # Rough approximation: assume 4KB average I/O size
                 estimated_bps = iops * 4096
-                directives["IOReadBandwidthMax"] = f"{dev} {estimated_bps}"
+                directives[f"IOReadBandwidthMax_{i}"] = f"{dev} {estimated_bps}"
         if self.device_write_iops and not self.device_write_bps:
-            for dev, iops in self.device_write_iops.items():
+            for i, (dev, iops) in enumerate(self.device_write_iops.items()):
                 # Rough approximation: assume 4KB average I/O size
                 estimated_bps = iops * 4096
-                directives["IOWriteBandwidthMax"] = f"{dev} {estimated_bps}"
+                directives[f"IOWriteBandwidthMax_{i}"] = f"{dev} {estimated_bps}"
 
         # Process limits
         if self.pids_limit:

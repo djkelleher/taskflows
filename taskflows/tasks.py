@@ -1,7 +1,7 @@
 import asyncio
 import contextvars
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from logging import Logger
 from typing import Any, Callable, List, Literal, Optional, Sequence
 from urllib.parse import quote
@@ -61,10 +61,10 @@ def build_loki_query_url(
     Returns:
         URL string for Grafana Explore with the Loki query
     """
-    if start_time is None:
-        start_time = datetime.now(timezone.utc)
     if end_time is None:
         end_time = datetime.now(timezone.utc)
+    if start_time is None:
+        start_time = end_time - timedelta(hours=1)  # Default to 1 hour lookback
 
     # Build LogQL query
     if error_only:
@@ -109,9 +109,9 @@ class _RuntimeManager:
 
     def get_portal(self) -> BlockingPortal:
         """Get or create the blocking portal for running async code from sync context."""
-        if self._portal is None or not self._thread.is_alive():
+        if self._portal is None or self._thread is None or not self._thread.is_alive():
             with self._lock:
-                if self._portal is None or not self._thread.is_alive():
+                if self._portal is None or self._thread is None or not self._thread.is_alive():
                     self._start_runtime()
         return self._portal
 
