@@ -70,16 +70,17 @@ def sort_service_names(services: List[str]) -> List[str]:
     stop_prefix = f"stop-{_SYSTEMD_FILE_PREFIX}"
 
     # Separate services into two categories: those that start with the stop prefix and those that do not
-    stop_services, non_stop_services = [], []
+    stop_services: List[str] = []
+    non_stop_services_raw: List[str] = []
     for srv in services:
         if srv.startswith(stop_prefix):
             stop_services.append(srv)
         else:
-            non_stop_services.append(srv)
+            non_stop_services_raw.append(srv)
 
     # Normalize non-stop service names by replacing hyphens and underscores with spaces for similarity comparison
-    non_stop_services = [
-        (s, s.replace("-", " ").replace("_", " ")) for s in non_stop_services
+    non_stop_services: List[tuple[str, str]] = [
+        (s, s.replace("-", " ").replace("_", " ")) for s in non_stop_services_raw
     ]
 
     # Start the ordering process with the first non-stop service
@@ -109,7 +110,15 @@ def sort_service_names(services: List[str]) -> List[str]:
     return ordered  # Return the fully ordered list of services
 
 
-def load_service_files(files: List[Path]):
+def load_service_files(files: List[Path]) -> dict:
+    """Load service files from paths.
+
+    Args:
+        files: List of service file paths
+
+    Returns:
+        Dictionary mapping service names to list of file info dicts
+    """
     srv_files = defaultdict(list)
     for file in files:
         file = Path(file)

@@ -57,7 +57,17 @@ def get_unit_files(
     unit_type: Optional[Literal["service", "timer"]] = None,
     match: Optional[str] = None,
     states: Optional[str | Sequence[str]] = None,
-):
+) -> list:
+    """Get unit files excluding protected services.
+
+    Args:
+        unit_type: Filter by service or timer
+        match: Glob pattern to match
+        states: Unit states to filter by
+
+    Returns:
+        List of unit file paths
+    """
     # don't alter internal services
     protected_units = {"taskflows-srv-api", "stop-taskflows-srv-api"}
     files = _get_unit_files(unit_type=unit_type, match=match, states=states)

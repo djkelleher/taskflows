@@ -21,7 +21,7 @@ def with_hostname(data: dict) -> ResponseData:
     Returns:
         Dictionary with hostname added
     """
-    return {**data, "hostname": HOSTNAME}  # type: ignore
+    return {**data, "hostname": HOSTNAME}
 
 
 @cache
