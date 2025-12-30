@@ -1,586 +1,877 @@
-# taskflows: Task Management, Scheduling, and Alerting System
+# taskflows
 
-taskflows is a Python library that provides robust task management, scheduling, and alerting capabilities. It allows you to convert regular functions into managed tasks with logging, alerts, retries, and more. taskflows also supports creating system services that run on specified schedules with flexible constraints.
+A Python library for task management, service scheduling, and alerting. Convert functions into managed tasks with logging, alerts, and retries. Create systemd services that run on flexible schedules with resource constraints.
+
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Tasks](#tasks)
+  - [Task Decorator](#task-decorator)
+  - [Programmatic Task Execution](#programmatic-task-execution)
+  - [Alerts](#alerts)
+- [Services](#services)
+  - [Service Configuration](#service-configuration)
+  - [Scheduling](#scheduling)
+  - [Service Dependencies](#service-dependencies)
+  - [Restart Policies](#restart-policies)
+  - [ServiceRegistry](#serviceregistry)
+- [Environments](#environments)
+  - [Virtual Environments](#virtual-environments)
+  - [Docker Containers](#docker-containers)
+  - [Named Environments](#named-environments)
+- [Resource Constraints](#resource-constraints)
+  - [Hardware Constraints](#hardware-constraints)
+  - [System Load Constraints](#system-load-constraints)
+  - [Cgroup Configuration](#cgroup-configuration)
+- [CLI Reference](#cli-reference)
+- [Web UI](#web-ui)
+- [API Server](#api-server)
+- [Security](#security)
+- [Logging & Monitoring](#logging--monitoring)
+- [Slack Bot](#slack-bot)
+- [Environment Variables](#environment-variables)
 
 ## Features
-- Convert any Python function into a managed task
-- Task execution logging and metadata storage
-- Configurable alerting via Slack and Email
-- Automated retries and timeout handling
-- Schedule-based execution using system services
-- Support for various scheduling patterns (calendar-based, periodic)
-- System resource constraint options
 
-## Setup
+- **Tasks**: Convert any Python function (sync or async) into a managed task with:
+  - Automatic retries on failure
+  - Configurable timeouts
+  - Alerts via Slack and Email
+  - Structured logging with Loki integration
+  - Context tracking with `get_current_task_id()`
+
+- **Services**: Create systemd services with:
+  - Calendar-based scheduling (cron-like)
+  - Periodic scheduling with boot/login triggers
+  - Service dependencies and relationships
+  - Configurable restart policies
+  - Resource constraints (CPU, memory, I/O)
+
+- **Environments**: Run services in:
+  - Conda/Mamba virtual environments
+  - Docker containers with full configuration
+  - Named reusable environment configurations
+
+- **Management**: Control services via:
+  - CLI (`tf` command)
+  - Web UI with JWT authentication
+  - REST API
+  - Slack bot with interactive commands
+
+## Installation
+
+```bash
+pip install taskflows
+```
 
 ### Prerequisites
+
 ```bash
+# Required for systemd integration
 sudo apt install dbus libdbus-1-dev
+
+# Enable user services to run without login
 loginctl enable-linger
 ```
 
-### Security Configuration (Authentication)
+## Quick Start
 
-The taskflows system uses HMAC-SHA256 authentication to secure communication between components. This prevents unauthorized access to service management operations.
-
-#### Initial Setup
-
-1. **Generate HMAC Secret**:
-   ```bash
-   dls security setup
-   ```
-   This command will:
-   - Generate a secure HMAC secret
-   - Enable authentication by default
-   - Save configuration to `~/.services/security.json`
-
-2. **View Current Security Settings**:
-   ```bash
-   dls security status
-   ```
-
-3. **Regenerate Secret** (if needed):
-   ```bash
-   dls security regenerate-secret
-   ```
-   Note: After regenerating, all clients (CLI, Slack bot) will need to be restarted to use the new secret.
-
-#### What This Protects
-
-- **Service Management Operations**: All commands that start, stop, create, or modify services
-- **Multi-Server Communication**: Ensures commands come from trusted sources
-- **API Access**: Prevents unauthorized access to the underlying API
-- **Replay Attack Protection**: Uses timestamps with a 5-minute validity window
-
-#### Important Notes
-
-- The HMAC secret is stored in `~/.services/security.json`
-- Keep this file secure and don't share the secret
-- Authentication is enabled by default after running `dls security setup`
-- The system can work without authentication (not recommended for production):
-  ```bash
-  dls security disable  # ⚠️ Not recommended
-  ```
-
-### Loki Configuration
-Task execution logs and metadata are stored in Loki for centralized log aggregation. Configure your Loki and Grafana endpoints:
-
-```bash
-# Grafana URL (for alert links)
-export TASKFLOWS_GRAFANA="http://localhost:3000"
-
-# Loki URL (for log queries)
-export TASKFLOWS_LOKI_URL="http://localhost:3100"
-
-# Grafana API key (for dashboard creation)
-export TASKFLOWS_GRAFANA_API_KEY="your_api_key"
-```
-
-Server registry is stored in a JSON file at `/opt/taskflows/data/servers.json`.
-
-## Usage
-
-### Web UI
-
-taskflows includes a modern web interface for managing services and viewing logs.
-
-#### Setup
-```bash
-# Install UI dependencies (first time only)
-cd taskflows/ui && npm install && cd ../..
-
-# Build the UI
-./build_ui.sh
-
-# Setup authentication (first time only)
-tf api setup-ui --username admin
-# You'll be prompted to create a password
-
-# Start the API with UI enabled
-tf api start --enable-ui
-```
-
-#### Access
-Navigate to **http://localhost:7777** in your browser.
-
-**Features:**
-- 🔐 Secure JWT authentication
-- 📊 Dashboard with real-time service status
-- 🔍 Multi-select and search services
-- ⚡ Batch operations (start/stop/restart multiple services)
-- 📝 Log viewer with search and auto-scroll
-- 🌍 Named environments (reusable venv/docker configurations)
-- 🔄 Auto-refresh status every 5 seconds
-
-#### Named Environments
-Create reusable environment configurations that can be shared across multiple services:
+### Create a Task
 
 ```python
-# Create a named environment via UI or API
-# Then reference it in your services:
-from taskflows import Service
+from taskflows import task, Alerts
+from alert_msgs import Slack
+
+@task(
+    name="my-task",
+    retries=3,
+    timeout=60,
+    alerts=Alerts(
+        send_to=Slack(channel="alerts"),
+        send_on=["start", "error", "finish"]
+    )
+)
+async def process_data():
+    # Your code here
+    return "Done"
+
+# Execute the task
+if __name__ == "__main__":
+    process_data()
+```
+
+### Create a Service
+
+```python
+from taskflows import Service, Calendar
 
 srv = Service(
-    name="my-service",
-    start_command="python my_script.py",
-    environment="production-venv",  # References named environment
+    name="daily-job",
+    start_command="python /path/to/script.py",
+    start_schedule=Calendar("Mon-Fri 09:00 America/New_York"),
+    enabled=True,  # Start on boot
 )
+srv.create()
 ```
 
-### Command Line Interface
-Admin commands are accessed via the `tf` command line tool:
-```bash
-# Get help on available commands
-tf --help
+## Tasks
 
-# Create services defined in a Python file
-tf create my_services.py
+### Task Decorator
 
-# List active services
-tf list
-
-# Stop a service
-tf stop service-name
-```
-
-### Creating Tasks
-Turn any function (optionally async) into a managed task:
+The `@task` decorator wraps any function with managed execution:
 
 ```python
-import os
-from taskflows import task, Alerts, Slack, Email
+from taskflows import task, Alerts, get_current_task_id
+from alert_msgs import Slack, Email
 
-alerts=[
-    Alerts(
+@task(
+    name="data-pipeline",        # Task identifier (default: function name)
+    required=True,               # Raise exception on failure
+    retries=3,                   # Retry attempts on failure
+    timeout=300,                 # Timeout in seconds
+    alerts=Alerts(
         send_to=[
-            Slack(
-                channel="critical_alerts"
-            ),
+            Slack(channel="alerts"),
             Email(
-                addr="sender@gmail.com",
-                password=os.getenv("EMAIL_PWD"),
-                receiver_addr=["someone@gmail.com", "someone@yahoo.com"]
+                addr="sender@example.com",
+                password="...",
+                receiver_addr=["team@example.com"]
             )
         ],
         send_on=["start", "error", "finish"]
     )
-]
+)
+async def run_pipeline():
+    # Access current task ID for correlation
+    task_id = get_current_task_id()
+    print(f"Running task: {task_id}")
+    # ... your code ...
+```
 
-@task(
-    name='some-task',
-    required=True,
-    retries=1,
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str` | Function name | Unique task identifier |
+| `required` | `bool` | `False` | If `True`, exceptions are re-raised after all retries |
+| `retries` | `int` | `0` | Number of retry attempts on failure |
+| `timeout` | `float` | `None` | Execution timeout in seconds |
+| `alerts` | `Alerts` | `None` | Alert configuration |
+| `logger` | `Logger` | Default | Custom logger instance |
+
+### Programmatic Task Execution
+
+Run functions as tasks without the decorator:
+
+```python
+from taskflows import run_task
+
+async def my_function(x, y):
+    return x + y
+
+result = await run_task(
+    my_function,
+    name="add-numbers",
+    retries=2,
     timeout=30,
-    alerts=alerts
+    x=1, y=2
 )
-async def hello():
-    print("Hi.")
-
-# Execute the task
-if __name__ == "__main__":
-    hello()
 ```
 
-### Task Parameters
-- `name`: Unique identifier for the task
-- `required`: Whether task failure should halt execution
-- `retries`: Number of retry attempts if the task fails
-- `timeout`: Maximum execution time in seconds
-- `alerts`: Alert configurations for the task
+### Alerts
 
-### Review Task Status/Results
-Tasks can send alerts via Slack and/or Email, as shown in the above example. Internally, alerts are sent using the [alert-msgs](https://github.com/djkelleher/alert-msgs) package.
-
-**Loki-First Approach**: Task logs, execution history, and errors are now accessed through Loki log queries instead of database tables. When alerts are sent, they include Grafana/Loki URLs with pre-configured queries to view:
-- Task execution logs
-- Error traces and stack traces
-- Historical task runs
-
-Visit your Grafana instance at `/explore` to query task logs using LogQL. Example query:
-```
-{service_name=~".*your_task_name.*"}
-```
-
-To filter for errors only:
-```
-{service_name=~".*your_task_name.*"} |= "ERROR"
-```
-
-### Creating taskflows
-*Note: To use services, your system must have systemd (the init system on most modern Linux distributions)*
-
-taskflows run commands on a specified schedule. See [Service](services/service/service.py#35) for service configuration options.
-
-To create the service(s), use the `create` method (e.g. `srv.create()`), or use the CLI `create` command (e.g. `tf create my_services.py`)
-
-### Service Examples
-
-#### Calendar-based Scheduling
-Run a command at specific calendar days/times:
+Configure when and where to send alerts:
 
 ```python
-from taskflows import Calendar, Service
+from taskflows import Alerts
+from alert_msgs import Slack, Email
 
-# Run every day at 2:00 PM Eastern Time
-srv = Service(
-    name="daily-backup",
-    start_command="docker start backup-service",
-    start_schedule=Calendar("Mon-Sun 14:00 America/New_York"),
+alerts = Alerts(
+    send_to=[
+        Slack(channel="critical"),
+        Email(
+            addr="sender@gmail.com",
+            password="app-password",
+            receiver_addr=["oncall@company.com"]
+        )
+    ],
+    send_on=["start", "error", "finish"]  # Events to trigger alerts
 )
+```
 
-# Create and register the service
+**Alert Events:**
+- `start`: Task execution begins
+- `error`: An exception occurred (sent per retry)
+- `finish`: Task execution completed (includes success/failure status)
+
+Alerts include Grafana/Loki URLs for viewing task logs directly.
+
+## Services
+
+### Service Configuration
+
+Services are systemd units that run commands on schedules:
+
+```python
+from taskflows import Service, Calendar, Periodic, Venv
+
+srv = Service(
+    # Identity
+    name="my-service",
+    description="Processes daily reports",
+
+    # Commands
+    start_command="python process.py",
+    stop_command="pkill -f process.py",       # Optional
+    restart_command="python process.py reload", # Optional
+
+    # Scheduling
+    start_schedule=Calendar("Mon-Fri 09:00"),
+    stop_schedule=Calendar("Mon-Fri 17:00"),  # Optional
+    restart_schedule=Periodic(                 # Optional
+        start_on="boot",
+        period=3600,
+        relative_to="finish"
+    ),
+
+    # Environment
+    environment=Venv("myenv"),  # Or DockerContainer, or named env string
+    working_directory="/app",
+    env={"DEBUG": "1"},
+    env_file="/path/to/.env",
+
+    # Behavior
+    enabled=True,               # Auto-start on boot
+    timeout=300,                # Max runtime in seconds
+    kill_signal="SIGTERM",
+    restart_policy="on-failure",
+)
 srv.create()
 ```
 
-#### One-time Scheduling
-Run a command once at a specific time:
+**Key Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `name` | `str` | Service identifier |
+| `start_command` | `str \| Callable` | Command or function to execute |
+| `stop_command` | `str` | Command to stop the service |
+| `environment` | `Venv \| DockerContainer \| str` | Execution environment |
+| `start_schedule` | `Calendar \| Periodic` | When to start |
+| `stop_schedule` | `Schedule` | When to stop |
+| `restart_schedule` | `Schedule` | When to restart |
+| `enabled` | `bool` | Start on boot |
+| `timeout` | `int` | Max runtime (seconds) |
+| `restart_policy` | `str \| RestartPolicy` | Restart behavior |
+
+### Scheduling
+
+#### Calendar Schedule
+
+Run at specific times using systemd calendar syntax:
 
 ```python
+from taskflows import Calendar
+
+# Daily at 2 PM Eastern
+Calendar("Mon-Sun 14:00 America/New_York")
+
+# Weekdays at 9 AM
+Calendar("Mon-Fri 09:00")
+
+# Specific days and time
+Calendar("Mon,Wed,Fri 16:30:30")
+
+# From a datetime object
 from datetime import datetime, timedelta
-from taskflows import Calendar, Service
-
-# Run once, 30 minutes from now
-run_time = datetime.now() + timedelta(minutes=30)
-srv = Service(
-    name='write-message',
-    start_command="bash -c 'echo hello >> hello.txt'",
-    start_schedule=Calendar.from_datetime(run_time),
-)
-srv.create()
+Calendar.from_datetime(datetime.now() + timedelta(hours=1))
 ```
 
-#### Periodic Scheduling with Constraints
-Run a command periodically with system resource constraints:
+**Calendar Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `schedule` | `str` | Required | Calendar expression |
+| `persistent` | `bool` | `True` | Run on wake if missed |
+| `accuracy` | `str` | `"1ms"` | Max deviation from scheduled time |
+
+#### Periodic Schedule
+
+Run at intervals after a trigger:
 
 ```python
-from taskflows import Service, Periodic, CPUPressure
+from taskflows import Periodic
 
-# Run after system boot, then every 5 minutes
-# Skip if CPU usage is over 80% for the last 5 minutes
-service = Service(
-    name="resource-aware-task",
-    start_command="docker start my-service",
-    start_schedule=Periodic(start_on="boot", period=60*5, relative_to="start"),
-    system_load_constraints=CPUPressure(max_percent=80, timespan="5min", silent=True)
+# Every 5 minutes after boot
+Periodic(
+    start_on="boot",        # "boot", "login", or "command"
+    period=300,             # Interval in seconds
+    relative_to="finish",   # "start" or "finish"
+    accuracy="1ms"
 )
-service.create()
 ```
+
+**Periodic Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `start_on` | `Literal["boot", "login", "command"]` | Initial trigger |
+| `period` | `int` | Interval in seconds |
+| `relative_to` | `Literal["start", "finish"]` | Measure from start or finish |
+| `accuracy` | `str` | Max deviation |
+
+### Service Dependencies
+
+Control service startup order and relationships:
+
+```python
+srv = Service(
+    name="app-server",
+    start_command="./start.sh",
+
+    # Ordering
+    start_after=["database", "cache"],      # Start after these
+    start_before=["monitoring"],            # Start before these
+
+    # Dependencies
+    requires=["database"],      # Fail if dependency fails
+    wants=["cache"],           # Start together, don't fail if cache fails
+    binds_to=["database"],     # Stop when database stops
+    part_of=["app-stack"],     # Propagate stop/restart
+
+    # Failure handling
+    on_failure=["alert-service"],   # Activate on failure
+    on_success=["cleanup-service"], # Activate on success
+
+    # Mutual exclusion
+    conflicts=["maintenance-mode"],
+)
+```
+
+### Restart Policies
+
+Configure automatic restart behavior:
+
+```python
+from taskflows import Service, RestartPolicy
+
+# Simple string policy
+srv = Service(
+    name="worker",
+    start_command="python worker.py",
+    restart_policy="always",  # "no", "always", "on-failure", "on-abnormal", etc.
+)
+
+# Detailed policy
+srv = Service(
+    name="worker",
+    start_command="python worker.py",
+    restart_policy=RestartPolicy(
+        condition="on-failure",  # When to restart
+        delay=10,                # Seconds between restarts
+        max_attempts=5,          # Max restarts in window
+        window=300,              # Time window in seconds
+    ),
+)
+```
+
+**Restart Conditions:**
+- `no`: Never restart
+- `always`: Always restart
+- `on-success`: Restart on clean exit
+- `on-failure`: Restart on non-zero exit
+- `on-abnormal`: Restart on signal/timeout
+- `on-abort`: Restart on abort signal
+- `on-watchdog`: Restart on watchdog timeout
+
+### ServiceRegistry
+
+Manage multiple services together:
+
+```python
+from taskflows import Service, ServiceRegistry
+
+registry = ServiceRegistry(
+    Service(name="web", start_command="./web.sh"),
+    Service(name="worker", start_command="./worker.sh"),
+    Service(name="scheduler", start_command="./scheduler.sh"),
+)
+
+# Add more services
+registry.add(Service(name="monitor", start_command="./monitor.sh"))
+
+# Bulk operations
+registry.create()    # Create all services
+registry.start()     # Start all services
+registry.stop()      # Stop all services
+registry.restart()   # Restart all services
+registry.enable()    # Enable all services
+registry.disable()   # Disable all services
+registry.remove()    # Remove all services
+
+# Access individual services
+registry["web"].logs()
+```
+
+## Environments
+
+### Virtual Environments
+
+Run services in Conda/Mamba environments:
+
+```python
+from taskflows import Service, Venv
+
+srv = Service(
+    name="ml-pipeline",
+    start_command="python train.py",
+    environment=Venv("ml-env"),  # Conda environment name
+)
+```
+
+Automatically detects Mamba, Miniforge, or Miniconda installations.
+
+### Docker Containers
+
+Run services in Docker containers:
+
+```python
+from taskflows import Service, DockerContainer, DockerImage, Volume, CgroupConfig
+
+# Using existing image
+srv = Service(
+    name="api-server",
+    environment=DockerContainer(
+        image="python:3.11",
+        command="python app.py",
+        ports={"8080/tcp": 8080},
+        volumes=[
+            Volume(
+                host_path="/data",
+                container_path="/app/data",
+                read_only=False
+            )
+        ],
+        environment={"ENV": "production"},
+        network_mode="bridge",
+        restart_policy="no",  # Let systemd handle restarts
+        persisted=True,       # Keep container between restarts
+        cgroup_config=CgroupConfig(
+            memory_limit=1024 * 1024 * 1024,  # 1GB
+            cpu_quota=50000,  # 50% CPU
+        ),
+    ),
+)
+
+# Building from Dockerfile
+srv = Service(
+    name="custom-app",
+    environment=DockerContainer(
+        image=DockerImage(
+            tag="myapp:latest",
+            path="/path/to/app",
+            dockerfile="Dockerfile",
+        ),
+        command="./start.sh",
+    ),
+)
+```
+
+**DockerContainer Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `image` | `str \| DockerImage` | Image name or build config |
+| `command` | `str \| Callable` | Command to run |
+| `name` | `str` | Container name (auto-generated if not set) |
+| `persisted` | `bool` | Keep container between restarts |
+| `ports` | `dict` | Port mappings |
+| `volumes` | `list[Volume]` | Volume mounts |
+| `environment` | `dict` | Environment variables |
+| `network_mode` | `str` | Network mode |
+| `cgroup_config` | `CgroupConfig` | Resource limits |
+
+### Named Environments
+
+Store reusable environment configurations:
+
+```python
+from taskflows import Service
+
+# Reference a named environment by string
+srv = Service(
+    name="my-service",
+    start_command="python app.py",
+    environment="production-docker",  # Named environment
+)
+```
+
+Create named environments via the Web UI or API. They store complete Venv or DockerContainer configurations that can be reused across services.
+
+## Resource Constraints
+
+### Hardware Constraints
+
+Require minimum hardware before starting:
+
+```python
+from taskflows import Service, Memory, CPUs
+
+srv = Service(
+    name="ml-training",
+    start_command="python train.py",
+    startup_requirements=[
+        Memory(amount=8 * 1024**3, constraint=">="),  # 8GB RAM
+        CPUs(amount=4, constraint=">="),              # 4+ CPUs
+    ],
+)
+```
+
+**Constraint Operators:** `<`, `<=`, `=`, `!=`, `>=`, `>`
+
+Set `silent=True` to skip silently instead of failing:
+
+```python
+Memory(amount=16 * 1024**3, constraint=">=", silent=True)
+```
+
+### System Load Constraints
+
+Wait for system load to be acceptable:
+
+```python
+from taskflows import Service, CPUPressure, MemoryPressure, IOPressure
+
+srv = Service(
+    name="batch-job",
+    start_command="python process.py",
+    startup_requirements=[
+        CPUPressure(max_percent=80, timespan="5min"),
+        MemoryPressure(max_percent=70, timespan="1min"),
+        IOPressure(max_percent=90, timespan="10sec"),
+    ],
+)
+```
+
+**Timespan Options:** `"10sec"`, `"1min"`, `"5min"`
+
+### Cgroup Configuration
+
+Fine-grained resource control for services and containers:
+
+```python
+from taskflows import Service, CgroupConfig
+
+srv = Service(
+    name="limited-service",
+    start_command="python app.py",
+    cgroup_config=CgroupConfig(
+        # CPU limits
+        cpu_quota=50000,           # Microseconds per period (50% of 1 CPU)
+        cpu_period=100000,         # Period in microseconds (default 100ms)
+        cpu_shares=512,            # Relative weight
+        cpuset_cpus="0-3",         # Pin to CPUs 0-3
+
+        # Memory limits
+        memory_limit=2 * 1024**3,  # 2GB hard limit
+        memory_high=1.5 * 1024**3, # 1.5GB soft limit
+        memory_swap_limit=4 * 1024**3,
+
+        # I/O limits
+        io_weight=100,             # I/O priority (1-10000)
+        device_read_bps={"/dev/sda": 100 * 1024**2},   # 100MB/s read
+        device_write_bps={"/dev/sda": 50 * 1024**2},   # 50MB/s write
+
+        # Process limits
+        pids_limit=100,            # Max processes
+
+        # Security
+        oom_score_adj=500,         # OOM killer priority
+        cap_drop=["NET_RAW"],      # Drop capabilities
+    ),
+)
+```
+
+## CLI Reference
+
+The `tf` command provides service management:
+
+```bash
+# Service discovery
+tf list [PATTERN]              # List services
+tf status [--running] [--all]  # Show service status
+tf history [-l LIMIT]          # Show task history
+tf logs SERVICE [-n LINES]     # View service logs
+tf show SERVICE                # Show service file contents
+
+# Service control
+tf create FILE                 # Create services from Python file
+tf start SERVICE               # Start a service
+tf stop SERVICE                # Stop a service
+tf restart SERVICE             # Restart a service
+tf enable SERVICE              # Enable auto-start
+tf disable SERVICE             # Disable auto-start
+tf remove SERVICE              # Remove a service
+
+# Multi-server (with -s/--server)
+tf list -s server1 -s server2
+tf status --server prod-host
+```
+
+### API Management
+
+```bash
+# Start/stop API server
+tf api start [--enable-ui]
+tf api stop
+tf api restart
+
+# Setup web UI authentication
+tf api setup-ui --username admin
+```
+
+### Security Management
+
+```bash
+# Setup HMAC authentication
+tf security setup
+tf security status
+tf security disable
+tf security set-secret SECRET
+tf security regenerate-secret
+```
+
+## Web UI
+
+A modern web interface for managing services.
+
+### Setup
+
+```bash
+# Install dependencies
+cd taskflows/ui && npm install && cd ../..
+
+# Build UI assets
+./build_ui.sh
+
+# Setup authentication
+tf api setup-ui --username admin
+# Enter password when prompted
+
+# Start API with UI
+tf api start --enable-ui
+```
+
+### Access
+
+Navigate to **http://localhost:7777**
+
+### Features
+
+- **Dashboard**: Real-time service status with auto-refresh
+- **Multi-select**: Select and operate on multiple services
+- **Search**: Filter services by name
+- **Batch Operations**: Start/stop/restart multiple services
+- **Log Viewer**: Search and auto-scroll logs
+- **Named Environments**: Create and manage reusable environments
+
+## API Server
+
+The API server provides REST endpoints for service management.
+
+### Starting the Server
+
+```bash
+tf api start              # Default port 7777
+tf api start --enable-ui  # With web UI
+```
+
+### Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/services` | List all services |
+| GET | `/services/{name}/status` | Get service status |
+| POST | `/services/{name}/start` | Start service |
+| POST | `/services/{name}/stop` | Stop service |
+| POST | `/services/{name}/restart` | Restart service |
+| GET | `/services/{name}/logs` | Get service logs |
+| GET | `/environments` | List named environments |
+| POST | `/environments` | Create environment |
+
+### Authentication
+
+The API uses HMAC-SHA256 authentication. Include these headers:
+
+```
+X-HMAC-Signature: <signature>
+X-HMAC-Timestamp: <unix-timestamp>
+```
+
+## Security
+
+### HMAC Authentication
+
+Secure API communication with HMAC-SHA256:
+
+```bash
+# Initial setup
+tf security setup
+
+# View settings
+tf security status
+
+# Regenerate secret (requires client restart)
+tf security regenerate-secret
+```
+
+Configuration stored in `~/.services/security.json`.
+
+**Protected Operations:**
+- Service start/stop/restart
+- Service creation/removal
+- Environment management
+
+### JWT Authentication (Web UI)
+
+The web UI uses JWT tokens:
+
+```bash
+tf api setup-ui --username admin
+```
+
+Configuration stored in `~/.services/ui_config.json`.
+
+## Logging & Monitoring
+
+### Architecture
+
+```
+Application (structlog) → journald → Fluent Bit → Loki → Grafana
+```
+
+### Configuration
+
+```python
+from quicklogs import configure_loki_logging, get_struct_logger
+
+configure_loki_logging(
+    app_name="my-service",
+    environment="production",
+    log_level="INFO",
+)
+
+logger = get_struct_logger("my_module")
+logger.info("user_action", user_id=123, action="login")
+```
+
+### Loki Queries
+
+```logql
+# All logs for a service
+{service_name=~".*my-service.*"}
+
+# Errors only
+{service_name=~".*my-service.*"} |= "ERROR"
+
+# By app and environment
+{app="my-service", environment="production"}
+
+# Parse JSON and filter
+{app="my-service"} | json | context_duration_ms > 1000
+```
+
+### Alert Integration
+
+Task alerts include Grafana URLs with pre-configured Loki queries for viewing:
+- Task execution logs
+- Error traces
+- Historical runs
+
+## Slack Bot
+
+Interactive service management via Slack.
+
+### Installation
+
+1. Create a Slack app at https://api.slack.com/apps
+
+2. Add OAuth scopes:
+   - `chat:write`, `chat:write.public`
+   - `commands`, `app_mentions:read`
+   - `im:read`, `im:write`
+   - `channels:read`, `groups:read`
+   - `files:write`, `users:read`
+
+3. Enable Interactivity with Request URL: `<your-url>/slack/events`
+
+4. Add slash commands:
+   - `/tf` → `<your-url>/slack/events`
+   - `/tf-dashboard` → `<your-url>/slack/events`
+   - `/tf-health` → `<your-url>/slack/events`
+
+5. Set environment variables:
+   ```bash
+   export SERVICES_SLACK_BOT_TOKEN=xoxb-...
+   export SERVICES_SLACK_SIGNING_SECRET=...
+   export SERVICES_SLACK_ALLOWED_USERS=U12345,U67890  # Optional
+   export SERVICES_SLACK_ALLOWED_CHANNELS=C12345     # Optional
+   ```
+
+6. Start the bot:
+   ```bash
+   tf-slack start
+   ```
+
+### Dashboard Options
+
+- **App Home**: Click the app in your Slack sidebar
+- **Channel**: `/tf dashboard` or `/tf-dashboard`
+- **Modal**: `/tf-dashboard modal`
+- **Web**: `/tf-dashboard web`
 
 ## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| TASKFLOWS_DISPLAY_TIMEZONE | Timezone for display purposes | UTC |
-| TASKFLOWS_FLUENT_BIT | Fluent Bit endpoint | localhost:24224 |
-| TASKFLOWS_GRAFANA | Grafana URL for alert links | localhost:3000 |
-| TASKFLOWS_GRAFANA_API_KEY | Grafana API key for dashboard creation | - |
-| TASKFLOWS_LOKI_URL | Loki URL for log queries | http://localhost:3100 |
+| `TASKFLOWS_DISPLAY_TIMEZONE` | Display timezone | `UTC` |
+| `TASKFLOWS_FLUENT_BIT` | Fluent Bit endpoint | `localhost:24224` |
+| `TASKFLOWS_GRAFANA` | Grafana URL | `localhost:3000` |
+| `TASKFLOWS_GRAFANA_API_KEY` | Grafana API key | - |
+| `TASKFLOWS_LOKI_URL` | Loki URL | `http://localhost:3100` |
+| `LOKI_HOST` | Loki host | `localhost` |
+| `LOKI_PORT` | Loki port | `3100` |
+| `ENVIRONMENT` | Environment name | `production` |
+| `APP_NAME` | Application name | - |
 
-# taskflows Logging Configuration
+### Slack Bot Variables
 
-This module provides optimized logging configurations for the journald → Fluent Bit → Loki pipeline.
+| Variable | Description |
+|----------|-------------|
+| `SERVICES_SLACK_BOT_TOKEN` | Bot OAuth token |
+| `SERVICES_SLACK_SIGNING_SECRET` | Signing secret |
+| `SERVICES_SLACK_ALLOWED_USERS` | Comma-separated user IDs |
+| `SERVICES_SLACK_ALLOWED_CHANNELS` | Comma-separated channel IDs |
+| `SERVICES_SLACK_USE_SOCKET_MODE` | Use socket mode |
+| `SERVICES_SLACK_APP_TOKEN` | App token for socket mode |
+| `SERVICES_SLACK_RATE_LIMIT_PER_MINUTE` | Rate limit (default: 10) |
+| `SERVICES_SLACK_DANGEROUS_COMMANDS` | Commands requiring confirmation |
 
-## Features
+## Development
 
-- **Minimal Label Cardinality**: Only essential fields are exposed as Loki labels to maintain performance
-- **Nanosecond Timestamps**: Better log ordering in Loki
-- **Event Fingerprinting**: Helps identify duplicate events
-- **Request Tracing**: Built-in support for request and trace IDs
-- **Context Management**: Proper handling of thread-local and async contexts
-- **Field Organization**: Non-indexed fields are nested to reduce Loki cardinality
-- **JSON Output**: Optimized for Fluent Bit parsing with UTF-8 support
-- **Exception Formatting**: Rich traceback with frame limiting
-- **String Truncation**: Prevents massive log entries
-- **Performance**: Disabled key sorting, lazy evaluation
+### DBus Documentation
 
-## Usage
+- [systemd DBus API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html)
+- [go-systemd/dbus](https://pkg.go.dev/github.com/coreos/go-systemd/dbus)
 
-### Basic Usage
-
-```python
-from quicklogs import get_struct_logger, configure_loki_logging
-
-# Configure logging for Loki (call once at startup)
-configure_loki_logging(
-    app_name="my-service",
-    environment="production",
-    log_level="INFO"
-)
-
-# Get a logger
-logger = get_struct_logger("my_module")
-
-# Log with structured data
-logger.info("user_action", user_id=123, action="login", ip="192.168.1.1")
-```
-
-### Request Context
-
-```python
-from quicklogs import set_request_context, clear_request_context, generate_request_id
-
-# In your request handler
-request_id = generate_request_id()
-set_request_context(
-    request_id=request_id,
-    user_id=user.id,
-    endpoint="/api/users"
-)
-
-try:
-    # All logs within this context will include request_id, user_id, and endpoint
-    logger.info("processing_request")
-    # ... handle request ...
-finally:
-    clear_request_context()
-```
-
-### Advanced Configuration
-
-```python
-configure_loki_logging(
-    app_name="my-service",
-    environment="staging",
-    extra_labels={"team": "platform", "version": "1.2.3"},
-    log_level="DEBUG",
-    enable_console_renderer=False,  # Use JSON output
-    max_string_length=2000,  # Truncate long strings
-    include_hostname=True,
-    include_process_info=False  # Don't include PID/thread info
-)
-```
-
-## Architecture Overview
-
-```
-Application (structlog) → journald → Fluent Bit → Loki → Grafana
-                       ↓
-                    Log Files → Fluent Bit →
-```
-
-## Loki Label Strategy
-
-**Indexed Labels (searchable in Loki):**
-- `app`: Application name
-- `environment`: Deployment environment
-- `hostname`: Host machine
-- `severity`: Log level (ERROR, INFO, etc.)
-- `level_name`: Syslog-compatible level name
-- `logger`: Logger name
-- `request_id`: Request correlation ID
-- `trace_id`: Distributed trace ID
-- `service_name`: Service identifier (from Fluent Bit)
-- `container_name`: Container name (from Fluent Bit)
-
-**Non-indexed Fields (in log body):**
-- All other fields stored as JSON in log line
-- Searchable via LogQL but not indexed
-
-**Fluent Bit Integration:**
-- `timestamp`: ISO format timestamp
-- `timestamp_ns`: Nanosecond precision timestamp
-- `event`: The log message
-- `event_fingerprint`: Unique identifier for deduplication
-
-## Fluent Bit Configuration
-
-The provided `fluent-bit.conf` includes:
-
-1. **Multiple Inputs**:
-   - Systemd journal for host services
-   - JSON log files from applications
-   - Docker container logs via journald
-
-2. **Smart Parsing**:
-   - `json_structlog` parser for structured logs
-   - Automatic JSON parsing with UTF-8 support
-   - Field reservation for processing
-
-3. **Label Extraction**:
-   - Lua script (`extract_labels.lua`) extracts only necessary labels
-   - Prevents high cardinality issues in Loki
-   - Handles optional labels gracefully
-
-4. **Outputs**:
-   - Primary: Loki with optimized label configuration
-   - Debug: Local file and stdout
-
-### Environment Variables
+### Testing
 
 ```bash
-export LOKI_HOST=localhost      # Default: localhost
-export LOKI_PORT=3100          # Default: 3100
-export ENVIRONMENT=production   # Default: production
-export HOSTNAME=$(hostname)     # Auto-detected
-export APP_NAME=my-service     # Used by structlog
+pytest tests/
 ```
 
-### Running with Docker Compose
+## License
 
-```bash
-docker-compose up -d loki fluent-bit
-```
-
-## Loki Query Examples
-
-With the improved structure, you can efficiently query logs:
-
-```logql
-# Basic queries by labels
-{app="my-service", environment="production"}
-{app="my-service", severity="ERROR"}
-{app="my-service", request_id="abc-123"}
-
-# Search log content
-{app="my-service"} |= "database connection"
-{app="my-service"} |= "event_fingerprint"
-
-# Parse JSON and filter nested context
-{app="my-service"} | json | context_user_id="user-123"
-
-# Performance analysis
-{app="my-service"}
-  | json
-  | context_duration_ms > 1000
-  | line_format "Slow request: {{.event}} took {{.context_duration_ms}}ms"
-
-# Error rate by hostname
-sum by (hostname) (
-  rate({app="my-service", severity="ERROR"}[5m])
-)
-
-# Request latency percentiles
-{app="my-service"}
-  | json
-  | context_response_time_ms > 0
-  | histogram_quantile(0.95,
-      sum by (le) (
-        rate(context_response_time_ms[5m])
-      )
-    )
-
-# Trace specific request
-{trace_id="trace-abc123"} | json
-```
-
-## Best Practices
-
-1. **Keep Labels Low Cardinality**:
-   - Don't use user IDs, timestamps, or unique values as labels
-   - Aim for < 1000 unique values per label
-
-2. **Use Request Context**:
-   ```python
-   # Good: Set context at request boundaries
-   set_request_context(request_id=generate_request_id())
-   ```
-
-3. **Consistent Event Names**:
-   ```python
-   # Good: Use descriptive, consistent event names
-   logger.info("user_login_success", user_id=123)
-   logger.error("database_connection_failed", error=str(e))
-   ```
-
-4. **Monitor Label Cardinality**:
-   - Check Loki metrics: `loki_index_entries_per_chunk`
-   - Use Grafana to monitor label usage
-
-5. **Structure Complex Data**:
-   ```python
-   # Complex data will be nested under 'context' automatically
-   logger.info("order_processed",
-               order_id=12345,
-               items=[{"sku": "ABC", "qty": 2}],
-               total_amount=99.99)
-   ```
-
-## Testing
-
-Run the comprehensive test script:
-
-```bash
-python test_structlog.py
-```
-
-Check logs:
-- Local: `tail -f /var/log/fluent-bit/services-logs | jq .`
-- Loki: Query `{app="dl-logging-test"}` in Grafana
-
-## Performance Considerations
-
-- JSON rendering optimized with `sort_keys=False` for speed
-- Context variables use Python 3.7+ `contextvars` for async safety
-- String truncation prevents huge log entries
-- Event fingerprinting uses MD5 hash (first 8 chars)
-- Non-indexed fields moved to `context` sub-object
-
-## Troubleshooting
-
-1. **Logs not in Loki**:
-   - Check Fluent Bit: `curl http://localhost:2020/api/v1/health`
-   - Verify Loki: `curl http://localhost:3100/ready`
-
-2. **High memory usage**:
-   - Reduce label cardinality
-   - Lower `max_string_length` in configuration
-   - Check Loki ingestion rate limits
-
-3. **Missing fields in queries**:
-   - Non-indexed fields are under `context`
-   - Use: `| json | context_field_name="value"`
-
-4. **Timestamp issues**:
-   - Ensure NTP sync on all hosts
-   - Use `timestamp_ns` field for precise ordering
-
-
-## Development Resources
-dbus documentation:
-- https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html
-- https://pkg.go.dev/github.com/coreos/go-systemd/dbus
-
-## taskflows Slack Bot Installation
-
-1. Go to https://api.slack.com/apps and create a new app
-2. Under "OAuth & Permissions", add these scopes:
-   - chat:write
-   - chat:write.public
-   - commands
-   - app_mentions:read
-   - im:read
-   - im:write
-   - channels:read
-   - groups:read
-   - files:write
-   - users:read
-3. Under "App Home":
-   - Enable App Home
-   - Enable "Allow users to send Slash commands and messages from the messages tab"
-4. Under "Interactivity & Shortcuts":
-   - Enable Interactivity
-   - Set Request URL to your bot's URL + /slack/events
-   - Add Global Shortcut:
-     - Name: taskflows Quick Actions
-     - Callback ID: services_quick_actions
-5. Create slash commands:
-   - "/tf" with the URL to your bot + /slack/events
-   - "/tf-dashboard" with the URL to your bot + /slack/events
-   - "/tf-health" with the URL to your bot + /slack/events
-6. Install the app to your workspace
-7. Set these environment variables:
-   - SERVICES_SLACK_BOT_TOKEN=xoxb-your-token
-   - SERVICES_SLACK_SIGNING_SECRET=your-signing-secret
-   - SERVICES_SLACK_ALLOWED_USERS=U12345,U67890 (optional)
-   - SERVICES_SLACK_ALLOWED_CHANNELS=C12345,C67890 (optional)
-   - SERVICES_SLACK_USE_SOCKET_MODE=true (optional)
-   - SERVICES_SLACK_APP_TOKEN=xapp-your-token (required if using socket mode)
-   - SERVICES_SLACK_RATE_LIMIT_PER_MINUTE=10 (optional, default: 10)
-   - SERVICES_SLACK_DANGEROUS_COMMANDS=remove,stop,disable (optional)
-8. Run "tf-slack start" to start the bot
-
-🎛️ Dashboard Options:
-📱 App Home Dashboard - Click the app in your sidebar (Recommended)
-💬 Channel Dashboard - Use `/tf dashboard` or `/tf-dashboard`
-🖥️ Modal Dashboard - Use `/tf-dashboard modal`
-🌐 Web Integration - Use `/tf-dashboard web`
+MIT
