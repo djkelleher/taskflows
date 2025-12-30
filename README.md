@@ -712,9 +712,13 @@ X-HMAC-Timestamp: <unix-timestamp>
 
 ## Security
 
-### HMAC Authentication
+Taskflows implements multiple security layers to protect against common vulnerabilities and unauthorized access.
 
-Secure API communication with HMAC-SHA256:
+### Authentication
+
+#### HMAC Authentication (API)
+
+Secure API communication with HMAC-SHA256 request signing:
 
 ```bash
 # Initial setup
@@ -729,20 +733,198 @@ tf security regenerate-secret
 
 Configuration stored in `~/.services/security.json`.
 
+**How it works:**
+1. Shared secret distributed to authorized clients
+2. Each request signed with HMAC-SHA256(secret, timestamp + body)
+3. Server validates signature and timestamp (5-minute window)
+4. Prevents replay attacks and request tampering
+
 **Protected Operations:**
 - Service start/stop/restart
 - Service creation/removal
 - Environment management
 
-### JWT Authentication (Web UI)
+#### JWT Authentication (Web UI)
 
-The web UI uses JWT tokens:
+The web UI uses JWT tokens with bcrypt password hashing:
 
 ```bash
 tf api setup-ui --username admin
 ```
 
 Configuration stored in `~/.services/ui_config.json`.
+
+**Token Features:**
+- Bcrypt hashed passwords (12 rounds)
+- 1-hour token expiration
+- Automatic refresh on activity
+- Secure HTTP-only cookies (when HTTPS enabled)
+
+### Input Validation & Sanitization
+
+Taskflows validates all user input to prevent injection attacks:
+
+#### Path Traversal Prevention
+All file paths (`env_file`, working directories) are validated:
+
+```python
+# ✅ Safe - absolute path validated
+Service(name="my-service", env_file="/home/user/app/.env")
+
+# ❌ Blocked - directory traversal attempt
+Service(name="bad", env_file="../../../etc/passwd")  # Raises SecurityError
+
+# ❌ Blocked - symlink escape
+Service(name="bad", env_file="/tmp/link-to-etc-passwd")  # Raises SecurityError
+```
+
+**Protection mechanisms:**
+- Resolves to absolute paths
+- Checks against allowed directories
+- Detects and blocks symlink escapes
+- Prevents `..` path components
+
+#### Service Name Validation
+Service names are sanitized to prevent injection:
+
+```python
+# ✅ Safe - alphanumeric, dashes, dots, underscores
+Service(name="my-service-v2.0_prod")
+
+# ❌ Blocked - path characters
+Service(name="../malicious")  # Raises SecurityError
+Service(name="/etc/passwd")   # Raises SecurityError
+
+# ❌ Blocked - special characters
+Service(name="bad; rm -rf /")  # Raises SecurityError
+```
+
+**Allowed characters:** `[a-zA-Z0-9._-]+` only
+
+#### Command Injection Prevention
+Docker commands are strictly validated using shell quoting:
+
+```python
+# ✅ Safe - properly quoted
+DockerContainer(command='python script.py --arg "value with spaces"')
+
+# ❌ Rejected - malformed quotes
+DockerContainer(command='python script.py --arg "unterminated')  # Raises ValueError
+```
+
+**Protection:** Uses Python's `shlex.split()` with no unsafe fallback
+
+### Credential Management
+
+**Best Practices:**
+
+1. **Never commit secrets** to version control
+   ```bash
+   # Use .env files (add to .gitignore)
+   echo "API_KEY=secret123" > .env
+
+   # Reference in service
+   Service(name="app", env_file=".env")
+   ```
+
+2. **Use environment variables** for sensitive configuration
+   ```python
+   import os
+   Service(
+       name="app",
+       environment={
+           "DB_PASSWORD": os.getenv("DB_PASSWORD"),
+           "API_KEY": os.getenv("API_KEY"),
+       }
+   )
+   ```
+
+3. **Restrict file permissions**
+   ```bash
+   chmod 600 ~/.services/security.json
+   chmod 600 .env
+   ```
+
+4. **Rotate secrets regularly**
+   ```bash
+   tf security regenerate-secret
+   ```
+
+### Docker Socket Security
+
+⚠️ **Warning:** Services with Docker access have root-equivalent permissions.
+
+When using `docker_container`, the service accesses Docker's Unix socket (`/var/run/docker.sock`), which grants:
+- Ability to run containers as root
+- Access to host filesystem via volume mounts
+- Network configuration capabilities
+
+**Mitigation strategies:**
+
+1. **Principle of least privilege** - only use Docker when necessary
+   ```python
+   # Prefer direct execution
+   Service(name="app", exec_start="python app.py")
+
+   # Only containerize when isolation needed
+   Service(name="app", docker_container=DockerContainer(...))
+   ```
+
+2. **Resource limits** - constrain container resources
+   ```python
+   DockerContainer(
+       name="app",
+       cgroup=CgroupConfig(
+           memory_limit=1 * 1024**3,  # 1 GB max
+           cpu_quota=100000,          # 1 CPU max
+           pids_limit=100,             # Max 100 processes
+           read_only_rootfs=True,      # Immutable filesystem
+       )
+   )
+   ```
+
+3. **Drop capabilities** - remove unnecessary Linux capabilities
+   ```python
+   DockerContainer(
+       name="app",
+       cgroup=CgroupConfig(
+           cap_drop=["ALL"],           # Drop all capabilities
+           cap_add=["NET_BIND_SERVICE"],  # Only add what's needed
+       )
+   )
+   ```
+
+4. **Network isolation** - use custom networks
+   ```python
+   DockerContainer(name="app", network_mode="isolated_net")
+   ```
+
+### Security Audit Checklist
+
+- [ ] HMAC authentication enabled for API
+- [ ] Strong passwords for web UI (12+ characters)
+- [ ] Secrets in environment variables or `.env` files
+- [ ] `.env` files in `.gitignore`
+- [ ] File permissions: `chmod 600` on sensitive files
+- [ ] Regular secret rotation schedule
+- [ ] Docker used only when necessary
+- [ ] Resource limits on all Docker containers
+- [ ] Capabilities dropped on Docker containers
+- [ ] Review service permissions (user/group)
+
+### Reporting Security Issues
+
+For security vulnerabilities, please **do not** open a public issue. Instead:
+1. Email security concerns to: [maintainer email]
+2. Include detailed reproduction steps
+3. Allow 90 days for patch before disclosure
+
+### Security References
+
+- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [Docker Security Best Practices](https://docs.docker.com/engine/security/)
+- [systemd Security Features](https://www.freedesktop.org/software/systemd/man/systemd.exec.html#Security)
+- [Python Security Best Practices](https://python.readthedocs.io/en/stable/library/security.html)
 
 ## Logging & Monitoring
 
