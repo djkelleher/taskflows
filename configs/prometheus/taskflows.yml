@@ -1,0 +1,89 @@
+# Prometheus scrape configuration for Taskflows
+#
+# Usage:
+# 1. Copy this file to your Prometheus configuration directory
+# 2. Include in prometheus.yml:
+#    scrape_configs:
+#      - job_name: 'taskflows-api'
+#        file_sd_configs:
+#          - files: ['taskflows.yml']
+#
+# Or merge directly into prometheus.yml
+
+global:
+  scrape_interval: 15s      # How frequently to scrape targets
+  evaluation_interval: 15s  # How frequently to evaluate rules
+
+scrape_configs:
+  # Taskflows Admin API metrics endpoint
+  - job_name: 'taskflows-api'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+    # Static configuration for single server
+    static_configs:
+      - targets: ['localhost:7777']
+        labels:
+          environment: 'production'
+          service: 'taskflows-api'
+          instance_type: 'api'
+
+    # Metrics path (default is /metrics)
+    metrics_path: '/metrics'
+
+    # Relabeling for cleaner metric names
+    metric_relabel_configs:
+      # Add source label
+      - source_labels: [__name__]
+        target_label: source
+        replacement: 'taskflows'
+
+      # Drop high-cardinality labels if needed
+      # - source_labels: [task_id]
+      #   action: labeldrop
+
+  # Multi-server configuration using DNS service discovery
+  # Uncomment and modify for multi-server deployments
+  # - job_name: 'taskflows-api-cluster'
+  #   dns_sd_configs:
+  #     - names:
+  #         - 'taskflows-api.example.com'
+  #       type: 'A'
+  #       port: 7777
+  #   relabel_configs:
+  #     - source_labels: [__address__]
+  #       target_label: __param_target
+  #     - source_labels: [__param_target]
+  #       target_label: instance
+  #     - target_label: __address__
+  #       replacement: localhost:7777
+
+  # File-based service discovery for dynamic server list
+  # Create a JSON file with server targets
+  # - job_name: 'taskflows-api-file-sd'
+  #   file_sd_configs:
+  #     - files:
+  #         - '/etc/prometheus/taskflows/targets.json'
+  #       refresh_interval: 30s
+
+# Example targets.json for file-based service discovery:
+# [
+#   {
+#     "targets": ["server1.example.com:7777", "server2.example.com:7777"],
+#     "labels": {
+#       "environment": "production",
+#       "datacenter": "us-east"
+#     }
+#   },
+#   {
+#     "targets": ["server3.example.com:7777"],
+#     "labels": {
+#       "environment": "staging",
+#       "datacenter": "us-west"
+#     }
+#   }
+# ]
+
+# Alerting rules (optional - create separate alerts.yml)
+# rule_files:
+#   - 'taskflows-alerts.yml'

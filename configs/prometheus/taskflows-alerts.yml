@@ -1,0 +1,204 @@
+# Prometheus alerting rules for Taskflows
+#
+# Usage:
+# 1. Copy to Prometheus rules directory
+# 2. Add to prometheus.yml:
+#    rule_files:
+#      - 'taskflows-alerts.yml'
+# 3. Configure Alertmanager for notifications
+
+groups:
+  - name: taskflows_tasks
+    interval: 30s
+    rules:
+      # High task failure rate
+      - alert: HighTaskFailureRate
+        expr: |
+          (
+            rate(taskflows_task_errors_total[5m])
+            /
+            rate(taskflows_task_total[5m])
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: tasks
+        annotations:
+          summary: "High task failure rate ({{ $value | humanizePercentage }})"
+          description: "Task {{ $labels.task_name }} has a failure rate of {{ $value | humanizePercentage }} over the last 5 minutes."
+          runbook: "https://docs.example.com/runbooks/high-task-failure-rate"
+
+      # Task timeout rate
+      - alert: HighTaskTimeoutRate
+        expr: |
+          (
+            rate(taskflows_task_errors_total{error_type="timeout"}[5m])
+            /
+            rate(taskflows_task_total[5m])
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: tasks
+        annotations:
+          summary: "High task timeout rate ({{ $value | humanizePercentage }})"
+          description: "Task {{ $labels.task_name }} is timing out {{ $value | humanizePercentage }} of the time."
+
+      # Slow task execution (P95 > 60s)
+      - alert: SlowTaskExecution
+        expr: |
+          histogram_quantile(0.95,
+            rate(taskflows_task_duration_seconds_bucket[5m])
+          ) > 60
+        for: 10m
+        labels:
+          severity: info
+          component: tasks
+        annotations:
+          summary: "Slow task execution (P95: {{ $value | humanizeDuration }})"
+          description: "Task {{ $labels.task_name }} P95 latency is {{ $value | humanizeDuration }}."
+
+      # Excessive task retries
+      - alert: ExcessiveTaskRetries
+        expr: |
+          rate(taskflows_task_retries_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: tasks
+        annotations:
+          summary: "Excessive task retries ({{ $value }} retries/sec)"
+          description: "Task {{ $labels.task_name }} is retrying at {{ $value }} times per second."
+
+  - name: taskflows_services
+    interval: 30s
+    rules:
+      # Service in failed state
+      - alert: ServiceFailed
+        expr: |
+          taskflows_service_state{state="failed"} == 1
+        for: 1m
+        labels:
+          severity: critical
+          component: services
+        annotations:
+          summary: "Service {{ $labels.service_name }} is in failed state"
+          description: "Service {{ $labels.service_name }} has been in failed state for over 1 minute."
+          runbook: "https://docs.example.com/runbooks/service-failed"
+
+      # Frequent service restarts
+      - alert: FrequentServiceRestarts
+        expr: |
+          increase(taskflows_service_restarts_total[1h]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: services
+        annotations:
+          summary: "Frequent service restarts ({{ $value }} in last hour)"
+          description: "Service {{ $labels.service_name }} has restarted {{ $value }} times in the last hour."
+
+      # Service unavailable
+      - alert: ServiceUnavailable
+        expr: |
+          taskflows_service_state{state="active"} == 0
+          and
+          taskflows_service_state{state="inactive"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: services
+        annotations:
+          summary: "Service {{ $labels.service_name }} is unavailable"
+          description: "Service {{ $labels.service_name }} is neither active nor inactive."
+
+  - name: taskflows_api
+    interval: 30s
+    rules:
+      # High API error rate
+      - alert: HighAPIErrorRate
+        expr: |
+          (
+            sum(rate(taskflows_api_request_total{status_code=~"5.."}[5m]))
+            /
+            sum(rate(taskflows_api_request_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High API error rate ({{ $value | humanizePercentage }})"
+          description: "API endpoint {{ $labels.endpoint }} has error rate of {{ $value | humanizePercentage }}."
+
+      # Slow API requests (P95 > 1s)
+      - alert: SlowAPIRequests
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(taskflows_api_request_duration_seconds_bucket[5m])) by (le, endpoint)
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "Slow API requests (P95: {{ $value }}s)"
+          description: "API endpoint {{ $labels.endpoint }} P95 latency is {{ $value }}s."
+
+      # High concurrent requests
+      - alert: HighConcurrentRequests
+        expr: |
+          sum(taskflows_api_active_requests) > 100
+        for: 5m
+        labels:
+          severity: info
+          component: api
+        annotations:
+          summary: "High concurrent API requests ({{ $value }})"
+          description: "There are currently {{ $value }} concurrent API requests."
+
+      # API endpoint not responding
+      - alert: APIEndpointDown
+        expr: |
+          up{job="taskflows-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "API endpoint is down"
+          description: "Taskflows API at {{ $labels.instance }} is not responding."
+          runbook: "https://docs.example.com/runbooks/api-down"
+
+  - name: taskflows_resources
+    interval: 60s
+    rules:
+      # Note: These require node_exporter to be running alongside Taskflows
+
+      # High memory usage (if node_exporter available)
+      # - alert: HighMemoryUsage
+      #   expr: |
+      #     (
+      #       node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes
+      #     ) / node_memory_MemTotal_bytes > 0.9
+      #   for: 10m
+      #   labels:
+      #     severity: warning
+      #     component: system
+      #   annotations:
+      #     summary: "High memory usage ({{ $value | humanizePercentage }})"
+      #     description: "System memory usage is at {{ $value | humanizePercentage }}."
+
+      # High CPU usage (if node_exporter available)
+      # - alert: HighCPUUsage
+      #   expr: |
+      #     (
+      #       1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))
+      #     ) > 0.9
+      #   for: 10m
+      #   labels:
+      #     severity: warning
+      #     component: system
+      #   annotations:
+      #     summary: "High CPU usage ({{ $value | humanizePercentage }})"
+      #     description: "System CPU usage is at {{ $value | humanizePercentage }}."
