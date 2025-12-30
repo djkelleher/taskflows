@@ -33,12 +33,11 @@ systemd_dir = Path.home().joinpath(".config", "systemd", "user")
 class Config(BaseSettings):
     """S3 configuration. Variables will be loaded from environment variables if set."""
 
-    db_url: Optional[str] = None
-    db_schema: str = "services"
     display_timezone: str = "UTC"
     fluent_bit: str = "localhost:24224"
     grafana: str = "localhost:3000"
     grafana_api_key: Optional[str] = "glsa_eNGkj4CK08K3Huj4UyuS5TfD0eCcHOoZ_633dd6e8"
+    loki_url: str = "http://localhost:3100"
 
     model_config = SettingsConfigDict(env_prefix="taskflows_")
 

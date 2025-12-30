@@ -1,19 +1,90 @@
 import asyncio
+import contextvars
 import threading
 from datetime import datetime, timezone
 from logging import Logger
 from typing import Any, Callable, List, Literal, Optional, Sequence
+from urllib.parse import quote
 
 import anyio
 from anyio.from_thread import BlockingPortal
-import sqlalchemy as sa
 from alert_msgs import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
 from pydantic import BaseModel
+from quicklogs import (
+    clear_request_context,
+    generate_request_id,
+    get_struct_logger,
+    set_request_context,
+)
 
-from .common import logger as default_logger
-from .db import engine, get_tasks_db
+from .common import config, logger as default_logger
 
 TaskEvent = Literal["start", "error", "finish"]
+
+# Context variable for current task_id
+_current_task_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_task_id", default=None
+)
+
+
+def get_current_task_id() -> str | None:
+    """Get the current task ID within task execution context.
+
+    Returns the task_id if called from within a @task decorated function,
+    or None if called outside of task context.
+
+    Example:
+        @task(name="my_task")
+        async def my_task():
+            task_id = get_current_task_id()
+            # Use task_id for API calls, DB records, etc.
+            await api_call(correlation_id=task_id)
+    """
+    return _current_task_id.get()
+
+
+def build_loki_query_url(
+    task_name: str,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    error_only: bool = False,
+) -> str:
+    """
+    Build a Grafana Explore URL with a Loki query for the given task.
+
+    Args:
+        task_name: Name of the task to query logs for
+        start_time: Start time for the query (defaults to 1 hour ago)
+        end_time: End time for the query (defaults to now)
+        error_only: If True, filter for ERROR level logs only
+
+    Returns:
+        URL string for Grafana Explore with the Loki query
+    """
+    if start_time is None:
+        start_time = datetime.now(timezone.utc)
+    if end_time is None:
+        end_time = datetime.now(timezone.utc)
+
+    # Build LogQL query
+    if error_only:
+        query = f'{{service_name=~".*{task_name}.*"}} |= "ERROR"'
+    else:
+        query = f'{{service_name=~".*{task_name}.*"}}'
+
+    # Convert times to Unix timestamps in milliseconds
+    from_ts = int(start_time.timestamp() * 1000)
+    to_ts = int(end_time.timestamp() * 1000)
+
+    # Build Grafana Explore URL
+    grafana_base = config.grafana.rstrip("/")
+    if not grafana_base.startswith("http"):
+        grafana_base = f"http://{grafana_base}"
+
+    encoded_query = quote(query, safe="")
+    url = f"{grafana_base}/explore?orgId=1&left=%7B%22datasource%22:%22loki%22,%22queries%22:%5B%7B%22expr%22:%22{encoded_query}%22%7D%5D,%22range%22:%7B%22from%22:%22{from_ts}%22,%22to%22:%22{to_ts}%22%7D%7D"
+
+    return url
 
 
 class _RuntimeManager:
@@ -84,16 +155,16 @@ class Alerts(BaseModel):
 
 
 class TaskLogger:
-    """Utility class for handling async database logging, sending alerts, etc."""
+    """Utility class for handling task logging and sending alerts with Loki URLs."""
 
     @classmethod
     async def create(
         cls,
         name: str,
         required: bool,
-        db_record: bool = False,
         alerts: Optional[Sequence[Alerts]] = None,
         error_msg_max_length: int = 5000,
+        task_id: Optional[str] = None,
     ):
         """
         Create and initialize an TaskLogger instance.
@@ -101,20 +172,16 @@ class TaskLogger:
         Args:
             name (str): Name of the task.
             required (bool): Whether the task is required.
-            db_record (bool, optional): Whether to record the task in the database. Defaults to False.
             alerts (Optional[Sequence[Alerts]], optional): Alert configurations / destinations. Defaults to None.
+            task_id (Optional[str], optional): Unique task ID. Generated if not provided.
         """
         self = cls()
         self.name = name
         self.required = required
-        self.db_record = db_record
         self.alerts = alerts or []
         self.error_msg_max_length = error_msg_max_length
         self.errors = []
-        self.db = None
-
-        if self.db_record:
-            self.db = await get_tasks_db()
+        self.task_id = task_id or generate_request_id()
 
         return self
 
@@ -122,20 +189,17 @@ class TaskLogger:
         """
         Handles actions to be performed when a task starts.
 
-        Records the start time of the task, logs it to the database if `db_record`
-        is enabled, and sends start alerts if configured.
+        Records the start time of the task, binds task context for logging,
+        and sends start alerts if configured.
         """
+        # Set task_id in context variable for access via get_current_task_id()
+        _current_task_id.set(self.task_id)
+
+        # Bind task_id to structlog context for all subsequent logs
+        set_request_context(task_id=self.task_id, task_name=self.name)
+
         # record the start time of the task
         self.start_time = datetime.now(timezone.utc)
-
-        # if db_record is enabled, log the start of the task to the database
-        if self.db_record and self.db:
-            async with engine.begin() as conn:
-                statement = sa.insert(self.db.task_runs_table).values(
-                    task_name=self.name,
-                    started=self.start_time,
-                )
-                await conn.execute(statement)
 
         # if there are any start alerts configured, send them
         if send_to := self._event_alerts("start"):
@@ -158,27 +222,31 @@ class TaskLogger:
         # 1. add the error to the list of errors encountered by the task
         self.errors.append(error)
 
-        # 2. if db_record is enabled, record the error in the database
-        if self.db_record and self.db:
-            async with engine.begin() as conn:
-                statement = sa.insert(self.db.task_errors_table).values(
-                    task_name=self.name,
-                    type=str(type(error)),
-                    message=str(error),
-                )
-                await conn.execute(statement)
-
-        # 3. if there are any error alerts configured, send them
+        # 2. if there are any error alerts configured, send them with Loki URL
         if send_to := self._event_alerts("error"):
-            subject = f"{type(error)} Error executing task {self.name}"
+            subject = f"{type(error).__name__} Error executing task {self.name}"
             error_message = f"{Emoji.red_circle} {subject}: {error}"
+
+            # Build Loki URL for error logs
+            loki_url = build_loki_query_url(
+                task_name=self.name,
+                start_time=self.start_time,
+                end_time=datetime.now(timezone.utc),
+                error_only=True,
+            )
+
             components = [
                 Text(
                     error_message,
                     font_size=FontSize.LARGE,
                     level=ContentType.ERROR,
                     max_length=self.error_msg_max_length,
-                )
+                ),
+                Text(
+                    f"View error logs in Loki: {loki_url}",
+                    font_size=FontSize.MEDIUM,
+                    level=ContentType.INFO,
+                ),
             ]
             await send_alert(content=components, send_to=send_to, subject=subject)
 
@@ -196,80 +264,84 @@ class TaskLogger:
             return_value (Any): The value returned by the task, if any.
             retries (int): The number of retries performed by the task, if any.
         """
-        # record the finish time
-        finish_time = datetime.now(timezone.utc)
-        status = "success" if success else "failed"
+        try:
+            # record the finish time
+            finish_time = datetime.now(timezone.utc)
 
-        # if db_record is enabled, record the task run in the database
-        if self.db_record and self.db:
-            async with engine.begin() as conn:
-                statement = (
-                    sa.update(self.db.task_runs_table)
-                    .where(
-                        self.db.task_runs_table.c.task_name == self.name,
-                        self.db.task_runs_table.c.started == self.start_time,
-                    )
-                    .values(
-                        finished=finish_time,
-                        retries=retries,
-                        status=status,
-                    )
-                )
-                await conn.execute(statement)
-
-        # if there are any finish alerts configured, send them
-        if send_to := self._event_alerts("finish"):
-            components = [
-                Text(
-                    f"{Emoji.green_circle if success else Emoji.red_circle} Finished: {self.name} | {self.start_time} - {finish_time} ({finish_time-self.start_time})",
-                    font_size=FontSize.LARGE,
-                    level=(ContentType.IMPORTANT if success else ContentType.ERROR),
-                )
-            ]
-
-            if return_value is not None:
-                components.append(
+            # if there are any finish alerts configured, send them
+            if send_to := self._event_alerts("finish"):
+                components = [
                     Text(
-                        f"Result: {return_value}",
-                        font_size=FontSize.MEDIUM,
-                        level=ContentType.IMPORTANT,
-                    )
-                )
-
-            if self.errors:
-                components.append(
-                    Text(
-                        f"ERRORS{Emoji.red_exclamation}",
+                        f"{Emoji.green_circle if success else Emoji.red_circle} Finished: {self.name} | {self.start_time} - {finish_time} ({finish_time-self.start_time})",
                         font_size=FontSize.LARGE,
-                        level=ContentType.ERROR,
+                        level=(ContentType.IMPORTANT if success else ContentType.ERROR),
                     )
-                )
-                for e in self.errors:
-                    error_text = f"{type(e)}: {e}"
+                ]
+
+                if return_value is not None:
                     components.append(
                         Text(
-                            error_text,
+                            f"Result: {return_value}",
                             font_size=FontSize.MEDIUM,
-                            level=ContentType.INFO,
-                            max_length=self.error_msg_max_length,
+                            level=ContentType.IMPORTANT,
                         )
                     )
 
-            await send_alert(content=components, send_to=send_to)
-
-        # if there were any errors and the task is required, raise an error
-        if self.errors and self.required:
-            if len(self.errors) > 1:
-                error_types = {type(e) for e in self.errors}
-                if len(error_types) == 1:
-                    errors_str = "\n\n".join([str(e) for e in self.errors])
-                    raise error_types.pop()(
-                        f"{len(self.errors)} errors executing task {self.name}:\n{errors_str}"
-                    )
-                raise RuntimeError(
-                    f"{len(self.errors)} errors executing task {self.name}: {self.errors}"
+                # Build Loki URL for all logs during task execution
+                loki_url = build_loki_query_url(
+                    task_name=self.name,
+                    start_time=self.start_time,
+                    end_time=finish_time,
+                    error_only=False,
                 )
-            raise type(self.errors[0])(str(self.errors[0]))
+
+                if self.errors:
+                    components.append(
+                        Text(
+                            f"ERRORS{Emoji.red_exclamation}",
+                            font_size=FontSize.LARGE,
+                            level=ContentType.ERROR,
+                        )
+                    )
+                    for e in self.errors:
+                        error_text = f"{type(e).__name__}: {e}"
+                        components.append(
+                            Text(
+                                error_text,
+                                font_size=FontSize.MEDIUM,
+                                level=ContentType.INFO,
+                                max_length=self.error_msg_max_length,
+                            )
+                        )
+
+                # Add Loki URL for viewing logs
+                components.append(
+                    Text(
+                        f"View logs in Loki: {loki_url}",
+                        font_size=FontSize.MEDIUM,
+                        level=ContentType.INFO,
+                    )
+                )
+
+                await send_alert(content=components, send_to=send_to)
+
+            # if there were any errors and the task is required, raise an error
+            if self.errors and self.required:
+                if len(self.errors) > 1:
+                    error_types = {type(e) for e in self.errors}
+                    if len(error_types) == 1:
+                        errors_str = "\n\n".join([str(e) for e in self.errors])
+                        raise error_types.pop()(
+                            f"{len(self.errors)} errors executing task {self.name}:\n{errors_str}"
+                        )
+                    raise RuntimeError(
+                        f"{len(self.errors)} errors executing task {self.name}: {self.errors}"
+                    )
+                raise type(self.errors[0])(str(self.errors[0]))
+        finally:
+            # Clear task context after task completes (success or failure)
+            _current_task_id.set(None)
+            clear_request_context()
 
     def _event_alerts(self, event: Literal["start", "error", "finish"]) -> List[MsgDst]:
         """
@@ -316,13 +388,19 @@ async def _async_task_wrapper(
                 else:
                     result = await func(*args, **kwargs)
             else:
-                # For sync functions, run them in a thread pool
+                # For sync functions, run them in a thread pool with context propagation
+                # Capture current context to propagate task_id to the worker thread
+                ctx = contextvars.copy_context()
+
+                def run_in_context():
+                    return ctx.run(func, *args, **kwargs)
+
                 if timeout:
                     result = await asyncio.wait_for(
-                        asyncio.to_thread(func, *args, **kwargs), timeout=timeout
+                        asyncio.to_thread(run_in_context), timeout=timeout
                     )
                 else:
-                    result = await asyncio.to_thread(func, *args, **kwargs)
+                    result = await asyncio.to_thread(run_in_context)
             await task_logger.on_task_finish(
                 success=True, retries=i, return_value=result
             )
@@ -340,7 +418,6 @@ async def run_task(
     required: bool = False,
     retries: int = 0,
     timeout: Optional[float] = None,
-    db_record: bool = False,
     alerts: Optional[Sequence[Alerts | MsgDst]] = None,
     logger: Optional[Logger] = None,
     *args,
@@ -355,7 +432,6 @@ async def run_task(
         required (bool, optional): Required tasks will raise exceptions. Defaults to False.
         retries (int, optional): How many times to retry the task on failure. Defaults to 0.
         timeout (Optional[float], optional): Timeout (seconds) for function execution. Defaults to None.
-        db_record (bool, optional): Whether to record the task in the database. Defaults to False.
         alerts (Optional[Sequence[Alerts]], optional): Alert configurations / destinations.
         logger (Optional[Logger], optional): Logger to use for error logging.
         **kwargs: Keyword arguments to pass to the function.
@@ -372,7 +448,6 @@ async def run_task(
     task_logger = await TaskLogger.create(
         name=name or func.__name__,
         required=required,
-        db_record=db_record,
         alerts=alerts,
     )
     return await _async_task_wrapper(
@@ -391,7 +466,6 @@ def task(
     required: bool = False,
     retries: int = 0,
     timeout: Optional[float] = None,
-    db_record: bool = False,
     alerts: Optional[Sequence[Alerts | MsgDst]] = None,
     logger: Optional[Logger] = None,
 ):
@@ -419,7 +493,6 @@ def task(
             task_logger = await TaskLogger.create(
                 name=name or func.__name__,
                 required=required,
-                db_record=db_record,
                 alerts=alerts,
             )
             return await _async_task_wrapper(

@@ -62,22 +62,70 @@ The taskflows system uses HMAC-SHA256 authentication to secure communication bet
   dls security disable  # ⚠️ Not recommended
   ```
 
-### Database Configuration
-Task execution metadata is stored in either:
-- SQLite (default, no configuration needed)
-- PostgreSQL (requires configuration)
+### Loki Configuration
+Task execution logs and metadata are stored in Loki for centralized log aggregation. Configure your Loki and Grafana endpoints:
 
-To use a custom database:
 ```bash
-# For SQLite
-export DL_SERVICES_DB_URL="sqlite:///path/to/your/database.db"
+# Grafana URL (for alert links)
+export TASKFLOWS_GRAFANA="http://localhost:3000"
 
-# For PostgreSQL
-export DL_SERVICES_DB_URL="postgresql://user:password@localhost:5432/dbname"
-export DL_SERVICES_DB_SCHEMA="custom_schema"  # Optional, defaults to 'services'
+# Loki URL (for log queries)
+export TASKFLOWS_LOKI_URL="http://localhost:3100"
+
+# Grafana API key (for dashboard creation)
+export TASKFLOWS_GRAFANA_API_KEY="your_api_key"
 ```
 
+Server registry is stored in a JSON file at `/opt/taskflows/data/servers.json`.
+
 ## Usage
+
+### Web UI
+
+taskflows includes a modern web interface for managing services and viewing logs.
+
+#### Setup
+```bash
+# Install UI dependencies (first time only)
+cd taskflows/ui && npm install && cd ../..
+
+# Build the UI
+./build_ui.sh
+
+# Setup authentication (first time only)
+tf api setup-ui --username admin
+# You'll be prompted to create a password
+
+# Start the API with UI enabled
+tf api start --enable-ui
+```
+
+#### Access
+Navigate to **http://localhost:7777** in your browser.
+
+**Features:**
+- 🔐 Secure JWT authentication
+- 📊 Dashboard with real-time service status
+- 🔍 Multi-select and search services
+- ⚡ Batch operations (start/stop/restart multiple services)
+- 📝 Log viewer with search and auto-scroll
+- 🌍 Named environments (reusable venv/docker configurations)
+- 🔄 Auto-refresh status every 5 seconds
+
+#### Named Environments
+Create reusable environment configurations that can be shared across multiple services:
+
+```python
+# Create a named environment via UI or API
+# Then reference it in your services:
+from taskflows import Service
+
+srv = Service(
+    name="my-service",
+    start_command="python my_script.py",
+    environment="production-venv",  # References named environment
+)
+```
 
 ### Command Line Interface
 Admin commands are accessed via the `tf` command line tool:
@@ -142,8 +190,21 @@ if __name__ == "__main__":
 
 ### Review Task Status/Results
 Tasks can send alerts via Slack and/or Email, as shown in the above example. Internally, alerts are sent using the [alert-msgs](https://github.com/djkelleher/alert-msgs) package.
-Task start/finish times, status, retry count, return values can be found in the `task_runs` table.
-Any errors that occurred during the execution of a task can be found in the `task_errors` table.
+
+**Loki-First Approach**: Task logs, execution history, and errors are now accessed through Loki log queries instead of database tables. When alerts are sent, they include Grafana/Loki URLs with pre-configured queries to view:
+- Task execution logs
+- Error traces and stack traces
+- Historical task runs
+
+Visit your Grafana instance at `/explore` to query task logs using LogQL. Example query:
+```
+{service_name=~".*your_task_name.*"}
+```
+
+To filter for errors only:
+```
+{service_name=~".*your_task_name.*"} |= "ERROR"
+```
 
 ### Creating taskflows
 *Note: To use services, your system must have systemd (the init system on most modern Linux distributions)*
@@ -209,12 +270,11 @@ service.create()
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| DL_SERVICES_DB_URL | Database connection URL | sqlite:///~/.local/share/services/services.db |
-| DL_SERVICES_DB_SCHEMA | PostgreSQL schema name | services |
-| DL_SERVICES_DISPLAY_TIMEZONE | Timezone for display purposes | UTC |
-| DL_SERVICES_DOCKER_LOG_DRIVER | Docker logging driver | json-file |
-| DL_SERVICES_FLUENT_BIT_HOST | Fluent Bit host for logging | localhost |
-| DL_SERVICES_FLUENT_BIT_PORT | Fluent Bit port for logging | 24224 |
+| TASKFLOWS_DISPLAY_TIMEZONE | Timezone for display purposes | UTC |
+| TASKFLOWS_FLUENT_BIT | Fluent Bit endpoint | localhost:24224 |
+| TASKFLOWS_GRAFANA | Grafana URL for alert links | localhost:3000 |
+| TASKFLOWS_GRAFANA_API_KEY | Grafana API key for dashboard creation | - |
+| TASKFLOWS_LOKI_URL | Loki URL for log queries | http://localhost:3100 |
 
 # taskflows Logging Configuration
 

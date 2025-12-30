@@ -1,39 +1,30 @@
 """
-Simple test to verify the async database implementation works correctly.
+Simple test to verify the async task implementation works correctly.
 """
 
 import asyncio
-import os
-import tempfile
-from pathlib import Path
-
 import pytest
-
-# Set up test environment with SQLite
-test_db_dir = tempfile.mkdtemp()
-test_db_path = Path(test_db_dir) / "test_services.sqlite"
-os.environ["DLSERVICES_DB_URL"] = f"sqlite:///{test_db_path}"
 
 from taskflows.tasks import task
 
 
-@task(name="sample_async_task", db_record=True, retries=1)
+@task(name="sample_async_task", retries=1)
 async def sample_async_task():
-    """Sample async task with database logging."""
+    """Sample async task."""
     await asyncio.sleep(0.1)  # Simulate async work
     return "async_result"
 
 
-@task(name="sample_sync_task", db_record=True, retries=1)
+@task(name="sample_sync_task", retries=1)
 def sample_sync_task():
-    """Sample sync task running in async context with database logging."""
+    """Sample sync task running in async context."""
     import time
 
     time.sleep(0.1)  # Simulate sync work
     return "sync_result"
 
 
-@task(name="sample_error_task", db_record=True, retries=2)
+@task(name="sample_error_task", retries=2)
 async def sample_error_task():
     """Sample task that raises an error."""
     raise ValueError("Test error for logging")

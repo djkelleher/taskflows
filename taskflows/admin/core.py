@@ -9,7 +9,6 @@ from typing import Dict, Literal, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 import requests
-import sqlalchemy as sa
 from alert_msgs.components import Component, Map, Table, Text
 from alert_msgs.utils import as_code_block
 
@@ -20,7 +19,7 @@ from fastapi import status
 from taskflows.admin.security import security_config
 from taskflows.common import config, load_service_files, logger, sort_service_names
 from taskflows.dashboard import Dashboard
-from taskflows.db import engine, get_tasks_db, servers_table
+from taskflows.db import get_servers, upsert_server as db_upsert_server
 from taskflows.service import (
     Service,
     ServiceRegistry,
@@ -99,16 +98,12 @@ async def list_servers() -> Table:
     Returns:
         Table: Table showing registered servers
     """
-    # Call local free function
-    async with engine.begin() as conn:
-        result = await conn.execute(
-            sa.select(servers_table).order_by(servers_table.c.hostname)
-        )
-        results = [dict(row._mapping) for row in result]
+    # Call local free function - now uses JSON file
+    servers = get_servers()
     # Convert to expected format with 'address' field
     return [
         {"address": f"{s['public_ipv4']}:7777", "hostname": s["hostname"]}
-        for s in results
+        for s in servers
     ]
 
 
@@ -118,7 +113,12 @@ async def task_history(
     match: Optional[str] = None,
     as_json: bool = False,
 ) -> Table:
-    """Call the /history endpoint and return a Table component.
+    """DEPRECATED: Task history is now available via Loki log queries.
+
+    This function previously queried the database for task run history.
+    Use Grafana/Loki to query task logs instead:
+    - Query: {service_name=~".*task_name.*"}
+    - Filter by time range to see historical runs
 
     Args:
         host (str): Host address of the admin API server. If None, calls local function.
@@ -126,63 +126,29 @@ async def task_history(
         match (str): Optional pattern to filter task names
 
     Returns:
-        Table: Table showing task run history
+        Table: Table with deprecation message
     """
-    if host is None:
-        db = await get_tasks_db()
-        table = db.task_runs_table
+    grafana_url = config.grafana.rstrip("/")
+    if not grafana_url.startswith("http"):
+        grafana_url = f"http://{grafana_url}"
 
-        task_names_query = sa.select(table.c.task_name).distinct()
-
-        if match:
-            task_names_query = task_names_query.where(
-                table.c.task_name.like(f"%{match}%")
-            )
-
-        query = (
-            sa.select(table)
-            .where(table.c.task_name.in_(task_names_query))
-            .order_by(table.c.started.desc(), table.c.task_name)
-        )
-
-        if limit:
-            query = query.limit(limit)
-
-        # Execute query synchronously
-        with engine.connect() as conn:
-            result = conn.execute(query)
-            rows = result.fetchall()
-        columns = [c.name.replace("_", " ").title() for c in table.columns]
-
-        rows = [dict(zip(columns, row)) for row in rows]
-        if rows and all(row.get("Retries", 0) == 0 for row in rows):
-            columns.remove("Retries")
-            for row in rows:
-                row.pop("Retries", None)
-        logger.debug(f"history returned {len(rows)} rows")
-        data = with_hostname({"history": rows})
-    else:
-        # Call via API
-        params = {"limit": limit}
-        if match:
-            params["match"] = match
-        data = call_api(host, "/history", method="GET", params=params, timeout=10)
+    message = (
+        f"Task history is now available via Loki log queries. "
+        f"Visit {grafana_url}/explore to query task logs using LogQL. "
+        f"Example query: {{service_name=~\".*{match or 'your_task'}.*\"}}"
+    )
 
     if as_json:
-        return data
+        return with_hostname({
+            "history": [],
+            "message": message,
+            "grafana_url": f"{grafana_url}/explore",
+        })
 
-    if "error" in data:
-        return Table([{"Error": data["error"]}], title="Task History - Error")
-
-    history = data.get("history", [])
-    title = f"Task History (Last {limit})"
-    if match:
-        title += f" - Matching '{match}'"
-
-    if not history:
-        return Table([], title=f"{title} (None)")
-
-    return Table(history, title=title)
+    return Table(
+        [{"Info": message}],
+        title="Task History - Use Loki"
+    )
 
 
 async def list_services(
@@ -966,7 +932,7 @@ def get_public_ipv4() -> Optional[str]:
 async def upsert_server(
     hostname: Optional[str] = None, public_ipv4: Optional[str] = None
 ) -> None:
-    """Upsert server information to the database.
+    """Upsert server information to JSON file.
 
     Args:
         hostname: Server hostname, defaults to current machine hostname
@@ -977,14 +943,8 @@ async def upsert_server(
     if public_ipv4 is None:
         public_ipv4 = get_public_ipv4()
 
-    db = await get_tasks_db()
-    await db.upsert(
-        servers_table,
-        hostname=hostname,
-        public_ipv4=public_ipv4,
-        last_updated=datetime.now(timezone.utc),
-    )
-    logger.info(f"Updated server info: hostname={hostname}, public_ipv4={public_ipv4}")
+    # Use the JSON-based server registry
+    db_upsert_server(hostname=hostname, public_ipv4=public_ipv4)
 
 
 async def execute_command_on_servers(

@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .btn {
+    @apply px-4 py-2 rounded-md font-medium transition-colors;
+  }
+  .btn-primary {
+    @apply bg-electric-blue text-white hover:bg-blue-700;
+  }
+  .btn-success {
+    @apply bg-neon-green text-gray-900 hover:bg-green-600;
+  }
+  .btn-danger {
+    @apply bg-neon-red text-white hover:bg-red-700;
+  }
+  .btn-secondary {
+    @apply bg-gray-500 text-white hover:bg-gray-600;
+  }
+}

@@ -20,9 +20,13 @@ class SecurityConfig(BaseModel):
     hmac_timestamp_header: str = "X-Timestamp"
     hmac_window_seconds: int = 300  # 5 minutes
 
-    # CORS (disabled — no browser UI)
+    # JWT authentication (for web UI)
+    enable_jwt: bool = False
+    jwt_secret: str = ""
+
+    # CORS (enabled when UI is enabled)
     enable_cors: bool = False
-    allowed_origins: List[str] = ["*"]
+    allowed_origins: List[str] = ["http://localhost:3000", "http://localhost:7777"]
     allowed_methods: List[str] = ["GET", "POST", "PUT", "DELETE"]
     allowed_headers: List[str] = ["*"]
 

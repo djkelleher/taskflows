@@ -248,6 +248,19 @@ class Service:
         self._pkl_funcs = []
         self.env = self.env or {}
         self.env["PYTHONUNBUFFERED"] = "1"
+
+        # Handle named environments (string references)
+        if isinstance(self.environment, str):
+            from taskflows.admin.environments import get_environment_object
+
+            env_name = self.environment
+            env_obj = get_environment_object(env_name)
+            if not env_obj:
+                raise ValueError(f"Named environment '{env_name}' not found")
+
+            logger.info(f"Loaded named environment '{env_name}' for service {self.name}")
+            self.environment = env_obj  # Already a Venv or DockerContainer
+
         # Handle Docker container environments
         if isinstance(self.environment, DockerContainer):
             """Setup Docker-specific service configuration."""

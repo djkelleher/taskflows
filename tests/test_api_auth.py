@@ -113,54 +113,40 @@ class TestAPIAuthentication(unittest.TestCase):
         with patch("taskflows.admin.api.list_servers", return_value=[]):
             with patch("taskflows.admin.api.register_server"):
                 with patch("taskflows.admin.api.remove_server"):
-                    with patch("taskflows.admin.api.get_tasks_db") as mock_db:
-                        # Mock database
-                        mock_table = MagicMock()
-                        mock_table.columns = [
-                            MagicMock(name="task_name"),
-                            MagicMock(name="started"),
-                        ]
-                        mock_db.return_value.task_runs_table = mock_table
-
-                        with patch("taskflows.admin.api.engine.begin") as mock_engine:
-                            mock_conn = MagicMock()
-                            mock_conn.execute.return_value.fetchall.return_value = []
-                            mock_engine.return_value.__enter__.return_value = mock_conn
-
+                    with patch(
+                        "taskflows.admin.api.get_unit_files", return_value=[]
+                    ):
+                        with patch(
+                            "taskflows.admin.api.get_unit_file_states",
+                            return_value={},
+                        ):
                             with patch(
-                                "taskflows.admin.api.get_unit_files", return_value=[]
+                                "taskflows.admin.api.find_instances",
+                                return_value=[],
                             ):
                                 with patch(
-                                    "taskflows.admin.api.get_unit_file_states",
-                                    return_value={},
+                                    "taskflows.admin.api.reload_unit_files"
                                 ):
                                     with patch(
-                                        "taskflows.admin.api.find_instances",
-                                        return_value=[],
+                                        "taskflows.admin.api._start_service"
                                     ):
                                         with patch(
-                                            "taskflows.admin.api.reload_unit_files"
+                                            "taskflows.admin.api._stop_service"
                                         ):
                                             with patch(
-                                                "taskflows.admin.api._start_service"
+                                                "taskflows.admin.api._restart_service"
                                             ):
                                                 with patch(
-                                                    "taskflows.admin.api._stop_service"
+                                                    "taskflows.admin.api._enable_service"
                                                 ):
                                                     with patch(
-                                                        "taskflows.admin.api._restart_service"
+                                                        "taskflows.admin.api._disable_service"
                                                     ):
                                                         with patch(
-                                                            "taskflows.admin.api._enable_service"
+                                                            "taskflows.admin.api._remove_service",
+                                                            return_value=0,
                                                         ):
-                                                            with patch(
-                                                                "taskflows.admin.api._disable_service"
-                                                            ):
-                                                                with patch(
-                                                                    "taskflows.admin.api._remove_service",
-                                                                    return_value=0,
-                                                                ):
-                                                                    self._test_all_endpoints_with_auth()
+                                                            self._test_all_endpoints_with_auth()
 
     def _test_all_endpoints_with_auth(self):
         """Helper to test all endpoints with valid auth."""

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Taskflows Login</title>
+    <link href="/static/main.css" rel="stylesheet">
+    <link href="/static/main.css" rel="stylesheet">
+    <script src="/static/main.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/preline@2.0.3/dist/preline.min.js"></script>
+  </head>
+  <body>
+    <div class="min-h-screen flex items-center justify-center bg-gray-100">
+      <div class="max-w-md w-full bg-white rounded-lg shadow-md p-8">
+        <h2 class="text-3xl font-bold text-center mb-2 text-electric-blue">Taskflows</h2>
+        <p class="text-center text-gray-600 mb-6">Service Management Dashboard</p>
+        <div class="hidden mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded-lg text-sm" id="error-msg"></div>
+        <form class="space-y-4" id="login-form">
+          <div>
+            <label class="block text-sm font-medium mb-2 text-gray-700" for="username">Username</label>
+            <input autofocus="autofocus" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-electric-blue" id="username" name="username" required="required" type="text">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2 text-gray-700" for="password">Password</label>
+            <input class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-electric-blue" id="password" name="password" required="required" type="password">
+          </div>
+          <button class="w-full btn btn-primary" id="login-btn" type="submit">Login</button>
+        </form>
+      </div>
+    </div>
+<script>
+// Check if already logged in
+const token = localStorage.getItem('access_token');
+if (token) {
+    // Verify token is valid by trying to access a protected endpoint
+    fetch('/api/services?as_json=true', {
+        headers: {'Authorization': 'Bearer ' + token}
+    }).then(res => {
+        if (res.ok) {
+            window.location.href = '/';
+        }
+    });
+}
+
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const loginBtn = document.getElementById('login-btn');
+    const errorMsg = document.getElementById('error-msg');
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+
+    // Disable button and show loading state
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Logging in...';
+    errorMsg.classList.add('hidden');
+
+    try {
+        const res = await fetch('/auth/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username, password})
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            localStorage.setItem('access_token', data.access_token);
+            localStorage.setItem('refresh_token', data.refresh_token);
+            window.location.href = '/';
+        } else {
+            const data = await res.json().catch(() => ({detail: 'Invalid credentials'}));
+            errorMsg.textContent = data.detail || 'Invalid credentials';
+            errorMsg.classList.remove('hidden');
+            loginBtn.disabled = false;
+            loginBtn.textContent = 'Login';
+        }
+    } catch (err) {
+        console.error('Login error:', err);
+        errorMsg.textContent = 'Login failed. Please try again.';
+        errorMsg.classList.remove('hidden');
+        loginBtn.disabled = false;
+        loginBtn.textContent = 'Login';
+    }
+});
+</script>
+
+  </body>
+</html>

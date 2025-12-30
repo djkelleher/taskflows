@@ -125,6 +125,38 @@ def security_status():
     click.echo(f"  Config file: {config_file}")
 
 
+@api.command("setup-ui")
+@click.option("--username", default="admin", help="Admin username")
+@click.option("--password", prompt=True, hide_input=True, confirmation_prompt=True, help="Admin password")
+def setup_ui(username: str, password: str):
+    """Setup web UI with admin credentials."""
+    from taskflows.admin.auth import (
+        create_admin_user,
+        generate_jwt_secret,
+        load_ui_config,
+        save_ui_config,
+    )
+
+    # Create JWT secret
+    ui_config = load_ui_config()
+    if not ui_config.jwt_secret:
+        ui_config.jwt_secret = generate_jwt_secret()
+        click.echo(f"🔐 Generated JWT secret")
+
+    ui_config.enabled = True
+
+    # Save UI config
+    save_ui_config(ui_config)
+
+    # Create admin user
+    create_admin_user(username, password)
+
+    click.echo(f"✅ Web UI configured successfully!")
+    click.echo(f"   Username: {username}")
+    click.echo(f"⚠️  Restart the API server with --enable-ui flag:")
+    click.echo(f"   tf api start --enable-ui")
+
+
 @cli.command
 @click.option(
     "-l",
