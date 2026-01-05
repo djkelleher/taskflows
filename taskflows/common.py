@@ -12,8 +12,9 @@ from textdistance import lcsseq
 # Set default logging configuration if not already set
 # This ensures logs go to both terminal and file by default
 # CLI will override these to disable terminal output
+_default_data_dir = Path.home() / ".taskflows" / "data"
 if 'TASKFLOWS_FILE_DIR' not in os.environ:
-    os.environ['TASKFLOWS_FILE_DIR'] = '/opt/taskflows/data/logs'
+    os.environ['TASKFLOWS_FILE_DIR'] = str(_default_data_dir / "logs")
 if 'TASKFLOWS_NO_TERMINAL' not in os.environ:
     os.environ['TASKFLOWS_NO_TERMINAL'] = '0'  # Enable terminal by default
 
@@ -24,7 +25,7 @@ logger = get_logger("taskflows")
 _SYSTEMD_FILE_PREFIX = "taskflows-"
 
 # Allow configuring data directory via environment variable for testing
-services_data_dir = Path(os.environ.get("TASKFLOWS_DATA_DIR", "/opt/taskflows/data"))
+services_data_dir = Path(os.environ.get("TASKFLOWS_DATA_DIR", str(_default_data_dir)))
 services_data_dir.mkdir(parents=True, exist_ok=True)
 
 systemd_dir = Path.home().joinpath(".config", "systemd", "user")
