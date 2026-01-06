@@ -1,6 +1,6 @@
 [project]
 name = "taskflows"
-version = "0.1.1"
+version = "0.1.2"
 description = ""
 authors = [
     {name = "Dan Kelleher",email = "kelleherjdan@gmail.com"}
@@ -11,7 +11,7 @@ dependencies = [
     "docker (>=7.1.0,<8.0.0)",
     "pydantic (>=2.11.7,<3.0.0)",
     "sqlalchemy (>=2.0.43,<3.0.0)",
-    "alert-msgs @ file:///home/dan/dev-repos/alert-msgs",
+    "alert-msgs (>=0.8.1,<0.9.0)",
     "cloudpickle (>=3.1.1,<4.0.0)",
     "dbus-python (>=1.4.0,<2.0.0)",
     "click (>=8.2.1,<9.0.0)",
@@ -26,9 +26,8 @@ dependencies = [
     "passlib[bcrypt] (>=1.7.4,<2.0.0)",
     "pyjwt (>=2.8.0,<3.0.0)",
     "prometheus-client (>=0.19.0,<1.0.0)",
-    "quicklogs @ file:///home/dan/dev-repos/quicklogs",
-    "dynamic-imports @ file:///home/dan/dev-repos/dynamic-imports",
-    # "danklab-ui @ file:///home/dan/dev-repos/trading/danklab-ui",  # Optional UI - path doesn't exist
+    "quicklogs (>=0.1.1,<0.2.0)",
+    "dynamic-imports (>=1.1.1,<1.2.0)",
 ]
 
 [tool.poetry]
