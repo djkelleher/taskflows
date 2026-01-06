@@ -1,6 +1,6 @@
 [project]
 name = "taskflows"
-version = "0.1.2"
+version = "0.15.0"
 description = ""
 authors = [
     {name = "Dan Kelleher",email = "kelleherjdan@gmail.com"}
