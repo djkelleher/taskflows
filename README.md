@@ -82,7 +82,7 @@ loginctl enable-linger
 
 ```python
 from taskflows import task, Alerts
-from alert_msgs import Slack
+from alerts import Slack
 
 @task(
     name="my-task",
@@ -124,7 +124,7 @@ The `@task` decorator wraps any function with managed execution:
 
 ```python
 from taskflows import task, Alerts, get_current_task_id
-from alert_msgs import Slack, Email
+from alerts import Slack, Email
 
 @task(
     name="data-pipeline",        # Task identifier (default: function name)
@@ -186,7 +186,7 @@ Configure when and where to send alerts:
 
 ```python
 from taskflows import Alerts
-from alert_msgs import Slack, Email
+from alerts import Slack, Email
 
 alerts = Alerts(
     send_to=[

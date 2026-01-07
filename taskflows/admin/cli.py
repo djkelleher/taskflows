@@ -10,9 +10,9 @@ from itertools import cycle
 from typing import Optional
 
 import click
+from alerts.components import Table
 from click import Group
 from rich.console import Console
-from alert_msgs.components import Table
 
 from taskflows.admin.core import execute_command_on_servers
 from taskflows.entrypoints import async_entrypoint

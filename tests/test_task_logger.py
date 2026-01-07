@@ -1,11 +1,12 @@
 import random
-from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, patch, MagicMock
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from taskflows.tasks import TaskLogger, build_loki_query_url, Alerts
-from alert_msgs import MsgDst
+from alerts import MsgDst
+
+from taskflows.tasks import Alerts, TaskLogger, build_loki_query_url
 
 
 def test_build_loki_query_url_basic():

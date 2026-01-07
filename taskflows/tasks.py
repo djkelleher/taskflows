@@ -7,8 +7,8 @@ from typing import Any, Callable, List, Literal, Optional, Sequence
 from urllib.parse import quote
 
 import anyio
+from alerts import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
 from anyio.from_thread import BlockingPortal
-from alert_msgs import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
 from pydantic import BaseModel
 from quicklogs import (
     clear_request_context,
@@ -17,7 +17,8 @@ from quicklogs import (
     set_request_context,
 )
 
-from .common import config, logger as default_logger
+from .common import config
+from .common import logger as default_logger
 
 TaskEvent = Literal["start", "error", "finish"]
 
