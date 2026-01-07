@@ -189,7 +189,7 @@ class S3:
         local_path.parent.mkdir(exist_ok=True, parents=True)
         if local_path.exists() and not overwrite:
             logger.info(f"File {local_path} already exists. Skipping download.")
-            return True
+            return False
         bucket, partition = self.bucket_and_partition(s3_path)
         for attempt in range(max_retries + 1):
             try:

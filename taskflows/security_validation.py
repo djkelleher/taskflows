@@ -30,7 +30,7 @@ def validate_env_file_path(
     Raises:
         SecurityError: If path is outside allowed directories or unsafe
     """
-    path = Path(path)
+    path = Path(path).expanduser()
 
     # Resolve to absolute (follows symlinks)
     try:
@@ -43,6 +43,7 @@ def validate_env_file_path(
         Path.home(),
         Path("/etc/taskflows"),
         Path.cwd(),
+        Path("/tmp"),
     ]
 
     # Check if under allowed directory

@@ -23,7 +23,7 @@ from taskflows.admin.core import (
     restart,
     show,
     start,
-    status,
+    status as service_status,
     stop,
     task_history,
     upsert_server,
@@ -282,7 +282,7 @@ async def status_endpoint(
     running: bool = Query(False),
     all: bool = Query(False),
 ):
-    return await status(match=match, running=running, all=all, as_json=True)
+    return await service_status(match=match, running=running, all=all, as_json=True)
 
 
 @app.get("/logs/{service_name}")

@@ -4,10 +4,10 @@ import pytest
 def test_imports():
     """Test that all modules can be imported."""
     from taskflows.files import S3, Files, S3Cfg
-    from files.core import Files
-    from files.extensions import file_extensions_re
-    from files.s3 import S3, S3Cfg
-    from files.utils import (
+    from taskflows.files.core import Files
+    from taskflows.files.extensions import file_extensions_re
+    from taskflows.files.s3 import S3, S3Cfg
+    from taskflows.files.utils import (
         csv_to_parquet,
         csvs_to_parquet,
         gzip_file,
@@ -47,6 +47,6 @@ def test_package_structure():
 )
 def test_is_s3_path(path, expected):
     """Test is_s3_path function with various paths."""
-    from files.s3 import is_s3_path
+    from taskflows.files.s3 import is_s3_path
 
     assert is_s3_path(path) == expected
