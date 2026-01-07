@@ -7,15 +7,15 @@ from typing import Any, Callable, List, Literal, Optional, Sequence
 from urllib.parse import quote
 
 import anyio
-from alerts import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
+from .alerts import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
 from anyio.from_thread import BlockingPortal
-from pydantic import BaseModel
-from quicklogs import (
+from .loggers import (
     clear_request_context,
     generate_request_id,
     get_struct_logger,
     set_request_context,
 )
+from pydantic import BaseModel
 
 from .common import config
 from .common import logger as default_logger

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, List, Sequence
 
 import duckdb
-from quicklogs import get_logger
+from taskflows.loggers import get_logger
 
 logger = get_logger("files")
 

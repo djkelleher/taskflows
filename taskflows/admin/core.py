@@ -9,11 +9,11 @@ from typing import Dict, Literal, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 import requests
-from alerts.components import Component, Map, Table, Text
-from alerts.utils import as_code_block
+from taskflows.alerts.components import Component, Map, Table, Text
+from taskflows.alerts.utils import as_code_block
 
 # from trading.databases.timescale import pgconn
-from dynamic_imports import find_instances
+from taskflows.dynamic_imports import find_instances
 from fastapi import status
 
 from taskflows.admin.security import security_config

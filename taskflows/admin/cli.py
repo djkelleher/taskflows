@@ -10,7 +10,7 @@ from itertools import cycle
 from typing import Optional
 
 import click
-from alerts.components import Table
+from taskflows.alerts.components import Table
 from click import Group
 from rich.console import Console
 

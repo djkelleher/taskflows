@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Sequence
 
 import click
 from click import Group
-from dynamic_imports import import_module_attr
+from .dynamic_imports import import_module_attr
 
 from .common import logger
 

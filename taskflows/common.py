@@ -5,8 +5,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import List, Optional
 
+from .loggers import get_logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from quicklogs import get_logger
 from textdistance import lcsseq
 
 # Set default logging configuration if not already set
