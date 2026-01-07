@@ -3,8 +3,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from files import Files
-from files.s3 import S3
+from taskflows.files import Files
+from taskflows.files.s3 import S3
 
 
 @pytest.fixture

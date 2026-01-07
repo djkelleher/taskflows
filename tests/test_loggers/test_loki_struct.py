@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from quicklogs.structured import configure_loki_logging, get_struct_logger
+from taskflows.loggers.structured import configure_loki_logging, get_struct_logger
 
 
 def test_loki_configuration():

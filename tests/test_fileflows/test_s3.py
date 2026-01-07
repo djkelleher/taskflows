@@ -6,7 +6,7 @@ import boto3
 import pandas as pd
 import pytest
 from botocore.exceptions import ClientError
-from files.s3 import S3, S3Cfg, create_duckdb_secret, is_s3_path
+from taskflows.files.s3 import S3, S3Cfg, create_duckdb_secret, is_s3_path
 from moto import mock_aws
 
 

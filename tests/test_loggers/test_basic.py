@@ -5,9 +5,8 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+from taskflows.loggers.basic import any_case_env_var, get_logger
 from loguru import logger
-
-from quicklogs.basic import any_case_env_var, get_logger
 
 
 class TestEnvVarHandling:
@@ -43,7 +42,7 @@ class TestEnvVarHandling:
 @pytest.mark.parametrize("use_env_vars", [False, True])
 def test_logger(use_env_vars):
     # Clear configured loggers before test
-    from quicklogs import basic
+    from taskflows.loggers import basic
 
     original_configured = basic._configured_loggers.copy()
     basic._configured_loggers.clear()
@@ -114,7 +113,7 @@ def test_logger(use_env_vars):
 
 def test_no_terminal_logging():
     """Test logging with no_terminal option"""
-    from quicklogs import basic
+    from taskflows.loggers import basic
 
     original_configured = basic._configured_loggers.copy()
     basic._configured_loggers.clear()
@@ -146,7 +145,7 @@ def test_no_terminal_logging():
 
 def test_show_source_variations():
     """Test different show_source parameter values"""
-    from quicklogs import basic
+    from taskflows.loggers import basic
 
     original_configured = basic._configured_loggers.copy()
     basic._configured_loggers.clear()
@@ -180,7 +179,7 @@ def test_show_source_variations():
 
 def test_multiple_logger_instances():
     """Test that multiple calls with same name return same logger"""
-    from quicklogs import basic
+    from taskflows.loggers import basic
 
     original_configured = basic._configured_loggers.copy()
     basic._configured_loggers.clear()
@@ -197,9 +196,9 @@ def test_multiple_logger_instances():
         basic._configured_loggers = original_configured
 
 
-def test_quicklogs_env_vars():
-    """Test QUICKLOGS_ prefixed environment variables"""
-    from quicklogs import basic
+def test_loggers_env_vars():
+    """Test loggers_ prefixed environment variables"""
+    from taskflows.loggers import basic
 
     original_configured = basic._configured_loggers.copy()
     basic._configured_loggers.clear()
@@ -207,17 +206,17 @@ def test_quicklogs_env_vars():
     try:
         with TemporaryDirectory() as temp_dir:
             file_dir = Path(temp_dir)
-            name = f"test_quicklogs_{uuid4()}"
+            name = f"test_loggers_{uuid4()}"
 
             with patch.dict(
                 os.environ,
                 {
-                    "QUICKLOGS_LOG_LEVEL": "WARNING",
-                    "QUICKLOGS_FILE_DIR": str(file_dir),
-                    "QUICKLOGS_SHOW_SOURCE": "filename",
-                    "QUICKLOGS_NO_TERMINAL": "true",
-                    "QUICKLOGS_FILE_MAX_BYTES": "5000",
-                    "QUICKLOGS_MAX_ROTATIONS": "3",
+                    "loggers_LOG_LEVEL": "WARNING",
+                    "loggers_FILE_DIR": str(file_dir),
+                    "loggers_SHOW_SOURCE": "filename",
+                    "loggers_NO_TERMINAL": "true",
+                    "loggers_FILE_MAX_BYTES": "5000",
+                    "loggers_MAX_ROTATIONS": "3",
                 },
             ):
                 test_logger = get_logger(name=name, file_max_bytes=None, max_rotations=None)
@@ -232,7 +231,7 @@ def test_quicklogs_env_vars():
 
 def test_logger_without_name():
     """Test logger creation without a name"""
-    from quicklogs import basic
+    from taskflows.loggers import basic
 
     original_configured = basic._configured_loggers.copy()
     basic._configured_loggers.clear()
@@ -254,7 +253,7 @@ def test_logger_without_name():
 
 def test_numeric_log_levels():
     """Test using numeric log levels"""
-    from quicklogs import basic
+    from taskflows.loggers import basic
 
     original_configured = basic._configured_loggers.copy()
     basic._configured_loggers.clear()

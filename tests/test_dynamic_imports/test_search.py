@@ -1,14 +1,14 @@
 import pytest
 
-from dynamic_imports import search
-from tests import pkg1
-from tests.pkg1.mod1 import Base, find_instances1
-from tests.pkg1.pkg2 import mod2
+from taskflows import dynamic_imports as search
+from tests.test_dynamic_imports import pkg1
+from tests.test_dynamic_imports.pkg1.mod1 import Base, find_instances1
+from tests.test_dynamic_imports.pkg1.pkg2 import mod2
 
 
 @pytest.mark.parametrize(
     "search_subpackages,result",
-    [(True, ["tests.pkg1.mod1", "tests.pkg1.pkg2.mod2"]), (False, ["tests.pkg1.mod1"])],
+    [(True, ["tests.test_dynamic_imports.pkg1.mod1", "tests.test_dynamic_imports.pkg1.pkg2.mod2"]), (False, ["tests.test_dynamic_imports.pkg1.mod1"])],
 )
 def test_module_search(search_subpackages, result):
     module_names = [
@@ -19,7 +19,7 @@ def test_module_search(search_subpackages, result):
 
 
 @pytest.mark.parametrize("base_class", [Base, "Base"])
-@pytest.mark.parametrize("module", [mod2, "tests.pkg1.pkg2.mod2"])
+@pytest.mark.parametrize("module", [mod2, "tests.test_dynamic_imports.pkg1.pkg2.mod2"])
 def test_module_class_impl(base_class, module):
     class_impl = search.find_subclasses(
         base_class=base_class, search_in=module, names_only=True
@@ -28,7 +28,7 @@ def test_module_class_impl(base_class, module):
 
 
 @pytest.mark.parametrize("base_class", [Base, "Base"])
-@pytest.mark.parametrize("package", [pkg1, "tests.pkg1"])
+@pytest.mark.parametrize("package", [pkg1, "tests.test_dynamic_imports.pkg1"])
 @pytest.mark.parametrize(
     "search_subpackages,result",
     [(True, ["ClassImpl1", "ClassImpl2"]), (False, ["ClassImpl1"])],
@@ -43,13 +43,13 @@ def test_pkg_class_impl(base_class, package, search_subpackages, result):
     assert class_impl == result
 
 
-@pytest.mark.parametrize("module", [mod2, "tests.pkg1.pkg2.mod2"])
+@pytest.mark.parametrize("module", [mod2, "tests.test_dynamic_imports.pkg1.pkg2.mod2"])
 def test_module_find_instances(module):
     find_instances = search.find_instances(mod2.ClassImpl2, module)
     assert find_instances == [mod2.find_instances2]
 
 
-@pytest.mark.parametrize("package", [pkg1, "tests.pkg1"])
+@pytest.mark.parametrize("package", [pkg1, "tests.test_dynamic_imports.pkg1"])
 @pytest.mark.parametrize("search_subpackages", [True, False])
 def test_pkg_find_instances(package, search_subpackages):
     find_instances = search.find_instances(

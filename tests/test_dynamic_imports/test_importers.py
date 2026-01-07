@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dynamic_imports import dynamic_imports
+from taskflows import dynamic_imports
 
 module_path = Path(__file__).parent.joinpath("pkg1", "mod1.py")
 

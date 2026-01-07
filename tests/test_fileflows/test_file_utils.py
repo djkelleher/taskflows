@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
-from files.extensions import file_extensions_re
-from files.utils import (
+from taskflows.files.extensions import file_extensions_re
+from taskflows.files.utils import (
     csv_to_parquet,
     csvs_to_parquet,
     gzip_file,
@@ -64,7 +64,7 @@ def test_gzip_files(temp_dir):
         files.append(file_path)
 
     # Mock the Pool to avoid actual multiprocessing
-    with patch("files.utils.Pool") as mock_pool:
+    with patch("taskflows.files.utils.Pool") as mock_pool:
         mock_pool_instance = MagicMock()
         mock_pool.return_value.__enter__.return_value = mock_pool_instance
 
@@ -112,7 +112,7 @@ def test_with_parquet_extension():
 
 def test_csv_to_parquet(temp_dir, sample_csv_file):
     """Test csv_to_parquet function."""
-    with patch("files.utils.duckdb") as mock_duckdb:
+    with patch("taskflows.files.utils.duckdb") as mock_duckdb:
         # Test with default save_path_generator
         csv_to_parquet(sample_csv_file)
 
@@ -145,8 +145,8 @@ def test_csvs_to_parquet(temp_dir):
             f.write(f"a,b,c\n{i},{i+1},{i+2}\n")
         csv_files.append(file_path)
 
-    with patch("files.utils.csv_to_parquet") as mock_csv_to_parquet, patch(
-        "files.utils.os.remove"
+    with patch("taskflows.files.utils.csv_to_parquet") as mock_csv_to_parquet, patch(
+        "taskflows.files.utils.os.remove"
     ) as mock_remove:
         # Test with single file
         csvs_to_parquet([csv_files[0]])
@@ -157,7 +157,7 @@ def test_csvs_to_parquet(temp_dir):
         mock_remove.reset_mock()
 
         # Test with multiple files
-        with patch("files.utils.ProcessPoolExecutor") as mock_executor:
+        with patch("taskflows.files.utils.ProcessPoolExecutor") as mock_executor:
             mock_executor_instance = MagicMock()
             mock_executor.return_value.__enter__.return_value = mock_executor_instance
             mock_executor_instance.map.return_value = ["result1", "result2", "result3"]
@@ -168,10 +168,10 @@ def test_csvs_to_parquet(temp_dir):
             assert mock_remove.call_count == 3
 
     # Test with directory input
-    with patch("files.utils.csv_to_parquet") as mock_csv_to_parquet, patch(
-        "files.utils.os.remove"
+    with patch("taskflows.files.utils.csv_to_parquet") as mock_csv_to_parquet, patch(
+        "taskflows.files.utils.os.remove"
     ) as mock_remove, patch("pathlib.Path.glob", return_value=csv_files), patch(
-        "files.utils.ProcessPoolExecutor"
+        "taskflows.files.utils.ProcessPoolExecutor"
     ) as mock_executor:
         mock_executor_instance = MagicMock()
         mock_executor.return_value.__enter__.return_value = mock_executor_instance

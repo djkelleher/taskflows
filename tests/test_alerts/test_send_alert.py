@@ -3,7 +3,7 @@ from tempfile import NamedTemporaryFile
 from unittest.mock import patch
 
 import pytest
-from alerts import EmailAddrs, send_email, send_slack_message
+from taskflows.alerts import EmailAddrs, send_email, send_slack_message
 
 
 def slack_channel(request):
@@ -75,7 +75,7 @@ async def test_slack_message_retries(components, request, retry_count):
 
     # Patch the 'try_post_message' function in the 'alerts.slack' module
     # This allows us to simulate different behaviors for the 'try_post_message' without actually sending messages
-    with patch("alerts.slack.try_post_message") as mock_post:
+    with patch("taskflows.alerts.slack.try_post_message") as mock_post:
         # Configure the mock to return False, simulating a failure in sending messages
         mock_post.return_value = False
 

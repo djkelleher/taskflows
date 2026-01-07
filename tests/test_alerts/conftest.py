@@ -3,7 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from alerts import ContentType, FontSize, Map, Table, Text
+from taskflows.alerts import ContentType, FontSize, Map, Table, Text
 
 
 def pytest_addoption(parser):

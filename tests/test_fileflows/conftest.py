@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import boto3
 import pandas as pd
 import pytest
-from files.s3 import S3, S3Cfg
+from taskflows.files.s3 import S3, S3Cfg
 from moto import mock_aws
 
 

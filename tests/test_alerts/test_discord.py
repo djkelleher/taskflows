@@ -5,15 +5,15 @@ Tests for Discord integration in dl-alerts
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from alerts import ContentType, FontSize, Map, PeriodicMsgs, Table, Text
-from alerts.alerts import get_alerts_log, send_alert
-from alerts.discord import (
+from taskflows.alerts import ContentType, FontSize, Map, PeriodicMsgs, Table, Text
+from taskflows.alerts.alerts import get_alerts_log, send_alert
+from taskflows.alerts.discord import (
     DiscordChannel,
     _send_single_discord_message,
     _split_message,
     send_discord_message,
 )
-from alerts.report import render_components_md
+from taskflows.alerts.report import render_components_md
 
 
 class TestDiscordChannel:
@@ -132,7 +132,7 @@ class TestDiscordMessageSending:
         assert len(chunks) > 1
         assert all(len(chunk) <= 50 for chunk in chunks)
 
-    @patch("alerts.discord.aiohttp.ClientSession")
+    @patch("taskflows.alerts.discord.aiohttp.ClientSession")
     @pytest.mark.asyncio
     async def test_send_single_discord_message_success(self, mock_session):
         """Test successful Discord message sending"""
@@ -178,7 +178,7 @@ class TestDiscordMessageSending:
 
         assert result is True
 
-    @patch("alerts.discord.aiohttp.ClientSession")
+    @patch("taskflows.alerts.discord.aiohttp.ClientSession")
     @pytest.mark.asyncio
     async def test_send_single_discord_message_failure(self, mock_session):
         """Test Discord message sending failure"""
@@ -228,7 +228,7 @@ class TestDiscordMessageSending:
         # Should be called twice (initial + 1 retry)
         assert mock_session_instance.post_calls == 2
 
-    @patch("alerts.discord.aiohttp.ClientSession")
+    @patch("taskflows.alerts.discord.aiohttp.ClientSession")
     @pytest.mark.asyncio
     async def test_send_single_discord_message_rate_limit(self, mock_session):
         """Test Discord rate limiting handling"""
@@ -289,7 +289,7 @@ class TestDiscordMessageSending:
     async def test_send_discord_message_short_content(self):
         """Test send_discord_message with short content"""
         with patch(
-            "alerts.discord._send_single_discord_message"
+            "taskflows.alerts.discord._send_single_discord_message"
         ) as mock_send_single:
             mock_send_single.return_value = True
 
@@ -307,7 +307,7 @@ class TestDiscordMessageSending:
     async def test_send_discord_message_long_content(self):
         """Test send_discord_message with long content that needs splitting"""
         with patch(
-            "alerts.discord._send_single_discord_message"
+            "taskflows.alerts.discord._send_single_discord_message"
         ) as mock_send_single:
             mock_send_single.return_value = True
 
@@ -339,7 +339,7 @@ class TestDiscordIntegration:
     @pytest.mark.asyncio
     async def test_send_alert_with_discord(self):
         """Test send_alert function with Discord destination"""
-        with patch("alerts.discord._send_single_discord_message") as mock_send:
+        with patch("taskflows.alerts.discord._send_single_discord_message") as mock_send:
             mock_send.return_value = True
 
             components = [Text("Test alert")]
@@ -356,9 +356,9 @@ class TestDiscordIntegration:
     async def test_send_alert_mixed_destinations(self):
         """Test send_alert with mixed destinations including Discord"""
         with (
-            patch("alerts.discord._send_single_discord_message") as mock_discord,
-            patch("alerts.slack.get_async_client") as mock_get_client,
-            patch("alerts.slack.try_post_message") as mock_post,
+            patch("taskflows.alerts.discord._send_single_discord_message") as mock_discord,
+            patch("taskflows.alerts.slack.get_async_client") as mock_get_client,
+            patch("taskflows.alerts.slack.try_post_message") as mock_post,
         ):
 
             # Mock Slack client and posting
@@ -405,7 +405,7 @@ class TestDiscordIntegration:
         """Test AlertLogger auto-detects Discord webhooks"""
         discord_webhook = "https://discord.com/api/webhooks/123456789/test-webhook"
 
-        with patch("alerts.alerts.PeriodicMsgSender") as mock_sender:
+        with patch("taskflows.alerts.alerts.PeriodicMsgSender") as mock_sender:
             mock_sender_instance = Mock()
             mock_sender.return_value = mock_sender_instance
 
@@ -427,7 +427,7 @@ class TestDiscordIntegration:
         """Test AlertLogger still works with Slack channels"""
         slack_channel = "#test-channel"
 
-        with patch("alerts.alerts.PeriodicMsgSender") as mock_sender:
+        with patch("taskflows.alerts.alerts.PeriodicMsgSender") as mock_sender:
             mock_sender_instance = Mock()
             mock_sender.return_value = mock_sender_instance
 

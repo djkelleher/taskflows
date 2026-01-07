@@ -3,8 +3,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from alerts import ContentType, FontSize, Text
-from alerts.slack import AttachmentFile, SlackChannel, send_slack_message
+from taskflows.alerts import ContentType, FontSize, Text
+from taskflows.alerts.slack import AttachmentFile, SlackChannel, send_slack_message
 
 
 class TestSlackChannel:
@@ -40,7 +40,7 @@ class TestSendSlackMessage:
             Text("Another test message", ContentType.WARNING, FontSize.SMALL),
         ]
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_simple_message(
         self, mock_get_client, mock_client, test_components
@@ -62,7 +62,7 @@ class TestSendSlackMessage:
         assert call_args[1]["text"] == "Test Subject"
         assert "blocks" in call_args[1]
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_message_with_file_paths(
         self, mock_get_client, mock_client, test_components, tmp_path
@@ -91,7 +91,7 @@ class TestSendSlackMessage:
         assert upload_calls[0][1]["filename"] == "test1.txt"
         assert upload_calls[1][1]["filename"] == "test2.txt"
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_message_with_attachment_files(
         self, mock_get_client, mock_client, test_components
@@ -120,7 +120,7 @@ class TestSendSlackMessage:
         assert upload_calls[0][1]["filename"] == "attachment1.txt"
         assert upload_calls[1][1]["filename"] == "attachment2.txt"
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_message_with_mixed_attachments(
         self, mock_get_client, mock_client, test_components, tmp_path
@@ -146,7 +146,7 @@ class TestSendSlackMessage:
         assert result is True
         assert mock_client.files_upload_v2.call_count == 2
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_message_with_zip_attachments(
         self, mock_get_client, mock_client, test_components, tmp_path
@@ -179,7 +179,7 @@ class TestSendSlackMessage:
         upload_call = mock_client.files_upload_v2.call_args
         assert upload_call[1]["filename"] == "files.zip"
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_message_with_single_zip_attachment(
         self, mock_get_client, mock_client, test_components, tmp_path
@@ -206,7 +206,7 @@ class TestSendSlackMessage:
         upload_call = mock_client.files_upload_v2.call_args
         assert upload_call[1]["filename"] == "test.txt.zip"
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_message_with_single_attachment_file_zip(
         self, mock_get_client, mock_client, test_components
@@ -233,7 +233,7 @@ class TestSendSlackMessage:
         upload_call = mock_client.files_upload_v2.call_args
         assert upload_call[1]["filename"] == "attachment.txt.zip"
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_message_multiple_batches(self, mock_get_client, mock_client):
         """Test sending multiple message batches."""
@@ -253,7 +253,7 @@ class TestSendSlackMessage:
         # Should be called twice due to batching
         assert mock_client.chat_postMessage.call_count == 2
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_message_failure(
         self, mock_get_client, mock_client, test_components
@@ -271,7 +271,7 @@ class TestSendSlackMessage:
         # Should be called 3 times (initial + 2 retries)
         assert mock_client.chat_postMessage.call_count == 3
 
-    @patch("alerts.slack.get_async_client")
+    @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
     async def test_send_message_with_string_channel(
         self, mock_get_client, mock_client, test_components

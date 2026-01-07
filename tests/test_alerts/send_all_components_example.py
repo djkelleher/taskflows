@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List
 
-from alerts.components import (
+from taskflows.alerts.components import (
     Alert,
     Badge,
     Breadcrumb,
@@ -30,8 +30,8 @@ from alerts.components import (
     JSONComponent,
     LineBreak,
 )
-from alerts.components import List as ListComponent
-from alerts.components import (
+from taskflows.alerts.components import List as ListComponent
+from taskflows.alerts.components import (
     LogEntry,
     Map,
     MetricCard,
@@ -44,9 +44,9 @@ from alerts.components import (
     Timeline,
     TreeView,
 )
-from alerts.discord import DiscordChannel, send_discord_message
-from alerts.emails import EmailAddrs, send_email
-from alerts.slack import SlackChannel, send_slack_message
+from taskflows.alerts.discord import DiscordChannel, send_discord_message
+from taskflows.alerts.emails import EmailAddrs, send_email
+from taskflows.alerts.slack import SlackChannel, send_slack_message
 
 
 def create_all_components() -> List[Component]:

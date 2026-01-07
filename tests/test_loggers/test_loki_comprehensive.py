@@ -6,7 +6,7 @@ from io import StringIO
 from unittest.mock import patch
 
 import pytest
-from quicklogs.structured import (
+from taskflows.loggers.structured import (
     add_event_fingerprint,
     add_loki_labels,
     add_nano_timestamp,

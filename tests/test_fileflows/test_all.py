@@ -3,7 +3,7 @@ import pytest
 
 def test_imports():
     """Test that all modules can be imported."""
-    from files import S3, Files, S3Cfg
+    from taskflows.files import S3, Files, S3Cfg
     from files.core import Files
     from files.extensions import file_extensions_re
     from files.s3 import S3, S3Cfg
@@ -18,7 +18,7 @@ def test_imports():
 
 def test_package_structure():
     """Test that the package structure is as expected."""
-    import files
+    import taskflows.files as files
 
     # Check top-level exports
     assert hasattr(files, "Files")

@@ -1,7 +1,7 @@
 from io import StringIO
 
-from alerts import Table
-from alerts.utils import (
+from taskflows.alerts import Table
+from taskflows.alerts.utils import (
     Emoji,
     EmojiCycle,
     as_code_block,

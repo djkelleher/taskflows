@@ -2,15 +2,15 @@ from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import pytest
-from alerts.components import (
+from taskflows.alerts.components import (
     ContentType,
     FontSize,
     LineBreak,
     Map,
     Table,
     Text,
-    render_components_image,
 )
+from taskflows.alerts.report import render_components_image
 
 
 class TestRenderComponentsImage:
@@ -32,7 +32,7 @@ class TestRenderComponentsImage:
             ),
         ]
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_basic(self, mock_imgkit, sample_components):
         """Test basic image rendering functionality."""
 
@@ -55,7 +55,7 @@ class TestRenderComponentsImage:
         assert isinstance(call_args[0][1], BytesIO)  # Output BytesIO
         assert call_args[1]["options"] is not None  # Options dict
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_options(self, mock_imgkit, sample_components):
         """Test that correct options are passed to imgkit."""
         mock_imgkit.return_value = None
@@ -72,7 +72,7 @@ class TestRenderComponentsImage:
         assert options["quality"] == "100"
         assert options["quiet"] == ""
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_empty_components(self, mock_imgkit):
         """Test rendering with empty components list."""
         mock_imgkit.return_value = None
@@ -82,7 +82,7 @@ class TestRenderComponentsImage:
         assert isinstance(result, BytesIO)
         mock_imgkit.assert_called_once()
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_single_component(self, mock_imgkit):
         """Test rendering with a single component."""
         mock_imgkit.return_value = None
@@ -93,7 +93,7 @@ class TestRenderComponentsImage:
         assert isinstance(result, BytesIO)
         mock_imgkit.assert_called_once()
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_with_table(self, mock_imgkit):
         """Test rendering with table component."""
         mock_imgkit.return_value = None
@@ -113,7 +113,7 @@ class TestRenderComponentsImage:
         assert isinstance(result, BytesIO)
         mock_imgkit.assert_called_once()
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_with_map(self, mock_imgkit):
         """Test rendering with map component."""
         mock_imgkit.return_value = None
@@ -129,7 +129,7 @@ class TestRenderComponentsImage:
         assert isinstance(result, BytesIO)
         mock_imgkit.assert_called_once()
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_with_line_breaks(self, mock_imgkit):
         """Test rendering with line breaks."""
         mock_imgkit.return_value = None
@@ -147,7 +147,7 @@ class TestRenderComponentsImage:
         assert isinstance(result, BytesIO)
         mock_imgkit.assert_called_once()
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_mixed_content_types(self, mock_imgkit):
         """Test rendering with mixed content types and font sizes."""
         mock_imgkit.return_value = None
@@ -164,7 +164,7 @@ class TestRenderComponentsImage:
         assert isinstance(result, BytesIO)
         mock_imgkit.assert_called_once()
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_html_content(self, mock_imgkit, sample_components):
         """Test that HTML content is properly passed to imgkit."""
         mock_imgkit.return_value = None
@@ -181,7 +181,7 @@ class TestRenderComponentsImage:
         assert "Alice" in html_content
         assert "key1" in html_content
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_output_seek(self, mock_imgkit, sample_components):
         """Test that output BytesIO is properly seeked to beginning."""
 
@@ -197,7 +197,7 @@ class TestRenderComponentsImage:
         # Should be seeked back to beginning
         assert result.tell() == 0
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_exception_handling(
         self, mock_imgkit, sample_components
     ):
@@ -207,7 +207,7 @@ class TestRenderComponentsImage:
         with pytest.raises(Exception):
             render_components_image(sample_components)
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_render_components_image_return_type(self, mock_imgkit, sample_components):
         """Test that the function returns the correct type."""
         mock_imgkit.return_value = None
@@ -273,7 +273,7 @@ class TestImageRenderingIntegration:
             Text("All systems operational", ContentType.INFO, FontSize.MEDIUM),
         ]
 
-    @patch("alerts.components.imgkit.from_string")
+    @patch("taskflows.alerts.components.imgkit.from_string")
     def test_complex_components_render(self, mock_imgkit, complex_components):
         """Test rendering complex components combination."""
         mock_imgkit.return_value = None

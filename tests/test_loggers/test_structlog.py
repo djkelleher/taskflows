@@ -6,7 +6,7 @@ Test script to demonstrate the improved structlog configuration for Loki.
 import random
 import time
 
-from quicklogs import (
+from taskflows.loggers import (
     clear_request_context,
     configure_loki_logging,
     generate_request_id,

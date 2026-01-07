@@ -3,18 +3,18 @@ from typing import Dict
 from uuid import uuid4
 
 import pytest
-from alerts.components import (
+from taskflows.alerts.components import (
     ContentType,
     FontSize,
     LineBreak,
     Map,
     Table,
     Text,
-    _components_list,
     font_size_css,
     level_css_color,
 )
-from alerts.report import (
+from taskflows.alerts.report import (
+    _components_list,
     render_components_html,
     render_components_image,
     render_components_md,

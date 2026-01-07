@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from alerts import ContentType, EmailAddrs, PeriodicMsgs, PeriodicMsgSender, Text
+from taskflows.alerts import ContentType, EmailAddrs, PeriodicMsgs, PeriodicMsgSender, Text
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def email_config():
 
 
 class TestPeriodicMsgs:
-    @patch("alerts.alerts.send_alert")
+    @patch("taskflows.alerts.alerts.send_alert")
     @pytest.mark.asyncio
     async def test_add_message(self, mock_send_alert, slack_channel):
         # Create a PeriodicMsgs instance
@@ -44,7 +44,7 @@ class TestPeriodicMsgs:
         # Buffer should be cleared after publishing
         assert len(periodic_msg.msg_buffer) == 0
 
-    @patch("alerts.alerts.send_alert")
+    @patch("taskflows.alerts.alerts.send_alert")
     @pytest.mark.asyncio
     async def test_on_pub_func(self, mock_send_alert, slack_channel):
         # Create a callback function to be called after publishing

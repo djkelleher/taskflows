@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from alerts import MsgDst
+from taskflows.alerts import MsgDst
 
 from taskflows.tasks import Alerts, TaskLogger, build_loki_query_url
 

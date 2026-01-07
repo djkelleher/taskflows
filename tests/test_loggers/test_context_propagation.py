@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 
 import pytest
-from quicklogs.structured import (
+from taskflows.loggers.structured import (
     clear_request_context,
     configure_loki_logging,
     generate_request_id,
