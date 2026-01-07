@@ -22,7 +22,7 @@ files provides a unified interface for common file operations, automatically han
 ## Quick Start
 
 ```python
-from fileflows import Files
+from files import Files
 
 # Create a Files instance
 files = Files()
@@ -48,13 +48,13 @@ s3_file_list = files.list_files("s3://my-bucket/prefix")
 The `Files` class provides a high-level interface for file operations on both local and S3 storage.
 
 ```python
-from fileflows import Files
+from files import Files
 
 # Initialize with default S3 configuration
 files = Files()
 
 # Or with custom S3 configuration
-from fileflows import S3Cfg
+from files import S3Cfg
 s3_cfg = S3Cfg(
     aws_access_key_id="your-access-key",
     aws_secret_access_key="your-secret-key",
@@ -82,7 +82,7 @@ files = Files(s3_cfg)
 For operations specific to S3-compatible storage:
 
 ```python
-from fileflows import S3, S3Cfg
+from files import S3, S3Cfg
 
 # Initialize with default S3 configuration from environment variables
 s3 = S3()
@@ -131,7 +131,7 @@ files includes several utility functions for working with files:
 The `S3Cfg` class allows you to configure S3 credentials and connection parameters:
 
 ```python
-from fileflows import S3Cfg
+from files import S3Cfg
 
 s3_cfg = S3Cfg(
     aws_access_key_id="your-access-key",
@@ -149,7 +149,7 @@ If not provided, configuration values will be loaded from environment variables 
 ### Working with Local Files
 
 ```python
-from fileflows import Files
+from files import Files
 from pathlib import Path
 
 files = Files()
@@ -178,7 +178,7 @@ files.delete("data/output/temp.txt")
 ### Working with S3
 
 ```python
-from fileflows import Files, S3Cfg
+from files import Files, S3Cfg
 
 # Configure S3 with custom endpoint (e.g., MinIO)
 s3_cfg = S3Cfg(
@@ -209,7 +209,7 @@ files.delete("s3://test-bucket/data/test.csv")
 ### Converting and Processing Files
 
 ```python
-from fileflows import csvs_to_parquet, gzip_files
+from files import csvs_to_parquet, gzip_files
 from pathlib import Path
 
 # Compress multiple CSV files
@@ -224,7 +224,7 @@ csvs_to_parquet(compressed_files, header=True)
 ### Direct S3 Operations
 
 ```python
-from fileflows import S3, S3Cfg
+from files import S3, S3Cfg
 
 # Initialize S3 client
 s3_cfg = S3Cfg(
@@ -258,7 +258,7 @@ files provides integration with DuckDB for efficient data processing:
 
 ```python
 import duckdb
-from fileflows import S3Cfg, create_duckdb_secret
+from files import S3Cfg, create_duckdb_secret
 
 # Create a DuckDB connection
 con = duckdb.connect("my_database.db")

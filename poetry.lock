@@ -2305,7 +2305,7 @@ files = [
 ]
 
 [[package]]
-name = "quicklogs"
+name = "loggers"
 version = "0.1.0"
 description = ""
 optional = false
@@ -2320,7 +2320,7 @@ structlog = ">=25.4.0,<26.0.0"
 
 [package.source]
 type = "directory"
-url = "../quicklogs"
+url = "../loggers"
 
 [[package]]
 name = "requests"

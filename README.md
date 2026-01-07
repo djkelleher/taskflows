@@ -937,7 +937,7 @@ Application (structlog) → journald → Fluent Bit → Loki → Grafana
 ### Configuration
 
 ```python
-from quicklogs import configure_loki_logging, get_struct_logger
+from loggers import configure_loki_logging, get_struct_logger
 
 configure_loki_logging(
     app_name="my-service",
