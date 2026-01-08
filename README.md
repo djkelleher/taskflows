@@ -645,9 +645,65 @@ tf security regenerate-secret
 
 ## Web UI
 
-A modern web interface for managing services.
+Two UI options are available: a server-rendered UI (legacy) and a React SPA (recommended).
 
-### Setup
+### React Frontend (Recommended)
+
+A modern React SPA located in `frontend/`.
+
+#### Setup
+
+```bash
+cd frontend
+
+# Install dependencies
+npm install
+
+# Development (with hot reload)
+npm run dev
+
+# Production build
+npm run build
+```
+
+#### Running
+
+**Development mode:**
+```bash
+# Terminal 1: Start the API server
+tf api start
+
+# Terminal 2: Start React dev server (proxies API to localhost:7777)
+cd frontend && npm run dev
+```
+
+Access at **http://localhost:3000**
+
+**Production mode:**
+```bash
+# Build the frontend
+cd frontend && npm run build
+
+# Serve via FastAPI (copies dist/ to static/)
+cp -r frontend/dist/* taskflows/ui/static/
+tf api start --enable-ui
+```
+
+Access at **http://localhost:7777**
+
+#### Tech Stack
+
+- React 19 + TypeScript + Vite
+- React Router v7 (protected routes)
+- Zustand (auth, UI state)
+- React Query (server state with polling)
+- TailwindCSS 4
+
+See `frontend/README.md` for detailed documentation.
+
+### Legacy Server-Rendered UI
+
+The original Python/dominate UI in `taskflows/ui/`.
 
 ```bash
 # Install dependencies
@@ -658,17 +714,12 @@ cd taskflows/ui && npm install && cd ../..
 
 # Setup authentication
 tf api setup-ui --username admin
-# Enter password when prompted
 
 # Start API with UI
 tf api start --enable-ui
 ```
 
-### Access
-
-Navigate to **http://localhost:7777**
-
-### Features
+### Features (Both UIs)
 
 - **Dashboard**: Real-time service status with auto-refresh
 - **Multi-select**: Select and operate on multiple services
