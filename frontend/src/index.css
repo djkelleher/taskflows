@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+@theme {
+  /* Taskflows theme colors */
+  --color-electric-blue: #0062FF;
+  --color-neon-green: #00FF66;
+  --color-neon-red: #FF3300;
+
+  /* Semantic colors */
+  --color-background: #f3f4f6;
+  --color-foreground: #1f2937;
+  --color-card: #ffffff;
+  --color-border: #e5e7eb;
+  --color-muted: #6b7280;
+  --color-accent: #0062FF;
+  --color-positive: #00FF66;
+  --color-negative: #FF3300;
+
+  /* Fonts */
+  --font-sans: "NeueHaasGroteskText Pro", "Inter", system-ui, sans-serif;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  margin: 0;
+}
+
+/* Button utilities */
+.btn {
+  padding: 0.5rem 1rem;
+  border-radius: 0.375rem;
+  font-weight: 500;
+  transition: all 0.15s ease;
+  cursor: pointer;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background-color: var(--color-electric-blue);
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: #0051d4;
+}
+
+.btn-secondary {
+  background-color: #6b7280;
+  color: white;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: #4b5563;
+}
+
+.btn-success {
+  background-color: var(--color-neon-green);
+  color: #1f2937;
+}
+
+.btn-success:hover:not(:disabled) {
+  background-color: #00e65c;
+}
+
+.btn-danger {
+  background-color: var(--color-neon-red);
+  color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: #e62e00;
+}
+
+/* Toast animations */
+@keyframes slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in 0.3s ease-out;
+}
