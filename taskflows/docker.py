@@ -1,9 +1,11 @@
+import atexit
 import base64
 import shlex
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
+from weakref import WeakValueDictionary
 
 import cloudpickle
 import docker
@@ -20,10 +22,77 @@ from .constraints import CgroupConfig
 from .exec import PickledFunction
 
 
-@lru_cache
-def get_docker_client(user_host: Optional[str] = None):
+# Global registry of Docker clients with weak references for cleanup
+_docker_clients: Dict[str, docker.DockerClient] = {}
+
+
+def get_docker_client(user_host: Optional[str] = None) -> docker.DockerClient:
+    """Get or create a Docker client.
+
+    FIXED: Removed @lru_cache to prevent connection leaks. Clients are now
+    tracked in a global dict and properly closed on application exit.
+
+    Args:
+        user_host: Optional SSH host for remote Docker daemon
+
+    Returns:
+        Docker client instance
+    """
     base_url = f"ssh://{user_host}" if user_host else "unix:///var/run/docker.sock"
-    return docker.DockerClient(base_url=base_url)
+
+    # Reuse existing client if available
+    if base_url in _docker_clients:
+        client = _docker_clients[base_url]
+        try:
+            # Verify client is still alive
+            client.ping()
+            return client
+        except Exception:
+            # Client is stale, remove it
+            try:
+                client.close()
+            except Exception:
+                pass
+            del _docker_clients[base_url]
+
+    # Create new client
+    client = docker.DockerClient(base_url=base_url)
+    _docker_clients[base_url] = client
+    return client
+
+
+@contextmanager
+def docker_client_context(user_host: Optional[str] = None):
+    """Context manager for Docker client with guaranteed cleanup.
+
+    Use this for one-off operations where you want guaranteed cleanup.
+    For long-running operations, use get_docker_client() directly.
+
+    Example:
+        with docker_client_context() as client:
+            client.containers.run(...)
+    """
+    client = get_docker_client(user_host)
+    try:
+        yield client
+    finally:
+        # Don't close here as it's a shared client
+        pass
+
+
+def cleanup_docker_clients():
+    """Close all Docker clients. Called on application exit."""
+    for base_url, client in list(_docker_clients.items()):
+        try:
+            logger.debug(f"Closing Docker client for {base_url}")
+            client.close()
+        except Exception as e:
+            logger.warning(f"Error closing Docker client for {base_url}: {e}")
+    _docker_clients.clear()
+
+
+# Register cleanup on exit
+atexit.register(cleanup_docker_clients)
 
 
 def apply_container_action(
@@ -377,6 +446,16 @@ class DockerContainer:
 
     @property
     def exists(self):
+        """Check if container exists.
+
+        WARNING: This check is subject to time-of-check-time-of-use (TOCTOU) race conditions.
+        Between checking exists and performing an operation, another process could create or
+        delete the container. For robust code, wrap operations in try-except blocks to handle
+        docker.errors.NotFound rather than checking exists first.
+
+        Returns:
+            bool: True if container exists, False otherwise
+        """
         try:
             # Use self.name if already set, otherwise generate it
             name = self.name if self.name else self._ensure_name()
@@ -384,9 +463,16 @@ class DockerContainer:
             return True
         except docker.errors.NotFound:
             return False
+        except Exception as e:
+            # Other errors (connection issues, etc) should be logged
+            logger.warning(f"Error checking if container {self.name} exists: {e}")
+            return False
 
     def create(self, **kwargs) -> Container:
         """Create a Docker container for running a script.
+
+        FIXED: Handles race conditions more gracefully by attempting deletion
+        and handling conflicts atomically.
 
         Args:
             task_name (str): Name of the task the container is for.
@@ -394,38 +480,73 @@ class DockerContainer:
 
         Returns:
             Container: The created Docker container.
+
+        Raises:
+            docker.errors.APIError: If container creation fails after cleanup
         """
         # create default container name if one wasn't assigned.
         self._ensure_name()
+
         # remove any existing container with this name.
+        # This is idempotent - delete() handles NotFound gracefully
         self.delete()
+
         # if image is not build, it must be built.
         if isinstance(self.image, DockerImage):
             self.image.build()
         if self.command and not isinstance(self.command, str):
             self.command = PickledFunction(self.command, self.name, "command")
+
         # Apply cgroup configuration if present
         cfg = self._apply_cgroup_config(self._params())
-        
+
         cfg.update(kwargs)
         logger.info(f"Creating Docker container {self.name}: {cfg}")
         client = get_docker_client()
-        try:
-            return client.containers.create(**cfg)
-        except docker.errors.ImageNotFound:
-            if isinstance(self.image, DockerImage):
-                raise
-            logger.info(f"Pulling Docker image {self.image}")
-            image_and_tag = self.image.split(":")
-            if len(image_and_tag) == 1:
-                client.images.pull(self.image)
-            else:
-                image, tag = image_and_tag
-                client.images.pull(image, tag=tag)
-            return client.containers.create(**cfg)
+
+        # Try to create container with automatic retry on common errors
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            try:
+                return client.containers.create(**cfg)
+            except docker.errors.ImageNotFound:
+                if isinstance(self.image, DockerImage):
+                    raise
+                # Pull image and retry
+                logger.info(f"Pulling Docker image {self.image}")
+                image_and_tag = self.image.split(":")
+                if len(image_and_tag) == 1:
+                    client.images.pull(self.image)
+                else:
+                    image, tag = image_and_tag
+                    client.images.pull(image, tag=tag)
+                # Retry creation after pulling image
+                continue
+            except docker.errors.APIError as e:
+                # Handle conflict error (container already exists despite deletion)
+                if "Conflict" in str(e) and attempt < max_attempts - 1:
+                    logger.warning(
+                        f"Container {self.name} conflict detected (race condition), "
+                        f"retrying deletion and creation (attempt {attempt + 1}/{max_attempts})"
+                    )
+                    # Force delete and retry
+                    delete_docker_container(self.name, force=True)
+                    continue
+                else:
+                    # Other API errors or final attempt - propagate
+                    raise
+
+        # Shouldn't reach here, but just in case
+        raise RuntimeError(f"Failed to create container {self.name} after {max_attempts} attempts")
 
     def docker_run_cli_command(self) -> str:
-        """Build the docker run CLI command string for this container."""
+        """Build the docker run CLI command string for this container.
+
+        SECURITY: All user-controlled values are escaped using shlex.quote()
+        to prevent command injection when the command string is executed.
+        """
+        import shlex
+
         # Build docker run command
         cmd = ["docker", "run"]
 
@@ -433,59 +554,60 @@ class DockerContainer:
         if self.command and not isinstance(self.command, str):
             self.command = f"_run_function {base64.b64encode(cloudpickle.dumps(self.command)).decode('utf-8')}"
 
-        # Container name
+        # Container name (user-controlled, must be escaped)
         container_name = self._ensure_name()
-        cmd.extend(["--name", container_name])
-        
+        cmd.extend(["--name", shlex.quote(container_name)])
+
         # Auto-remove container
         cmd.append("--rm")
-        
+
         # Detach mode (default to True for consistency with previous behavior)
         if self.detach is None or self.detach:
             cmd.append("-d")
-        
-        # Network mode
+
+        # Network mode (user-controlled, must be escaped)
         if self.network_mode:
-            cmd.extend(["--network", self.network_mode])
-            
-        # Restart policy
+            cmd.extend(["--network", shlex.quote(self.network_mode)])
+
+        # Restart policy (user-controlled, must be escaped)
         if self.restart_policy != "no":
-            cmd.extend(["--restart", self.restart_policy])
-            
+            cmd.extend(["--restart", shlex.quote(self.restart_policy)])
+
         # Init
         if self.init:
             cmd.append("--init")
-            
-        # Shared memory size
+
+        # Shared memory size (user-controlled, must be escaped)
         if self.shm_size:
-            cmd.extend(["--shm-size", str(self.shm_size)])
-            
-        # Environment variables
+            cmd.extend(["--shm-size", shlex.quote(str(self.shm_size))])
+
+        # Environment variables (CRITICAL: user-controlled, must be escaped)
         env = {}
         if self.environment:
             env.update(self.environment)
         if self.env_file:
             env.update(dotenv_values(self.env_file))
         for key, value in env.items():
-            cmd.extend(["--env", f"{key}={value}"])
+            # Escape both key and value to prevent injection
+            cmd.extend(["--env", shlex.quote(f"{key}={value}")])
             
-        # Volumes
+        # Volumes (user-controlled paths, must be escaped)
         volumes = [self.volumes] if isinstance(self.volumes, Volume) else self.volumes
         if volumes:
             for v in volumes:
                 mode = "ro" if v.read_only else "rw"
-                cmd.extend(["-v", f"{v.host_path}:{v.container_path}:{mode}"])
-                
-        # Volumes from
+                cmd.extend(["-v", shlex.quote(f"{v.host_path}:{v.container_path}:{mode}")])
+
+        # Volumes from (user-controlled, must be escaped)
         if self.volumes_from:
             for vf in self.volumes_from:
-                cmd.extend(["--volumes-from", vf])
-                
-        # Volume driver
+                cmd.extend(["--volumes-from", shlex.quote(vf)])
+
+        # Volume driver (user-controlled, must be escaped)
         if self.volume_driver:
-            cmd.extend(["--volume-driver", self.volume_driver])
-            
-        # Ulimits
+            cmd.extend(["--volume-driver", shlex.quote(self.volume_driver)])
+
+        # Ulimits (user-controlled values, must be escaped)
         ulimits = [self.ulimits] if isinstance(self.ulimits, Ulimit) else self.ulimits
         if ulimits:
             for l in ulimits:
@@ -494,37 +616,38 @@ class DockerContainer:
                     ulimit_str += str(l.soft)
                 if l.hard is not None:
                     ulimit_str += f":{l.hard}"
-                cmd.extend(["--ulimit", ulimit_str])
-                
+                cmd.extend(["--ulimit", shlex.quote(ulimit_str)])
+
         # Apply cgroup configuration if present
         if self.cgroup_config:
             cgroup_args = self.cgroup_config.to_docker_cli_args()
-            cmd.extend(cgroup_args)
-                    
-        # Other container settings
+            # Cgroup args should already be safe, but escape them anyway
+            cmd.extend([shlex.quote(arg) if not arg.startswith("--") else arg for arg in cgroup_args])
+
+        # Other container settings (all user-controlled, must be escaped)
         if self.hostname:
-            cmd.extend(["--hostname", self.hostname])
+            cmd.extend(["--hostname", shlex.quote(self.hostname)])
         if self.domainname:
-            cmd.extend(["--domainname", str(self.domainname)])
+            cmd.extend(["--domainname", shlex.quote(str(self.domainname))])
         if self.dns:
             for dns_server in self.dns:
-                cmd.extend(["--dns", dns_server])
+                cmd.extend(["--dns", shlex.quote(dns_server)])
         if self.dns_search:
             for domain in self.dns_search:
-                cmd.extend(["--dns-search", domain])
+                cmd.extend(["--dns-search", shlex.quote(domain)])
         if self.dns_opt:
             for opt in self.dns_opt:
-                cmd.extend(["--dns-opt", opt])
+                cmd.extend(["--dns-opt", shlex.quote(opt)])
         if self.mac_address:
-            cmd.extend(["--mac-address", self.mac_address])
+            cmd.extend(["--mac-address", shlex.quote(self.mac_address)])
         if self.pid_mode:
-            cmd.extend(["--pid", self.pid_mode])
+            cmd.extend(["--pid", shlex.quote(self.pid_mode)])
         if self.ipc_mode:
-            cmd.extend(["--ipc", self.ipc_mode])
+            cmd.extend(["--ipc", shlex.quote(self.ipc_mode)])
         if self.uts_mode:
-            cmd.extend(["--uts", self.uts_mode])
+            cmd.extend(["--uts", shlex.quote(self.uts_mode)])
         if self.userns_mode:
-            cmd.extend(["--userns", self.userns_mode])
+            cmd.extend(["--userns", shlex.quote(self.userns_mode)])
         if self.privileged:
             cmd.append("--privileged")
         if self.publish_all_ports:
@@ -533,11 +656,12 @@ class DockerContainer:
             cmd.append("-t")
         if self.entrypoint:
             if isinstance(self.entrypoint, list):
-                cmd.extend(["--entrypoint", " ".join(self.entrypoint)])
+                # Escape each element and join
+                cmd.extend(["--entrypoint", shlex.quote(" ".join(shlex.quote(e) for e in self.entrypoint))])
             else:
-                cmd.extend(["--entrypoint", str(self.entrypoint)])
+                cmd.extend(["--entrypoint", shlex.quote(str(self.entrypoint))])
             
-        # Ports
+        # Ports (user-controlled, must be escaped)
         if self.ports:
             for container_port, host_config in self.ports.items():
                 if host_config:
@@ -545,25 +669,25 @@ class DockerContainer:
                         host_port = host_config.get('HostPort')
                         host_ip = host_config.get('HostIp', '')
                         if host_ip:
-                            cmd.extend(["-p", f"{host_ip}:{host_port}:{container_port}"])
+                            cmd.extend(["-p", shlex.quote(f"{host_ip}:{host_port}:{container_port}")])
                         else:
-                            cmd.extend(["-p", f"{host_port}:{container_port}"])
+                            cmd.extend(["-p", shlex.quote(f"{host_port}:{container_port}")])
                     else:
-                        cmd.extend(["-p", f"{host_config}:{container_port}"])
-                        
+                        cmd.extend(["-p", shlex.quote(f"{host_config}:{container_port}")])
+
         # Log configuration
         cmd.extend(["--log-driver", "journald"])
         cmd.extend(["--log-opt", "tag=docker.{{.Name}}"])
-        
-        # Image
+
+        # Image (user-controlled, must be escaped)
         if isinstance(self.image, DockerImage):
             image_name = self.image.tag
             # Ensure image is built
             self.image.build()
         else:
             image_name = self.image
-            
-        cmd.append(image_name)
+
+        cmd.append(shlex.quote(image_name))
         
         # Command
         if self.command:

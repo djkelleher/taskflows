@@ -43,6 +43,29 @@ export function LogViewer({ serviceName }: LogViewerProps) {
     }
   }, [filteredLogs, autoScroll]);
 
+  // Detect manual scrolling and disable auto-scroll if user scrolls up
+  useEffect(() => {
+    const container = logContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const isAtBottom =
+        container.scrollHeight - container.scrollTop <= container.clientHeight + 10; // 10px threshold
+
+      // If user scrolls away from bottom, disable auto-scroll
+      if (!isAtBottom && autoScroll) {
+        setAutoScroll(false);
+      }
+      // If user scrolls back to bottom, re-enable auto-scroll
+      else if (isAtBottom && !autoScroll) {
+        setAutoScroll(true);
+      }
+    };
+
+    container.addEventListener("scroll", handleScroll);
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, [autoScroll]);
+
   const handleRefresh = () => {
     queryClient.invalidateQueries({ queryKey: ["logs", serviceName, lineCount] });
   };

@@ -8,6 +8,7 @@ interface DynamicFieldListProps<T> {
   onRemove: (index: number) => void;
   onUpdate: (index: number, item: T) => void;
   renderItem: (item: T, index: number, onUpdate: (item: T) => void) => React.ReactNode;
+  keyExtractor?: (item: T, index: number) => string;
   addLabel?: string;
 }
 
@@ -18,6 +19,7 @@ export function DynamicFieldList<T>({
   onRemove,
   onUpdate,
   renderItem,
+  keyExtractor,
   addLabel = "Add",
 }: DynamicFieldListProps<T>) {
   return (
@@ -33,21 +35,26 @@ export function DynamicFieldList<T>({
         <p className="text-sm text-muted">No items added</p>
       ) : (
         <div className="space-y-2">
-          {items.map((item, index) => (
-            <div key={index} className="flex items-start gap-2">
-              <div className="flex-1">
-                {renderItem(item, index, (newItem) => onUpdate(index, newItem))}
+          {items.map((item, index) => {
+            const key = keyExtractor
+              ? keyExtractor(item, index)
+              : `item-${index}-${JSON.stringify(item)}`;
+            return (
+              <div key={key} className="flex items-start gap-2">
+                <div className="flex-1">
+                  {renderItem(item, index, (newItem) => onUpdate(index, newItem))}
+                </div>
+                <Button
+                  type="button"
+                  variant="danger"
+                  size="sm"
+                  onClick={() => onRemove(index)}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
               </div>
-              <Button
-                type="button"
-                variant="danger"
-                size="sm"
-                onClick={() => onRemove(index)}
-              >
-                <Trash2 className="w-4 h-4" />
-              </Button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -60,24 +67,33 @@ interface PortMappingFieldProps {
   host: string;
   container: string;
   onUpdate: (mapping: { host: string; container: string }) => void;
+  errors?: { host?: string; container?: string };
 }
 
-export function PortMappingField({ host, container, onUpdate }: PortMappingFieldProps) {
+export function PortMappingField({ host, container, onUpdate, errors }: PortMappingFieldProps) {
   return (
-    <div className="flex gap-2">
-      <Input
-        placeholder="Host port"
-        value={host}
-        onChange={(e) => onUpdate({ host: e.target.value, container })}
-        className="flex-1"
-      />
-      <span className="flex items-center text-muted">:</span>
-      <Input
-        placeholder="Container port"
-        value={container}
-        onChange={(e) => onUpdate({ host, container: e.target.value })}
-        className="flex-1"
-      />
+    <div className="space-y-1">
+      <div className="flex gap-2">
+        <div className="flex-1">
+          <Input
+            placeholder="Host port"
+            value={host}
+            onChange={(e) => onUpdate({ host: e.target.value, container })}
+            className="flex-1"
+          />
+          {errors?.host && <p className="text-xs text-red-500 mt-1">{errors.host}</p>}
+        </div>
+        <span className="flex items-center text-muted">:</span>
+        <div className="flex-1">
+          <Input
+            placeholder="Container port"
+            value={container}
+            onChange={(e) => onUpdate({ host, container: e.target.value })}
+            className="flex-1"
+          />
+          {errors?.container && <p className="text-xs text-red-500 mt-1">{errors.container}</p>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -86,24 +102,33 @@ interface VolumeMappingFieldProps {
   host: string;
   container: string;
   onUpdate: (mapping: { host: string; container: string }) => void;
+  errors?: { host?: string; container?: string };
 }
 
-export function VolumeMappingField({ host, container, onUpdate }: VolumeMappingFieldProps) {
+export function VolumeMappingField({ host, container, onUpdate, errors }: VolumeMappingFieldProps) {
   return (
-    <div className="flex gap-2">
-      <Input
-        placeholder="Host path"
-        value={host}
-        onChange={(e) => onUpdate({ host: e.target.value, container })}
-        className="flex-1"
-      />
-      <span className="flex items-center text-muted">:</span>
-      <Input
-        placeholder="Container path"
-        value={container}
-        onChange={(e) => onUpdate({ host, container: e.target.value })}
-        className="flex-1"
-      />
+    <div className="space-y-1">
+      <div className="flex gap-2">
+        <div className="flex-1">
+          <Input
+            placeholder="Host path"
+            value={host}
+            onChange={(e) => onUpdate({ host: e.target.value, container })}
+            className="flex-1"
+          />
+          {errors?.host && <p className="text-xs text-red-500 mt-1">{errors.host}</p>}
+        </div>
+        <span className="flex items-center text-muted">:</span>
+        <div className="flex-1">
+          <Input
+            placeholder="Container path"
+            value={container}
+            onChange={(e) => onUpdate({ host, container: e.target.value })}
+            className="flex-1"
+          />
+          {errors?.container && <p className="text-xs text-red-500 mt-1">{errors.container}</p>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -112,24 +137,30 @@ interface EnvVarFieldProps {
   name: string;
   value: string;
   onUpdate: (envVar: { name: string; value: string }) => void;
+  errors?: { name?: string };
 }
 
-export function EnvVarField({ name, value, onUpdate }: EnvVarFieldProps) {
+export function EnvVarField({ name, value, onUpdate, errors }: EnvVarFieldProps) {
   return (
-    <div className="flex gap-2">
-      <Input
-        placeholder="Variable name"
-        value={name}
-        onChange={(e) => onUpdate({ name: e.target.value, value })}
-        className="flex-1"
-      />
-      <span className="flex items-center text-muted">=</span>
-      <Input
-        placeholder="Value"
-        value={value}
-        onChange={(e) => onUpdate({ name, value: e.target.value })}
-        className="flex-1"
-      />
+    <div className="space-y-1">
+      <div className="flex gap-2">
+        <div className="flex-1">
+          <Input
+            placeholder="Variable name"
+            value={name}
+            onChange={(e) => onUpdate({ name: e.target.value, value })}
+            className="flex-1"
+          />
+          {errors?.name && <p className="text-xs text-red-500 mt-1">{errors.name}</p>}
+        </div>
+        <span className="flex items-center text-muted">=</span>
+        <Input
+          placeholder="Value"
+          value={value}
+          onChange={(e) => onUpdate({ name, value: e.target.value })}
+          className="flex-1"
+        />
+      </div>
     </div>
   );
 }

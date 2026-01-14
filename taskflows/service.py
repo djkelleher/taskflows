@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import threading
 from abc import abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,72 +47,115 @@ ServicesT = Union[ServiceT, Sequence[ServiceT]]
 
 
 class ServiceRegistry:
+    """Thread-safe registry for managing services.
+
+    FIXED: Added RLock to prevent concurrent modification issues when
+    multiple threads access or modify the service registry.
+    """
+
     def __init__(self, *services):
         self._services = {s.name: s for s in services}
+        self._lock = threading.RLock()  # Reentrant lock for thread safety
 
     def add(self, *services):
-        for s in services:
-            self._services[s.name] = s
+        """Add services to the registry (thread-safe)."""
+        with self._lock:
+            for s in services:
+                self._services[s.name] = s
 
     @property
     def names(self):
-        return list(self._services.keys())
+        """Get list of service names (thread-safe)."""
+        with self._lock:
+            return list(self._services.keys())
 
     @property
     def services(self):
-        return list(self._services.values())
+        """Get list of services (thread-safe)."""
+        with self._lock:
+            return list(self._services.values())
 
     def create(self):
-        for s in self.services:
+        """Create all services (operations are atomic per service)."""
+        # Get snapshot of services to avoid holding lock during long operations
+        services_snapshot = self.services
+        for s in services_snapshot:
             s.create()
 
     def start(self):
-        for s in self.services:
+        """Start all services (operations are atomic per service)."""
+        services_snapshot = self.services
+        for s in services_snapshot:
             s.start()
 
     def stop(self):
-        for s in self.services:
+        """Stop all services (operations are atomic per service)."""
+        services_snapshot = self.services
+        for s in services_snapshot:
             s.stop()
 
     def enable(self):
-        for s in self.services:
+        """Enable all services (operations are atomic per service)."""
+        services_snapshot = self.services
+        for s in services_snapshot:
             s.enable()
 
     def disable(self):
-        for s in self.services:
+        """Disable all services (operations are atomic per service)."""
+        services_snapshot = self.services
+        for s in services_snapshot:
             s.disable()
 
     def restart(self):
-        for s in self.services:
+        """Restart all services (operations are atomic per service)."""
+        services_snapshot = self.services
+        for s in services_snapshot:
             s.restart()
 
     def remove(self):
-        for s in self.services:
+        """Remove all services (operations are atomic per service)."""
+        services_snapshot = self.services
+        for s in services_snapshot:
             s.remove()
 
     def __getitem__(self, name):
-        return self._services[name]
+        """Get service by name (thread-safe)."""
+        with self._lock:
+            return self._services[name]
 
     def __setitem__(self, name, value):
-        self._services[name] = value
+        """Set service by name (thread-safe)."""
+        with self._lock:
+            self._services[name] = value
 
     def __contains__(self, name):
-        return name in self._services
+        """Check if service exists (thread-safe)."""
+        with self._lock:
+            return name in self._services
 
     def __iter__(self):
+        """Iterate over services (thread-safe snapshot)."""
         return iter(self.services)
 
     def __len__(self):
-        return len(self._services)
+        """Get number of services (thread-safe)."""
+        with self._lock:
+            return len(self._services)
 
     def __repr__(self):
-        return repr(self._services)
+        """String representation (thread-safe)."""
+        with self._lock:
+            return repr(self._services)
 
     def __str__(self):
-        return str(self._services)
+        """String representation (thread-safe)."""
+        with self._lock:
+            return str(self._services)
 
     def __bool__(self):
-        return bool(self._services)
+        """Check if registry is non-empty (thread-safe)."""
+        with self._lock:
+            return bool(self._services)
 
 
 @pdataclass
@@ -332,28 +376,64 @@ class Service:
             
             # Set up slice for systemd resource management
             self.slice = f"{self.name}.slice"
+
+            # Normalize restart policy: systemd doesn't support "unless-stopped"
+            # Convert it to "always" for systemd compatibility
+            def normalize_restart_policy(policy):
+                """Convert Docker restart policies to systemd-compatible values."""
+                if policy == "unless-stopped":
+                    return "always"
+                return policy
+
             # TODO check for callable start command.
             if container.persisted:
-                # this is a persistent container, started wiht 'docker start'
+                # Persistent container: started with 'docker start'
                 # Handle restart policy migration from container to systemd
+                #
+                # IMPORTANT: For persisted containers, systemd manages the restart policy,
+                # not Docker. We migrate the policy from container to service and set
+                # container's policy to "no" to avoid conflicts.
+                #
+                # NOTE: This modifies the container object's restart_policy attribute.
                 if container.restart_policy not in ("no", None):
-                    if container.restart_policy == "unless-stopped":
-                        self.restart_policy = "always"
+                    # Migrate and normalize restart policy
+                    migrated_policy = normalize_restart_policy(container.restart_policy)
+
+                    # Only override service policy if not already set
+                    if self.restart_policy in (None, "no"):
+                        self.restart_policy = migrated_policy
                     else:
-                        self.restart_policy = container.restart_policy
+                        # Service policy takes precedence over container policy
+                        self.restart_policy = normalize_restart_policy(self.restart_policy)
+                        logger.warning(
+                            f"Both service and container have restart policies. "
+                            f"Using service policy: {self.restart_policy}, "
+                            f"ignoring container policy: {container.restart_policy}"
+                        )
+
+                    # Disable Docker's built-in restart to avoid conflicts with systemd
                     container.restart_policy = "no"
+                elif self.restart_policy:
+                    # Service has restart policy but container doesn't
+                    self.restart_policy = normalize_restart_policy(self.restart_policy)
+
                 self.start_command = f"docker start -a {self.name}"
                 self.stop_command = f"docker stop -t 30 {self.name}"
                 self.restart_command = f"docker restart {self.name}"
             else:
-                # Setup for Docker run service (ephemeral container).
-                # Use the docker CLI command directly for systemd service
+                # Ephemeral container: started with 'docker run'
+                # Container is recreated on each service start
+                # Normalize restart policy for non-persisted containers too
+                if self.restart_policy:
+                    self.restart_policy = normalize_restart_policy(self.restart_policy)
+
                 self.start_command = container.docker_run_cli_command()
                 self.stop_command = f"docker stop {self.name}"
                 self.restart_command = f"docker restart {self.name}"
-                
+
         elif self.restart_policy == "unless-stopped":
-            # not a valid systemd policy (only docker)
+            # Normalize restart policy for non-Docker services
+            # "unless-stopped" is Docker-specific, convert to systemd-compatible "always"
             self.restart_policy = "always"
         # Validate required fields after setup
         if not self.name:
@@ -566,28 +646,44 @@ class Service:
         self.remove(preserve_container=preserve_container)
         self._write_timer_units()
         self._write_service_units()
+
+        # Write pickle files and ensure cleanup on error
         for func in self._pkl_funcs:
             func.write()
-        # Handle Docker container creation
-        if isinstance(self.environment, DockerContainer):
-            # Create Docker container if needed.
-            container = self.environment
-            if container.persisted:
-                # For persisted containers, only create if it doesn't already exist
-                # This preserves state and avoids unnecessary recreation
-                if not container.exists:
-                    logger.info(f"Creating persisted Docker container: {container.name}")
-                    container.create(cgroup_parent=self.slice)
-                else:
-                    logger.info(f"Persisted Docker container already exists: {container.name}")
-            # For run services, no need to do anything here since
-            # the docker run command is directly in the systemd service file
 
-        self.enable(timers_only=not self.enabled)
-        # Start timers now
-        _start_service(self.timer_files)
-        if not defer_reload:
-            reload_unit_files()
+        try:
+            # Handle Docker container creation
+            if isinstance(self.environment, DockerContainer):
+                # Create Docker container if needed.
+                container = self.environment
+                if container.persisted:
+                    # For persisted containers, only create if it doesn't already exist
+                    # This preserves state and avoids unnecessary recreation
+                    if not container.exists:
+                        logger.info(f"Creating persisted Docker container: {container.name}")
+                        container.create(cgroup_parent=self.slice)
+                    else:
+                        logger.info(f"Persisted Docker container already exists: {container.name}")
+                # For run services, no need to do anything here since
+                # the docker run command is directly in the systemd service file
+
+            self.enable(timers_only=not self.enabled)
+            # Start timers now
+            _start_service(self.timer_files)
+            if not defer_reload:
+                reload_unit_files()
+        except Exception as e:
+            # Clean up pickle files if service creation fails after they were written
+            logger.error(f"Service creation failed, cleaning up pickle files: {e}")
+            for func in self._pkl_funcs:
+                pickle_file = services_data_dir.joinpath(f"{func.name}#_{func.attr}.pickle")
+                try:
+                    if pickle_file.exists():
+                        pickle_file.unlink()
+                        logger.debug(f"Removed pickle file: {pickle_file}")
+                except Exception as cleanup_err:
+                    logger.warning(f"Failed to clean up pickle file {pickle_file}: {cleanup_err}")
+            raise
 
     def logs(self):
         return service_logs(self.name)
@@ -742,22 +838,169 @@ def service_logs(service_name: str, n_lines: int = 1000):
     return "\n\n".join(txt).strip()
 
 
-@cache
+# DBus connection management with automatic reconnection
+# FIXED: Replaced @cache with proper connection lifecycle management
+# to handle systemd restarts and stale connections
+
+_dbus_connection_lock = threading.Lock()
+_dbus_session_bus = None
+_dbus_manager = None
+_dbus_last_error_time = 0
+_dbus_error_cooldown = 5  # Seconds between reconnection attempts
+
+
+def _reset_dbus_connections():
+    """Reset DBus connections (called when connection becomes stale)."""
+    global _dbus_session_bus, _dbus_manager
+    _dbus_session_bus = None
+    _dbus_manager = None
+    logger.info("DBus connections reset for reconnection")
+
+
 def session_dbus():
-    # SessionBus is for user session (like systemctl --user)
-    return dbus.SessionBus()
+    """Get or create the D-Bus session bus connection.
+
+    FIXED: Implements automatic reconnection on connection failure instead of
+    caching forever. Handles systemd restarts gracefully.
+
+    Returns:
+        dbus.SessionBus instance
+
+    Raises:
+        dbus.exceptions.DBusException: If connection cannot be established
+    """
+    global _dbus_session_bus, _dbus_last_error_time
+    import time
+
+    with _dbus_connection_lock:
+        # Try to use existing connection
+        if _dbus_session_bus is not None:
+            try:
+                # Health check: try to ping the bus
+                _dbus_session_bus.get_unique_name()
+                return _dbus_session_bus
+            except (dbus.exceptions.DBusException, Exception) as e:
+                logger.warning(f"DBus session bus health check failed: {e}")
+                _dbus_session_bus = None
+
+        # Apply cooldown to avoid tight reconnection loops
+        current_time = time.time()
+        if current_time - _dbus_last_error_time < _dbus_error_cooldown:
+            time.sleep(0.5)  # Brief delay
+
+        # Create new connection
+        try:
+            logger.info("Creating new DBus session bus connection")
+            _dbus_session_bus = dbus.SessionBus()
+            # Verify connection works
+            _dbus_session_bus.get_unique_name()
+            logger.info("DBus session bus connection established successfully")
+            return _dbus_session_bus
+        except Exception as e:
+            _dbus_last_error_time = current_time
+            logger.error(f"Failed to create DBus session bus: {e}", exc_info=True)
+            raise
 
 
-@cache
 def systemd_manager():
-    bus = session_dbus()
-    # Access the systemd D-Bus object
-    systemd = bus.get_object("org.freedesktop.systemd1", "/org/freedesktop/systemd1")
-    return dbus.Interface(systemd, dbus_interface="org.freedesktop.systemd1.Manager")
+    """Get or create the systemd D-Bus manager interface.
+
+    FIXED: Implements automatic reconnection on connection failure instead of
+    caching forever. Handles systemd restarts gracefully.
+
+    Returns:
+        dbus.Interface to systemd manager
+
+    Raises:
+        dbus.exceptions.DBusException: If manager cannot be accessed
+    """
+    global _dbus_manager
+
+    with _dbus_connection_lock:
+        # Try to use existing manager
+        if _dbus_manager is not None:
+            try:
+                # Health check: try a simple method call
+                _ = _dbus_manager.Version
+                return _dbus_manager
+            except (dbus.exceptions.DBusException, Exception) as e:
+                logger.warning(f"DBus manager health check failed: {e}")
+                _reset_dbus_connections()
+
+        # Get bus (will reconnect if needed)
+        bus = session_dbus()
+
+        # Create new manager interface
+        try:
+            logger.info("Creating new systemd D-Bus manager interface")
+            systemd = bus.get_object("org.freedesktop.systemd1", "/org/freedesktop/systemd1")
+            _dbus_manager = dbus.Interface(systemd, dbus_interface="org.freedesktop.systemd1.Manager")
+            # Verify manager works
+            _ = _dbus_manager.Version
+            logger.info(f"Systemd D-Bus manager connected (version: {_dbus_manager.Version})")
+            return _dbus_manager
+        except Exception as e:
+            logger.error(f"Failed to create systemd manager: {e}", exc_info=True)
+            _reset_dbus_connections()
+            raise
+
+
+def _dbus_operation_with_retry(operation, operation_name, max_retries=2):
+    """Execute a D-Bus operation with automatic retry on connection failure.
+
+    Args:
+        operation: Callable that performs the D-Bus operation
+        operation_name: Human-readable name for logging
+        max_retries: Maximum number of retry attempts
+
+    Returns:
+        Result of the operation
+
+    Raises:
+        dbus.exceptions.DBusException: If all retries fail
+    """
+    import time
+
+    for attempt in range(max_retries + 1):
+        try:
+            return operation()
+        except dbus.exceptions.DBusException as e:
+            error_name = getattr(e, "get_dbus_name", lambda: "Unknown")()
+
+            # Check if this is a connection-related error
+            is_connection_error = any(
+                keyword in str(e).lower()
+                for keyword in ["connection", "disconnected", "not available", "no reply"]
+            )
+
+            if is_connection_error and attempt < max_retries:
+                logger.warning(
+                    f"DBus operation '{operation_name}' failed with connection error "
+                    f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
+                )
+                # Reset connections and retry
+                _reset_dbus_connections()
+                time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                continue
+            else:
+                # Non-connection error or final attempt - propagate
+                if attempt == max_retries:
+                    logger.error(
+                        f"DBus operation '{operation_name}' failed after {max_retries + 1} attempts: {e}"
+                    )
+                raise
+        except Exception as e:
+            # Unexpected error - always propagate
+            logger.error(f"Unexpected error in DBus operation '{operation_name}': {e}", exc_info=True)
+            raise
 
 
 def reload_unit_files():
-    systemd_manager().Reload()
+    """Reload systemd unit files with automatic retry on connection failure."""
+    _dbus_operation_with_retry(
+        lambda: systemd_manager().Reload(),
+        "reload_unit_files"
+    )
 
 
 def escape_path(path) -> str:

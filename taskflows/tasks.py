@@ -89,7 +89,11 @@ def build_loki_query_url(
 
 
 class _RuntimeManager:
-    """Singleton manager for the async runtime and blocking portal."""
+    """Singleton manager for the async runtime and blocking portal.
+
+    FIXED: Added portal health checks, automatic recovery, and retry logic
+    to prevent race conditions where portal becomes invalid between check and use.
+    """
 
     _instance = None
     _lock = threading.Lock()
@@ -106,36 +110,157 @@ class _RuntimeManager:
         if not self._initialized:
             self._portal: Optional[BlockingPortal] = None
             self._thread: Optional[threading.Thread] = None
+            self._portal_healthy: bool = False
+            self._last_health_check: float = 0
+            self._health_check_interval: float = 1.0  # Check health every 1 second
             self._initialized = True
 
+    def _is_portal_healthy(self) -> bool:
+        """Check if the portal is healthy and usable.
+
+        Returns:
+            True if portal exists, thread is alive, and portal is functional
+        """
+        if self._portal is None or self._thread is None:
+            return False
+
+        if not self._thread.is_alive():
+            logger.warning("Portal thread is not alive, needs restart")
+            return False
+
+        # Perform lightweight health check by checking portal state
+        # The portal's internal state should be accessible
+        try:
+            # Check if we can access portal internals (it's not closed)
+            # If the portal is closed or broken, accessing it may raise an error
+            _ = self._portal._call_portal
+            return True
+        except (AttributeError, RuntimeError) as e:
+            logger.warning(f"Portal health check failed: {e}")
+            return False
+
     def get_portal(self) -> BlockingPortal:
-        """Get or create the blocking portal for running async code from sync context."""
-        if self._portal is None or self._thread is None or not self._thread.is_alive():
-            with self._lock:
-                if self._portal is None or self._thread is None or not self._thread.is_alive():
-                    self._start_runtime()
-        return self._portal
+        """Get or create the blocking portal for running async code from sync context.
+
+        FIXED: Implements health checking and automatic recovery to prevent
+        race conditions where portal becomes invalid between check and use.
+
+        Returns:
+            BlockingPortal instance
+
+        Raises:
+            RuntimeError: If portal cannot be initialized after retries
+        """
+        import time
+
+        # Fast path: recent health check passed
+        current_time = time.time()
+        if (
+            self._portal_healthy
+            and current_time - self._last_health_check < self._health_check_interval
+        ):
+            return self._portal
+
+        # Check if portal needs initialization or recovery
+        max_retries = 3
+        retry_delay = 0.5
+
+        for attempt in range(max_retries):
+            needs_restart = False
+
+            # Check portal health
+            if not self._is_portal_healthy():
+                needs_restart = True
+                logger.info(f"Portal unhealthy, attempting restart (attempt {attempt + 1}/{max_retries})")
+            else:
+                # Portal looks healthy, update health status
+                self._portal_healthy = True
+                self._last_health_check = current_time
+                logger.debug("Portal health check passed")
+                return self._portal
+
+            # Restart portal if needed
+            if needs_restart:
+                with self._lock:
+                    # Double-check inside lock
+                    if not self._is_portal_healthy():
+                        try:
+                            # Clean up old portal if it exists
+                            if self._portal is not None:
+                                logger.debug("Stopping old portal before restart")
+                                try:
+                                    self._portal.call(self._portal.stop)
+                                except Exception as e:
+                                    logger.debug(f"Error stopping old portal: {e}")
+
+                            # Start new runtime
+                            self._start_runtime()
+
+                            # Verify the new portal is healthy
+                            if self._is_portal_healthy():
+                                self._portal_healthy = True
+                                self._last_health_check = time.time()
+                                logger.info("Portal successfully restarted and verified")
+                                return self._portal
+                            else:
+                                logger.error("Portal restart succeeded but health check failed")
+
+                        except Exception as e:
+                            logger.error(f"Portal restart failed: {e}", exc_info=True)
+                            self._portal_healthy = False
+
+            # Wait before retry (except on last attempt)
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+
+        # All retries exhausted
+        raise RuntimeError(
+            f"Failed to initialize or recover async portal after {max_retries} attempts. "
+            "The async runtime may be in an unrecoverable state."
+        )
 
     def _start_runtime(self):
-        """Start the async runtime in a background thread."""
+        """Start the async runtime in a background thread.
+
+        FIXED: Added better error handling and verification.
+        """
         portal_holder = {}
         ready_event = threading.Event()
+        error_holder = {}
 
         def run_async_runtime():
-            async def main():
-                async with anyio.from_thread.BlockingPortal() as portal:
-                    portal_holder["portal"] = portal
-                    ready_event.set()
-                    await portal.sleep_until_stopped()
+            try:
+                async def main():
+                    async with anyio.from_thread.BlockingPortal() as portal:
+                        portal_holder["portal"] = portal
+                        ready_event.set()
+                        logger.debug("Async runtime started, portal ready")
+                        await portal.sleep_until_stopped()
+                        logger.debug("Async runtime stopped")
 
-            anyio.run(main, backend="asyncio")
+                anyio.run(main, backend="asyncio")
+            except Exception as e:
+                error_holder["error"] = e
+                logger.error(f"Async runtime error: {e}", exc_info=True)
+                ready_event.set()  # Unblock waiting thread
 
-        self._thread = threading.Thread(target=run_async_runtime, daemon=True)
+        self._thread = threading.Thread(target=run_async_runtime, daemon=True, name="TaskflowsAsyncRuntime")
         self._thread.start()
-        ready_event.wait(timeout=5)
+
+        # Wait for portal to be ready
+        if not ready_event.wait(timeout=5):
+            raise RuntimeError("Timeout waiting for async runtime to start")
+
+        # Check if there was an error during startup
+        if "error" in error_holder:
+            raise RuntimeError(f"Async runtime failed to start: {error_holder['error']}")
+
         self._portal = portal_holder.get("portal")
         if not self._portal:
-            raise RuntimeError("Failed to initialize async runtime")
+            raise RuntimeError("Failed to initialize async runtime: portal not created")
+
+        logger.debug("Async runtime initialization completed successfully")
 
 
 # Global singleton for runtime management
@@ -385,6 +510,15 @@ async def _async_task_wrapper(
     start_time = time.time()
     status = "failure"  # Default status
 
+    # Retry loop: range(retries + 1) gives us (retries + 1) total attempts
+    # Examples:
+    #   retries=0 -> 1 attempt  (initial attempt only, no retries)
+    #   retries=1 -> 2 attempts (initial attempt + 1 retry)
+    #   retries=3 -> 4 attempts (initial attempt + 3 retries)
+    # The loop variable 'i' represents the attempt number (0-indexed):
+    #   i=0 is the initial attempt
+    #   i=1 is the first retry
+    #   i=2 is the second retry, etc.
     for i in range(retries + 1):
         try:
             # Check if function is async

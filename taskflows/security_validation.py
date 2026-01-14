@@ -39,11 +39,12 @@ def validate_env_file_path(
         raise SecurityError(f"Cannot resolve path {path}: {e}") from e
 
     # Define allowed directories
+    # Note: /tmp removed as it's world-writable and poses security risk
+    # If temporary files are needed, create /tmp/taskflows with restricted permissions
     allowed_bases = [
         Path.home(),
         Path("/etc/taskflows"),
         Path.cwd(),
-        Path("/tmp"),
     ]
 
     # Check if under allowed directory
@@ -99,39 +100,58 @@ def validate_service_name(name: str) -> str:
     return name
 
 
-def validate_command(command: str) -> str:
+def validate_command(command: str, allow_shell_features: bool = False) -> str:
     """Validate command string for safety.
 
     Args:
         command: Command string to validate
+        allow_shell_features: If True, allows potentially dangerous shell patterns.
+                              Use with extreme caution and only for trusted input.
 
     Returns:
         Validated command string
 
     Raises:
-        ValidationError: If command contains unsafe patterns
+        ValidationError: If command contains unsafe patterns and allow_shell_features=False
+        SecurityError: If command contains null bytes (always blocked)
     """
-    # Check for null bytes
+    # Check for null bytes (always blocked)
     if "\x00" in command:
-        raise ValidationError("Command cannot contain null bytes")
+        raise SecurityError("Command cannot contain null bytes")
 
-    # Warn about potentially dangerous patterns (but allow them)
+    # Check for potentially dangerous patterns
     dangerous_patterns = [
-        ("&&", "Command chaining"),
-        ("||", "Command chaining"),
+        ("&&", "Command chaining with AND"),
+        ("||", "Command chaining with OR"),
         (";", "Command separator"),
-        ("|", "Pipe"),
+        ("|", "Pipe operator"),
         ("$(", "Command substitution"),
-        ("`", "Command substitution"),
+        ("`", "Command substitution (backticks)"),
+        ("&", "Background execution"),
+        (">", "Output redirection"),
+        ("<", "Input redirection"),
+        ("\n", "Newline (command separator)"),
     ]
 
     for pattern, description in dangerous_patterns:
         if pattern in command:
-            # Just log warning, don't block (shell features are sometimes needed)
             from taskflows.common import logger
 
-            logger.warning(
-                f"Command contains potentially dangerous pattern '{pattern}' ({description}): {command!r}"
-            )
+            if allow_shell_features:
+                # Log warning but allow
+                logger.warning(
+                    f"Command contains dangerous pattern '{pattern}' ({description}): {command!r}. "
+                    f"Allowed due to allow_shell_features=True"
+                )
+            else:
+                # Block by default for security
+                logger.error(
+                    f"Command contains dangerous pattern '{pattern}' ({description}): {command!r}"
+                )
+                raise SecurityError(
+                    f"Command contains potentially dangerous pattern '{pattern}' ({description}). "
+                    f"If you need to use shell features, set allow_shell_features=True. "
+                    f"Safer alternative: Use command arrays or separate commands."
+                )
 
     return command

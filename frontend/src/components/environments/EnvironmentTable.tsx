@@ -27,8 +27,10 @@ export function EnvironmentTable({ environments, isLoading }: EnvironmentTablePr
     try {
       await deleteMutation.mutateAsync(name);
       showSuccess(`Environment "${name}" deleted`);
-    } catch {
-      showError(`Failed to delete environment "${name}". It may be in use by services.`);
+    } catch (error) {
+      console.error("Failed to delete environment:", error);
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      showError(`Failed to delete environment "${name}": ${errorMessage}`);
     }
   };
 

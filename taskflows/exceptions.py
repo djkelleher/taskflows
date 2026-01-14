@@ -120,30 +120,6 @@ class SecurityError(TaskflowsError):
     pass
 
 
-class AuthenticationError(SecurityError):
-    """Authentication failed."""
-
-    pass
-
-
-class AuthorizationError(SecurityError):
-    """Authorization/permission denied."""
-
-    pass
-
-
-class HMACValidationError(SecurityError):
-    """HMAC signature validation failed."""
-
-    pass
-
-
-class JWTValidationError(SecurityError):
-    """JWT token validation failed."""
-
-    pass
-
-
 # Configuration exceptions
 class ConfigurationError(TaskflowsError):
     """Configuration error."""

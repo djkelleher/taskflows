@@ -25,8 +25,10 @@ export function ServiceRow({ service, isSelected, onToggleSelect }: ServiceRowPr
     try {
       await serviceActionMutation.mutateAsync({ serviceName: service.name, action });
       showSuccess(`Service ${service.name} ${action} initiated`);
-    } catch {
-      showError(`Failed to ${action} service ${service.name}`);
+    } catch (error) {
+      console.error(`Failed to ${action} service:`, error);
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      showError(`Failed to ${action} service ${service.name}: ${errorMessage}`);
     } finally {
       setActionInProgress(null);
     }

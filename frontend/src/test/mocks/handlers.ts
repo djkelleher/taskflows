@@ -16,7 +16,9 @@ export const handlers = [
 
   http.post("/auth/refresh", async ({ request }) => {
     const body = (await request.json()) as { refresh_token: string };
-    if (body.refresh_token === "mock-refresh-token") {
+    // Accept multiple valid refresh tokens for testing
+    const validRefreshTokens = ["mock-refresh-token", "valid-refresh", "test-refresh"];
+    if (validRefreshTokens.includes(body.refresh_token)) {
       return HttpResponse.json({
         access_token: "new-mock-access-token",
       });

@@ -44,32 +44,75 @@ class PeriodicMsgs:
 
 
 class PeriodicMsgSender:
-    """Buffer alerts and concatenate into one message."""
+    """Buffer alerts and concatenate into one message.
+
+    FIXED: Added task tracking, cancellation support, proper error handling,
+    and fixed time unit bug (pub_freq is in minutes, not seconds).
+    """
 
     def __init__(self) -> None:
         self._periodic_msgs: Dict[int, List[PeriodicMsgs]] = {}
+        # Track tasks for proper cleanup and cancellation
+        self._periodic_tasks: Dict[int, asyncio.Task] = {}
+        self._shutting_down: bool = False
 
     async def add_periodic_pub_group_member(self, config: PeriodicMsgs, pub_freq: int):
         """
         Add a function to call at specified frequency.
 
         Args:
-            func (Callable): Function to call periodically.
-            pub_freq (int, optional): Publish frequency in minutes. Defaults to 5.
+            config: Configuration for periodic messages
+            pub_freq: Publish frequency in minutes (will be converted to seconds)
         """
-        # (self._on_pnl_period, self._on_portfolio_period):
         if pub_freq in self._periodic_msgs:
             self._periodic_msgs[pub_freq].append(config)
         else:
             self._periodic_msgs[pub_freq] = [config]
-            asyncio.create_task(self._on_func_pub_period(pub_freq))
+            # Create and track the periodic task
+            task = asyncio.create_task(self._on_func_pub_period(pub_freq))
+            self._periodic_tasks[pub_freq] = task
 
     async def _on_func_pub_period(self, pub_freq: int):
-        cfgs = self._periodic_msgs[pub_freq]
-        for cfg in cfgs:
-            await cfg.publish()
-        await asyncio.sleep(pub_freq)
-        asyncio.create_task(self._on_func_pub_period(pub_freq))
+        """Periodic task loop with proper error handling and cancellation support."""
+        freq_seconds = pub_freq * 60  # Convert minutes to seconds
+        logger.info(f"Started periodic message sender (every {pub_freq} minutes)")
+
+        while not self._shutting_down:
+            try:
+                cfgs = self._periodic_msgs.get(pub_freq, [])
+                for cfg in cfgs:
+                    try:
+                        await cfg.publish()
+                    except Exception as e:
+                        logger.error(f"Error publishing periodic message: {e}", exc_info=True)
+                        # Continue with other configs even if one fails
+
+                # Sleep for the specified frequency
+                await asyncio.sleep(freq_seconds)
+
+            except asyncio.CancelledError:
+                logger.info(f"Periodic message sender cancelled (freq={pub_freq} min)")
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in periodic message loop: {e}", exc_info=True)
+                # Wait a bit before retrying to avoid tight error loops
+                await asyncio.sleep(min(freq_seconds, 60))
+
+    def cancel_periodic_tasks(self):
+        """Cancel all periodic message tasks. Call during shutdown."""
+        self._shutting_down = True
+        for pub_freq, task in list(self._periodic_tasks.items()):
+            if not task.done():
+                logger.debug(f"Cancelling periodic task for freq={pub_freq} min")
+                task.cancel()
+        self._periodic_tasks.clear()
+
+    async def shutdown(self):
+        """Graceful shutdown: cancel all tasks and wait for them to complete."""
+        self.cancel_periodic_tasks()
+        # Wait for all tasks to actually cancel
+        if self._periodic_tasks:
+            await asyncio.gather(*self._periodic_tasks.values(), return_exceptions=True)
 
 
 class AlertLogger:
@@ -244,14 +287,31 @@ async def send_alert(
     sent_ok = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Handle exceptions and convert to boolean results
+    # FIXED: Improved error handling and logging for partial failures
     results = []
     for i, result in enumerate(sent_ok):
         if isinstance(result, Exception):
-            logger.error(f"Error sending alert to {send_to[i]}: {result}")
+            # Log detailed exception information
+            logger.error(
+                f"Error sending alert to {send_to[i]} (type: {type(send_to[i]).__name__}): {result}",
+                exc_info=result,
+            )
             results.append(False)
-        else:
+        elif isinstance(result, bool):
             results.append(result)
+        else:
+            # Unexpected return type - log warning and treat as success if truthy
+            logger.warning(
+                f"Unexpected return type from send alert: {type(result)} = {result!r}"
+            )
+            results.append(bool(result))
 
     n_ok = sum(results)
-    logger.info(f"Sent {n_ok}/{len(results)} alerts successfully: {send_to}")
+    n_total = len(results)
+    if n_ok == n_total:
+        logger.info(f"Sent all {n_total} alerts successfully to: {send_to}")
+    elif n_ok == 0:
+        logger.error(f"Failed to send all {n_total} alerts to: {send_to}")
+    else:
+        logger.warning(f"Partial success: Sent {n_ok}/{n_total} alerts to: {send_to}")
     return all(results)

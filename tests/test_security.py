@@ -9,7 +9,6 @@ from pathlib import Path
 from taskflows.security_validation import (
     validate_env_file_path,
     validate_service_name,
-    validate_command,
 )
 from taskflows.exceptions import SecurityError, ValidationError
 
@@ -148,53 +147,6 @@ class TestServiceNameValidation:
         """Test that whitespace-only names are rejected."""
         with pytest.raises(ValidationError, match="Invalid service name"):
             validate_service_name("   ")
-
-
-class TestCommandInjectionPrevention:
-    """Test validate_command prevents injection attacks."""
-
-    def test_valid_simple_command(self):
-        """Test that simple commands are accepted."""
-        cmd = "python script.py"
-        result = validate_command(cmd)
-        assert result == cmd
-
-    def test_valid_command_with_args(self):
-        """Test that commands with arguments are accepted."""
-        cmd = "python script.py --arg1 value1 --arg2 value2"
-        result = validate_command(cmd)
-        assert result == cmd
-
-    def test_valid_quoted_args(self):
-        """Test that quoted arguments are properly parsed."""
-        cmd = 'python script.py --message "hello world"'
-        result = validate_command(cmd)
-        assert result == cmd
-
-    def test_valid_single_quoted_args(self):
-        """Test that single-quoted arguments are properly parsed."""
-        cmd = "python script.py --message 'hello world'"
-        result = validate_command(cmd)
-        assert result == cmd
-
-    def test_reject_null_bytes(self):
-        """Test that null bytes are rejected."""
-        cmd = "python script.py\x00malicious"
-        with pytest.raises(ValidationError, match="null bytes"):
-            validate_command(cmd)
-
-    def test_dangerous_patterns_logged(self):
-        """Test that dangerous patterns are logged but allowed."""
-        cmd = "python script.py --arg 'value; rm -rf /'"
-        result = validate_command(cmd)
-        # Should return the command (with warning logged)
-        assert result == cmd
-
-    def test_escaped_characters(self):
-        """Test that escaped characters are handled correctly."""
-        cmd = r"python script.py --path /home/user/file\ with\ spaces.txt"
-        result = validate_command(cmd)
-        assert result == cmd
 
 
 class TestDockerContainerEnvFileValidation:

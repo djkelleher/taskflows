@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from pyarrow import parquet
 
+from ..common import logger
 from .s3 import S3, S3Cfg, is_s3_path
 
 
@@ -100,34 +101,71 @@ class Files:
     ):
         """Move or copy file to a new location."""
         is_s3_move = False
-        if is_s3_path(src_path):
-            if is_s3_path(dst_path):
-                is_s3_move = True
-                self.s3.move(
-                    src_path=src_path, dst_path=dst_path, delete_src=delete_src
-                )
-            else:
-                if os.path.isdir(dst_path):
-                    dst_path = f"{dst_path}/{Path(src_path).name}"
-                # TODO make work with miltiple files.
-                self.s3.download_file(
-                    s3_path=src_path,
-                    local_path=dst_path,
-                    overwrite=True,
-                )
+        transfer_error = False
 
-        elif is_s3_path(dst_path):
-            # upload local file to s3.
-            bucket_name, partition = self.s3.bucket_and_partition(
-                dst_path, require_partition=False
-            )
-            if not partition:
-                partition = str(src_path).split(f"{bucket_name}/")[-1].lstrip("/")
-            self.s3.client.upload_file(str(src_path), bucket_name, partition)
-        else:
-            shutil.copy(src_path, dst_path)
-        if delete_src:
-            if not is_s3_move and not self.exists(dst_path):
-                # would  already be checked for s3 move.
-                raise FileNotFoundError(f"Destination file {dst_path} does not exist after transfer")
-            self.delete(src_path)
+        try:
+            if is_s3_path(src_path):
+                if is_s3_path(dst_path):
+                    is_s3_move = True
+                    self.s3.move(
+                        src_path=src_path, dst_path=dst_path, delete_src=delete_src
+                    )
+                else:
+                    if os.path.isdir(dst_path):
+                        dst_path = f"{dst_path}/{Path(src_path).name}"
+                    # TODO make work with miltiple files.
+                    try:
+                        self.s3.download_file(
+                            s3_path=src_path,
+                            local_path=dst_path,
+                            overwrite=True,
+                        )
+                    except Exception:
+                        transfer_error = True
+                        # Clean up partial local file on download error
+                        if os.path.exists(dst_path):
+                            try:
+                                os.remove(dst_path)
+                            except Exception as cleanup_err:
+                                logger.warning(f"Failed to clean up partial file {dst_path}: {cleanup_err}")
+                        raise
+
+            elif is_s3_path(dst_path):
+                # upload local file to s3.
+                bucket_name, partition = self.s3.bucket_and_partition(
+                    dst_path, require_partition=False
+                )
+                if not partition:
+                    partition = str(src_path).split(f"{bucket_name}/")[-1].lstrip("/")
+                try:
+                    self.s3.client.upload_file(str(src_path), bucket_name, partition)
+                except Exception:
+                    transfer_error = True
+                    # Clean up partial S3 object on upload error
+                    try:
+                        self.delete(dst_path, if_exists=True)
+                    except Exception as cleanup_err:
+                        logger.warning(f"Failed to clean up partial S3 object {dst_path}: {cleanup_err}")
+                    raise
+            else:
+                try:
+                    shutil.copy(src_path, dst_path)
+                except Exception:
+                    transfer_error = True
+                    # Clean up partial destination file on copy error
+                    if os.path.exists(dst_path):
+                        try:
+                            os.remove(dst_path)
+                        except Exception as cleanup_err:
+                            logger.warning(f"Failed to clean up partial file {dst_path}: {cleanup_err}")
+                    raise
+
+            if delete_src:
+                if not is_s3_move and not self.exists(dst_path):
+                    # would  already be checked for s3 move.
+                    raise FileNotFoundError(f"Destination file {dst_path} does not exist after transfer")
+                self.delete(src_path)
+        finally:
+            # Additional cleanup if error occurred and delete_src was requested
+            # but source wasn't deleted yet (only applies if error in delete_src path)
+            pass

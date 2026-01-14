@@ -199,3 +199,84 @@ def test_runtime_manager_handles_none_thread():
     # Verify thread was created
     assert manager._thread is not None
     assert manager._thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "retries,expected_attempts",
+    [
+        (0, 1),  # Initial attempt only, no retries
+        (1, 2),  # Initial attempt + 1 retry
+        (3, 4),  # Initial attempt + 3 retries
+        (5, 6),  # Initial attempt + 5 retries
+    ],
+)
+def test_retry_count_behavior(retries, expected_attempts):
+    """Test that retries parameter gives correct number of total attempts.
+
+    Verifies documented behavior in tasks.py:
+    - retries=0 -> 1 attempt (initial only)
+    - retries=1 -> 2 attempts (initial + 1 retry)
+    - retries=3 -> 4 attempts (initial + 3 retries)
+
+    The formula is: total_attempts = retries + 1
+    """
+    attempt_count = 0
+
+    @task(
+        name="test_retry_count",
+        required=True,
+        retries=retries,
+    )
+    def count_attempts():
+        nonlocal attempt_count
+        attempt_count += 1
+        # Always fail to force retries
+        raise RuntimeError(f"Attempt {attempt_count}")
+
+    # Should exhaust all retries and raise
+    with pytest.raises(RuntimeError):
+        count_attempts()
+
+    # Verify the correct number of attempts were made
+    assert attempt_count == expected_attempts, (
+        f"Expected {expected_attempts} attempts (retries={retries}), "
+        f"but got {attempt_count}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retries,expected_attempts",
+    [
+        (0, 1),  # Initial attempt only, no retries
+        (1, 2),  # Initial attempt + 1 retry
+        (3, 4),  # Initial attempt + 3 retries
+    ],
+)
+async def test_async_retry_count_behavior(retries, expected_attempts):
+    """Test that retries parameter gives correct number of total attempts for async tasks.
+
+    Verifies documented behavior matches async task execution.
+    """
+    attempt_count = 0
+
+    @task(
+        name="test_async_retry_count",
+        required=True,
+        retries=retries,
+    )
+    async def count_attempts():
+        nonlocal attempt_count
+        attempt_count += 1
+        # Always fail to force retries
+        raise RuntimeError(f"Attempt {attempt_count}")
+
+    # Should exhaust all retries and raise
+    with pytest.raises(RuntimeError):
+        await count_attempts()
+
+    # Verify the correct number of attempts were made
+    assert attempt_count == expected_attempts, (
+        f"Expected {expected_attempts} attempts (retries={retries}), "
+        f"but got {attempt_count}"
+    )

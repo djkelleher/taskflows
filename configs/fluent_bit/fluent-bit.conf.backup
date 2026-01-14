@@ -1,0 +1,66 @@
+[SERVICE]
+    # Fluent Bit core configuration
+    Flush        1
+    Log_Level    info
+    HTTP_Server  On
+    HTTP_Listen  0.0.0.0
+    HTTP_Port    2020
+    Parsers_File /fluent-bit/etc/parsers.conf
+
+# Input: Systemd Journal for user services (UID 1000) - taskflows only
+[INPUT]
+    Name                systemd
+    Tag                 logs
+    Systemd_Filter      _UID=1000
+    Systemd_Filter      _SYSTEMD_USER_UNIT=taskflows-*.service
+    Read_From_Tail      On
+    Strip_Underscores   On
+    DB                  /var/log/flb_user.db
+    DB.Sync             Normal
+
+# Input: Docker containers using journald driver (system journal)
+[INPUT]
+    Name                systemd
+    Tag                 logs
+    Path                /var/log/journal
+    Systemd_Filter      SYSLOG_IDENTIFIER=docker.fluent-bit
+    Systemd_Filter      SYSLOG_IDENTIFIER=docker.gateway
+    Systemd_Filter      SYSLOG_IDENTIFIER=docker.grafana
+    Systemd_Filter      SYSLOG_IDENTIFIER=docker.loki
+    Systemd_Filter      SYSLOG_IDENTIFIER=docker.minio
+    Systemd_Filter      SYSLOG_IDENTIFIER=docker.pgadmin
+    Systemd_Filter      SYSLOG_IDENTIFIER=docker.redis
+    Systemd_Filter      SYSLOG_IDENTIFIER=docker.timescale
+    Read_From_Tail      On
+    Strip_Underscores   On
+    DB                  /var/log/flb_docker_v3.db
+    DB.Sync             Normal
+
+# Filter: Process all logs with simplified script
+[FILTER]
+    Name                lua
+    Match               logs
+    Script              /fluent-bit/etc/scripts/log_processor.lua
+    Call                process_log
+
+# Output: Loki - All processed logs
+[OUTPUT]
+    Name                loki
+    Match               logs
+    Host                ${LOKI_HOST}
+    Port                ${LOKI_PORT}
+    Labels              log_source=$log_source,host=${HOSTNAME}
+    Label_Keys          $service_name
+    Remove_Keys         service_name,log_source
+    # Send only the MESSAGE field as plain text (no JSON encoding)
+    Drop_Single_Key     On
+    Auto_Kubernetes_Labels  Off
+    Retry_Limit         False
+    HTTP_User           ${LOKI_USER}
+    HTTP_Passwd         ${LOKI_PASSWORD}
+
+# Output: Standard output for debugging (disabled)
+#[OUTPUT]
+#    Name                stdout
+#    Match               logs
+#    Format              json_lines

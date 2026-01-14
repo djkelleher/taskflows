@@ -1,6 +1,7 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { clsx } from "clsx";
 import { X, CheckCircle, XCircle, AlertTriangle, Info } from "lucide-react";
+import { ToastContext } from "@/contexts/ToastContext";
 
 type ToastType = "success" | "error" | "warning" | "info";
 
@@ -9,15 +10,6 @@ interface Toast {
   message: string;
   type: ToastType;
 }
-
-interface ToastContextValue {
-  showSuccess: (message: string) => void;
-  showError: (message: string) => void;
-  showWarning: (message: string) => void;
-  showInfo: (message: string) => void;
-}
-
-const ToastContext = createContext<ToastContextValue | null>(null);
 
 const typeStyles: Record<ToastType, string> = {
   success: "bg-neon-green text-gray-900",
@@ -71,18 +63,38 @@ interface ToastProviderProps {
 
 export function ToastProvider({ children }: ToastProviderProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // Track all active timeouts to clean up on unmount
+  const timeoutsRef = useRef<Map<string, number>>(new Map());
+
+  // Cleanup all timeouts on unmount
+  useEffect(() => {
+    return () => {
+      timeoutsRef.current.forEach((timeoutId) => clearTimeout(timeoutId));
+      timeoutsRef.current.clear();
+    };
+  }, []);
 
   const addToast = useCallback((message: string, type: ToastType) => {
-    const id = Math.random().toString(36).substring(2, 9);
+    const id = crypto.randomUUID();
     setToasts((prev) => [...prev, { id, message, type }]);
 
-    setTimeout(() => {
+    // Schedule auto-removal and track the timeout
+    const timeoutId = setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, typeDurations[type]);
+      timeoutsRef.current.delete(id);
+    }, typeDurations[type]) as unknown as number;
+
+    timeoutsRef.current.set(id, timeoutId);
   }, []);
 
   const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+    // Clear the timeout if it exists (manual removal before auto-removal)
+    const timeoutId = timeoutsRef.current.get(id);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutsRef.current.delete(id);
+    }
   }, []);
 
   const showSuccess = useCallback((message: string) => addToast(message, "success"), [addToast]);
@@ -102,10 +114,3 @@ export function ToastProvider({ children }: ToastProviderProps) {
   );
 }
 
-export function useToast(): ToastContextValue {
-  const context = useContext(ToastContext);
-  if (!context) {
-    throw new Error("useToast must be used within a ToastProvider");
-  }
-  return context;
-}

@@ -35,8 +35,10 @@ export function BatchActions() {
       await batchActionMutation.mutateAsync({ serviceNames, operation });
       showSuccess(`Batch ${operation} initiated for ${selectedCount} service(s)`);
       clearSelection();
-    } catch {
-      showError(`Failed to ${operation} selected services`);
+    } catch (error) {
+      console.error(`Failed to ${operation} services:`, error);
+      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      showError(`Failed to ${operation} selected services: ${errorMessage}`);
     } finally {
       setActionInProgress(null);
     }

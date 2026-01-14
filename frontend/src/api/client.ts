@@ -1,32 +1,83 @@
 import createClient, { type Middleware } from "openapi-fetch";
 import { useAuthStore } from "@/stores/authStore";
-import type { LoginRequest, LoginResponse, RefreshResponse } from "@/types";
+import type { LoginRequest, LoginResponse, RefreshResponse, NamedEnvironment } from "@/types";
 
 // Base API client without auth (for login endpoint)
 const baseClient = createClient({ baseUrl: "" });
 
+// Mutex to prevent concurrent token refreshes
+let refreshPromise: Promise<string | null> | null = null;
+
 // Refresh token and return new access token
+// Uses mutex to ensure only one refresh happens at a time
 async function refreshAccessToken(): Promise<string | null> {
+  // If a refresh is already in progress, return that promise
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
   const refreshToken = useAuthStore.getState().refreshToken;
   if (!refreshToken) return null;
 
-  try {
-    const response = await fetch("/auth/refresh", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    });
+  // Create and store the refresh promise
+  refreshPromise = (async () => {
+    try {
+      const response = await fetch("/auth/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
 
-    if (response.ok) {
-      const data = (await response.json()) as RefreshResponse;
-      useAuthStore.getState().refreshAccessToken(data.access_token);
-      return data.access_token;
+      if (response.ok) {
+        const data = (await response.json()) as RefreshResponse;
+        useAuthStore.getState().refreshAccessToken(data.access_token);
+        return data.access_token;
+      }
+    } catch (err) {
+      console.error("Token refresh failed:", err);
     }
-  } catch (err) {
-    console.error("Token refresh failed:", err);
+
+    return null;
+  })();
+
+  try {
+    return await refreshPromise;
+  } finally {
+    // Clear the promise after completion (success or failure)
+    refreshPromise = null;
+  }
+}
+
+// Standardized fetch with 401 retry logic
+// Automatically refreshes token and retries once on 401, or logs out if refresh fails
+async function fetchWithAuth(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const token = useAuthStore.getState().accessToken;
+
+  // Add Authorization header to init
+  const headers = new Headers(init?.headers);
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
   }
 
-  return null;
+  // Make initial request
+  const response = await fetch(input, { ...init, headers });
+
+  // Handle 401 - refresh token and retry once
+  if (response.status === 401) {
+    const newToken = await refreshAccessToken();
+    if (newToken) {
+      // Retry with new token
+      const retryHeaders = new Headers(init?.headers);
+      retryHeaders.set("Authorization", `Bearer ${newToken}`);
+      return fetch(input, { ...init, headers: retryHeaders });
+    } else {
+      // Refresh failed - logout and redirect
+      useAuthStore.getState().logout();
+      throw new Error("Unauthorized - session expired");
+    }
+  }
+
+  return response;
 }
 
 // Auth middleware - adds Authorization header and handles 401s
@@ -49,8 +100,8 @@ const authMiddleware: Middleware = {
         return fetch(newRequest);
       } else {
         // Refresh failed, logout
+        // Auth store logout will trigger redirect to /login via protected routes
         useAuthStore.getState().logout();
-        window.location.href = "/login";
       }
     }
     return response;
@@ -94,46 +145,26 @@ export async function logout(): Promise<void> {
 
 // Service API functions
 export async function getServices() {
-  const token = useAuthStore.getState().accessToken;
-  const response = await fetch("/api/services?as_json=true", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (response.status === 401) {
-    const newToken = await refreshAccessToken();
-    if (newToken) {
-      const retryResponse = await fetch("/api/services?as_json=true", {
-        headers: { Authorization: `Bearer ${newToken}` },
-      });
-      if (!retryResponse.ok) throw new Error("Failed to fetch services");
-      return retryResponse.json();
-    }
-    throw new Error("Unauthorized");
-  }
+  const response = await fetchWithAuth("/api/services?as_json=true");
 
   if (!response.ok) throw new Error("Failed to fetch services");
   return response.json();
 }
 
 export async function serviceAction(serviceName: string, action: "start" | "stop" | "restart") {
-  const token = useAuthStore.getState().accessToken;
-  const response = await fetch(`/api/${action}?match=${encodeURIComponent(serviceName)}&as_json=true`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const response = await fetchWithAuth(
+    `/api/${action}?match=${encodeURIComponent(serviceName)}&as_json=true`,
+    { method: "POST" }
+  );
 
   if (!response.ok) throw new Error(`Failed to ${action} service`);
   return response.json();
 }
 
 export async function batchAction(serviceNames: string[], operation: "start" | "stop" | "restart") {
-  const token = useAuthStore.getState().accessToken;
-  const response = await fetch("/api/batch", {
+  const response = await fetchWithAuth("/api/batch", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ service_names: serviceNames, operation }),
   });
 
@@ -142,10 +173,9 @@ export async function batchAction(serviceNames: string[], operation: "start" | "
 }
 
 export async function getLogs(serviceName: string, nLines: number = 1000) {
-  const token = useAuthStore.getState().accessToken;
-  const response = await fetch(`/api/logs?service_name=${encodeURIComponent(serviceName)}&n_lines=${nLines}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const response = await fetchWithAuth(
+    `/api/logs?service_name=${encodeURIComponent(serviceName)}&n_lines=${nLines}`
+  );
 
   if (!response.ok) throw new Error("Failed to fetch logs");
   return response.json();
@@ -153,33 +183,23 @@ export async function getLogs(serviceName: string, nLines: number = 1000) {
 
 // Environment API functions
 export async function getEnvironments() {
-  const token = useAuthStore.getState().accessToken;
-  const response = await fetch("/api/environments", {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const response = await fetchWithAuth("/api/environments");
 
   if (!response.ok) throw new Error("Failed to fetch environments");
   return response.json();
 }
 
 export async function getEnvironment(name: string) {
-  const token = useAuthStore.getState().accessToken;
-  const response = await fetch(`/api/environments/${encodeURIComponent(name)}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const response = await fetchWithAuth(`/api/environments/${encodeURIComponent(name)}`);
 
   if (!response.ok) throw new Error("Failed to fetch environment");
   return response.json();
 }
 
-export async function createEnvironment(environment: unknown) {
-  const token = useAuthStore.getState().accessToken;
-  const response = await fetch("/api/environments", {
+export async function createEnvironment(environment: NamedEnvironment) {
+  const response = await fetchWithAuth("/api/environments", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(environment),
   });
 
@@ -187,14 +207,10 @@ export async function createEnvironment(environment: unknown) {
   return response.json();
 }
 
-export async function updateEnvironment(name: string, environment: unknown) {
-  const token = useAuthStore.getState().accessToken;
-  const response = await fetch(`/api/environments/${encodeURIComponent(name)}`, {
+export async function updateEnvironment(name: string, environment: NamedEnvironment) {
+  const response = await fetchWithAuth(`/api/environments/${encodeURIComponent(name)}`, {
     method: "PUT",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(environment),
   });
 
@@ -203,10 +219,8 @@ export async function updateEnvironment(name: string, environment: unknown) {
 }
 
 export async function deleteEnvironment(name: string) {
-  const token = useAuthStore.getState().accessToken;
-  const response = await fetch(`/api/environments/${encodeURIComponent(name)}`, {
+  const response = await fetchWithAuth(`/api/environments/${encodeURIComponent(name)}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` },
   });
 
   if (!response.ok) throw new Error("Failed to delete environment");

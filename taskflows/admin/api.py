@@ -29,7 +29,15 @@ from taskflows.admin.core import (
     upsert_server,
 )
 from taskflows.admin.utils import with_hostname
-from taskflows.admin.security import security_config, validate_hmac_request
+from taskflows.admin.security import (
+    security_config,
+    validate_hmac_request,
+    create_csrf_token_data,
+    store_csrf_token,
+    get_csrf_token_data,
+    remove_csrf_token,
+    validate_csrf_token,
+)
 from taskflows.common import Config, logger
 from taskflows.service import RestartPolicy, Service, Venv
 
@@ -93,7 +101,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         "error_type": type(exc).__name__,
         "path": request.url.path,
     }
-    if tb:
+    # Only include traceback in development mode (DEBUG=true)
+    # This prevents information disclosure in production
+    if tb and os.getenv("DEBUG", "").lower() in ("true", "1", "yes"):
         payload["traceback"] = tb
     # Reuse hostname wrapper for consistency
     return JSONResponse(status_code=500, content=with_hostname(payload))
@@ -236,6 +246,83 @@ async def jwt_validation(request: Request, call_next):
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"detail": "Authentication failed"},
         )
+
+
+# CSRF validation middleware (for UI routes)
+@app.middleware("http")
+async def csrf_validation(request: Request, call_next):
+    """Validate CSRF token for state-changing operations (POST/PUT/DELETE/PATCH).
+
+    Defense-in-depth measure against CSRF attacks. While JWT-in-header is already
+    CSRF-resistant, this provides an additional security layer.
+    """
+    # Skip if UI is not enabled or CSRF is disabled
+    if not os.getenv("TASKFLOWS_ENABLE_UI") or not security_config.enable_csrf:
+        return await call_next(request)
+
+    # Skip CSRF for:
+    # 1. Safe methods (GET, HEAD, OPTIONS)
+    # 2. Auth endpoints (login, refresh - they're establishing the token)
+    # 3. API endpoints using HMAC
+    # 4. Static files
+    # 5. Health check
+    if (
+        request.method in ["GET", "HEAD", "OPTIONS"]
+        or request.url.path in ["/health", "/auth/login", "/auth/refresh"]
+        or request.url.path.startswith("/api/")  # HMAC-protected
+        or request.url.path.startswith("/static/")
+    ):
+        logger.debug(f"CSRF skipped for {request.method} {request.url.path}")
+        return await call_next(request)
+
+    # Get username from request state (set by JWT middleware)
+    username = getattr(request.state, "user", None)
+    if not username:
+        logger.warning(f"CSRF check: No user in request state for {request.url.path}")
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Authentication required"},
+        )
+
+    # Check for CSRF token in header
+    csrf_token = request.headers.get(security_config.csrf_header)
+    if not csrf_token:
+        logger.warning(f"CSRF check failed: Missing token for user {username} on {request.url.path}")
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "CSRF token required"},
+        )
+
+    # Get stored CSRF token data
+    from taskflows.admin.auth import load_ui_config
+
+    token_data = get_csrf_token_data(username)
+    if not token_data:
+        logger.warning(f"CSRF check failed: No stored token for user {username}")
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": "CSRF token expired or invalid"},
+        )
+
+    # Validate the token
+    ui_config = load_ui_config()
+    is_valid, error_msg = validate_csrf_token(
+        csrf_token,
+        username,
+        token_data["expiry"],
+        token_data["signature"],
+        ui_config.jwt_secret,
+    )
+
+    if not is_valid:
+        logger.warning(f"CSRF check failed for user {username} on {request.url.path}: {error_msg}")
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": error_msg or "Invalid CSRF token"},
+        )
+
+    logger.debug(f"CSRF validated for user {username} on {request.url.path}")
+    return await call_next(request)
 
 
 @app.get("/health", tags=["monitoring"])
@@ -415,9 +502,12 @@ if os.getenv("TASKFLOWS_ENABLE_UI"):
         LoginRequest,
     )
 
-    @app.post("/auth/login", response_model=JWTToken)
+    @app.post("/auth/login")
     async def login(credentials: LoginRequest):
-        """Login with username and password."""
+        """Login with username and password.
+
+        Returns JWT access/refresh tokens and CSRF token for defense-in-depth.
+        """
         user = authenticate_user(credentials.username, credentials.password)
         if not user:
             logger.warning(f"Failed login attempt for user {credentials.username}")
@@ -437,18 +527,25 @@ if os.getenv("TASKFLOWS_ENABLE_UI"):
         access_token = create_access_token(credentials.username, ui_config.jwt_secret)
         refresh_token = create_refresh_token(credentials.username, ui_config.jwt_secret)
 
+        # Create and store CSRF token for defense-in-depth
+        csrf_data = create_csrf_token_data(credentials.username, ui_config.jwt_secret)
+        store_csrf_token(credentials.username, csrf_data)
+
         update_user_last_login(credentials.username)
 
-        logger.info(f"User {credentials.username} logged in successfully")
-        return JWTToken(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            expires_in=60 * 60,
-        )
+        logger.info(f"User {credentials.username} logged in successfully with CSRF protection")
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_in": 60 * 60,
+            "token_type": "bearer",
+            "csrf_token": csrf_data["token"],
+            "csrf_expires_in": security_config.csrf_token_expiry,
+        }
 
     @app.post("/auth/refresh")
     async def refresh(refresh_token: str = Body(..., embed=True)):
-        """Get new access token using refresh token."""
+        """Get new access token and CSRF token using refresh token."""
         ui_config = load_ui_config()
         if not ui_config.jwt_secret:
             raise HTTPException(
@@ -465,15 +562,27 @@ if os.getenv("TASKFLOWS_ENABLE_UI"):
             )
 
         new_access_token = create_access_token(username, ui_config.jwt_secret)
-        logger.info(f"Refreshed access token for user {username}")
-        return {"access_token": new_access_token, "token_type": "bearer"}
+
+        # Also refresh CSRF token
+        csrf_data = create_csrf_token_data(username, ui_config.jwt_secret)
+        store_csrf_token(username, csrf_data)
+
+        logger.info(f"Refreshed access token and CSRF token for user {username}")
+        return {
+            "access_token": new_access_token,
+            "token_type": "bearer",
+            "csrf_token": csrf_data["token"],
+            "csrf_expires_in": security_config.csrf_token_expiry,
+        }
 
     @app.post("/auth/logout")
     async def logout(request: Request):
-        """Logout (client-side token deletion primarily)."""
+        """Logout and remove CSRF token."""
         username = getattr(request.state, "user", None)
         if username:
-            logger.info(f"User {username} logged out")
+            # Remove CSRF token from server
+            remove_csrf_token(username)
+            logger.info(f"User {username} logged out, CSRF token removed")
         return {"message": "Logged out successfully"}
 
     # Environments API endpoints
