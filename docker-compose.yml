@@ -20,17 +20,17 @@ services:
       start_period: 30s
 
   fluent-bit:
-    image: fluent/fluent-bit:latest
+    image: fluent/fluent-bit:4.2
     container_name: fluent-bit
     network_mode: host
+    command: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.yaml"]
     depends_on:
-      - loki
+      loki:
+        condition: service_healthy
     environment:
       - LOKI_HOST=localhost
       - LOKI_PORT=3100
       - ENVIRONMENT=production
-      - LOKI_USER=admin
-      - LOKI_PASSWORD=admin
       - HOSTNAME=fluent-bit-host
     volumes:
       - /var/log/journal:/var/log/journal:ro
@@ -38,7 +38,7 @@ services:
       - /run/systemd/journal:/run/systemd/journal:ro
       - /run/user/1000/systemd/journal:/run/user/1000/systemd/journal:ro
       - /etc/machine-id:/etc/machine-id:ro
-      - ./configs/fluent_bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./configs/fluent_bit/fluent-bit.yaml:/fluent-bit/etc/fluent-bit.yaml:ro
       - ./configs/fluent_bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
       - ./configs/fluent_bit/scripts:/fluent-bit/etc/scripts:ro
       - fluent-bit-state:/var/log
@@ -50,11 +50,12 @@ services:
       driver: journald
       options:
         tag: docker.{{.Name}}
-    #healthcheck:
-    #  test: ["CMD", "curl", "-f", "http://localhost:2020/api/v1/health"]
-    #  interval: 30s
-    #  timeout: 10s
-    #  retries: 3
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:2020/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   grafana:
     image: grafana/grafana:latest

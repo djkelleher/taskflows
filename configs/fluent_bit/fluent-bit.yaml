@@ -1,0 +1,66 @@
+# Fluent Bit v4.2 YAML Configuration
+# Migrated from fluent-bit.conf (INI format)
+
+service:
+  flush: 5
+  workers: 2
+  log_level: info
+  http_server: true
+  http_listen: 0.0.0.0
+  http_port: 2020
+  parsers_file: /fluent-bit/etc/parsers.conf
+
+pipeline:
+  inputs:
+    # Input: Systemd Journal for user services (UID 1000) - taskflows only
+    - name: systemd
+      tag: user_logs
+      systemd_filter:
+        - _UID=1000
+        - _SYSTEMD_USER_UNIT=taskflows-*.service
+      read_from_tail: true
+      strip_underscores: true
+      db: /var/log/flb_user.db
+      db.sync: normal
+      mem_buf_limit: 10MB
+
+    # Input: Docker containers using journald driver (system journal)
+    - name: systemd
+      tag: docker_logs
+      path: /var/log/journal
+      read_from_tail: true
+      strip_underscores: true
+      db: /var/log/flb_docker_v3.db
+      db.sync: normal
+      mem_buf_limit: 10MB
+
+  filters:
+    # Filter: Match only docker.* containers
+    - name: grep
+      match: docker_logs
+      regex: SYSLOG_IDENTIFIER ^docker\.
+
+    # Filter: Process all logs with Lua script
+    - name: lua
+      match: "*_logs"
+      script: /fluent-bit/etc/scripts/log_processor.lua
+      call: process_log
+
+  outputs:
+    # Output: Loki - All processed logs
+    - name: loki
+      match: "*_logs"
+      host: ${LOKI_HOST}
+      port: ${LOKI_PORT}
+      labels: log_source=$log_source,host=${HOSTNAME}
+      label_keys: $service_name
+      remove_keys: service_name,log_source
+      drop_single_key: true
+      auto_kubernetes_labels: false
+      retry_limit: 5
+      compress: gzip
+
+    # Output: Standard output for debugging (disabled)
+    # - name: stdout
+    #   match: "*_logs"
+    #   format: json_lines

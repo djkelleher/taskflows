@@ -3,7 +3,7 @@ auth_enabled: false
 server:
   http_listen_port: 3100
   grpc_listen_port: 9096
-  log_level: debug
+  log_level: info
   log_format: json
   http_server_read_timeout: 30s
   http_server_write_timeout: 30s
@@ -34,7 +34,7 @@ ingester:
   wal:
     enabled: true
     dir: /loki/wal
-    replay_memory_ceiling: 1GB
+    replay_memory_ceiling: 512MB
   concurrent_flushes: 16
   max_chunk_age: 2h
 
@@ -87,7 +87,7 @@ limits_config:
   max_line_size: 256KB
   max_entries_limit_per_query: 5000
   
-  max_query_length: 12000h
+  max_query_length: 744h
   max_query_parallelism: 32
   max_query_series: 500
   
@@ -104,12 +104,11 @@ limits_config:
 
 compactor:
   working_directory: /tmp/loki/retention
-  compaction_interval: 10m
+  compaction_interval: 30m
   retention_enabled: true
   retention_delete_delay: 2h
-  retention_delete_worker_count: 150
+  retention_delete_worker_count: 8
   delete_request_store: filesystem
-
 
 storage_config:
   filesystem:
@@ -135,7 +134,6 @@ query_range:
         ttl: 1h
   cache_results: true
   max_retries: 5
-
 
 tracing:
   enabled: false

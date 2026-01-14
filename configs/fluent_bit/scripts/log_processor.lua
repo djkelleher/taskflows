@@ -47,7 +47,7 @@ function process_log(tag, timestamp, record)
             local nsec = rem_us * 1000
 
             -- Apply per-service tie-breaker for identical microsecond timestamps
-            local svc = record["service_name"] or "__unknown__"
+            local svc = service_name
             local last_us = last_ts_us_by_service[svc]
             if last_us == us then
                 local off = (last_offset_by_service[svc] or 0) + 1
