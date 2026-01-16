@@ -484,14 +484,10 @@ The project enforces strict code quality standards:
    npm run build
    ```
 
-2. Copy to FastAPI static directory:
+2. Start the API with UI enabled:
    ```bash
-   cp -r dist/* ../taskflows/ui/static/
+   export TASKFLOWS_ENABLE_UI=1
+   tf api start
    ```
 
-3. Start the API with UI enabled:
-   ```bash
-   tf api start --enable-ui
-   ```
-
-The frontend will be served at **http://localhost:7777**.
+The API server will serve the frontend from `dist/` at **http://localhost:7777**.

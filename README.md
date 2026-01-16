@@ -600,31 +600,32 @@ The `tf` command provides service management:
 
 ```bash
 # Service discovery
-tf list [PATTERN]              # List services
-tf status [--running] [--all]  # Show service status
-tf history [-l LIMIT]          # Show task history
-tf logs SERVICE [-n LINES]     # View service logs
-tf show SERVICE                # Show service file contents
+tf list [PATTERN]                        # List services matching pattern
+tf status [-m PATTERN] [--running] [--all]  # Show service status
+tf history [-l LIMIT] [-m PATTERN]       # Show task history
+tf logs SERVICE [-n LINES]               # View service logs
+tf show PATTERN                          # Show service file contents
 
-# Service control
-tf create FILE                 # Create services from Python file
-tf start SERVICE               # Start a service
-tf stop SERVICE                # Stop a service
-tf restart SERVICE             # Restart a service
-tf enable SERVICE              # Enable auto-start
-tf disable SERVICE             # Disable auto-start
-tf remove SERVICE              # Remove a service
+# Service control (PATTERN matches service names)
+tf create SEARCH_IN [-i INCLUDE] [-e EXCLUDE]  # Create services from Python file/directory
+tf start PATTERN [-t/--timers] [--services]    # Start matching services/timers
+tf stop PATTERN [-t/--timers] [--services]     # Stop matching services/timers
+tf restart PATTERN                              # Restart matching services
+tf enable PATTERN [-t/--timers] [--services]   # Enable auto-start
+tf disable PATTERN [-t/--timers] [--services]  # Disable auto-start
+tf remove PATTERN                               # Remove matching services
 
 # Multi-server (with -s/--server)
 tf list -s server1 -s server2
 tf status --server prod-host
+tf start my-service -s prod-host
 ```
 
 ### API Management
 
 ```bash
-# Start/stop API server
-tf api start [--enable-ui]
+# Start/stop API server (runs as systemd service)
+tf api start
 tf api stop
 tf api restart
 
@@ -632,22 +633,28 @@ tf api restart
 tf api setup-ui --username admin
 ```
 
+To enable the web UI, set the environment variable before starting:
+```bash
+export TASKFLOWS_ENABLE_UI=1
+tf api start
+```
+
+Or run the API directly (not as a service):
+```bash
+_start_srv_api --enable-ui
+```
+
 ### Security Management
 
 ```bash
 # Setup HMAC authentication
-tf security setup
-tf security status
-tf security disable
-tf security set-secret SECRET
-tf security regenerate-secret
+tf api security setup [-r/--regenerate-secret]
+tf api security status
+tf api security disable
+tf api security set-secret SECRET
 ```
 
 ## Web UI
-
-Two UI options are available: a server-rendered UI (legacy) and a React SPA (recommended).
-
-### React Frontend (Recommended)
 
 A modern React SPA located in `frontend/`.
 
@@ -684,9 +691,9 @@ Access at **http://localhost:3000**
 # Build the frontend
 cd frontend && npm run build
 
-# Serve via FastAPI (copies dist/ to static/)
-cp -r frontend/dist/* taskflows/ui/static/
-tf api start --enable-ui
+# Start API server with UI enabled (serves from frontend/dist/)
+export TASKFLOWS_ENABLE_UI=1
+tf api start
 ```
 
 Access at **http://localhost:7777**
@@ -701,25 +708,7 @@ Access at **http://localhost:7777**
 
 See `frontend/README.md` for detailed documentation.
 
-### Legacy Server-Rendered UI
-
-The original Python/dominate UI in `taskflows/ui/`.
-
-```bash
-# Install dependencies
-cd taskflows/ui && npm install && cd ../..
-
-# Build UI assets
-./build_ui.sh
-
-# Setup authentication
-tf api setup-ui --username admin
-
-# Start API with UI
-tf api start --enable-ui
-```
-
-### Features (Both UIs)
+### Features
 
 - **Dashboard**: Real-time service status with auto-refresh
 - **Multi-select**: Select and operate on multiple services
@@ -735,8 +724,8 @@ The API server provides REST endpoints for service management.
 ### Starting the Server
 
 ```bash
-tf api start              # Default port 7777
-tf api start --enable-ui  # With web UI
+tf api start                      # Default port 7777
+TASKFLOWS_ENABLE_UI=1 tf api start  # With web UI
 ```
 
 ### Endpoints
@@ -773,13 +762,13 @@ Secure API communication with HMAC-SHA256 request signing:
 
 ```bash
 # Initial setup
-tf security setup
+tf api security setup
 
 # View settings
-tf security status
+tf api security status
 
 # Regenerate secret (requires client restart)
-tf security regenerate-secret
+tf api security setup --regenerate-secret
 ```
 
 Configuration stored in `~/.services/security.json`.
@@ -898,7 +887,7 @@ DockerContainer(command='python script.py --arg "unterminated')  # Raises ValueE
 
 4. **Rotate secrets regularly**
    ```bash
-   tf security regenerate-secret
+   tf api security setup --regenerate-secret
    ```
 
 ### Docker Socket Security
@@ -1023,52 +1012,61 @@ Task alerts include Grafana URLs with pre-configured Loki queries for viewing:
 - Error traces
 - Historical runs
 
-## Slack Bot
+## Slack Alerts
 
-Interactive service management via Slack.
+Send task alerts and notifications to Slack channels.
 
-### Installation
+### Setup
 
 1. Create a Slack app at https://api.slack.com/apps
 
 2. Add OAuth scopes:
    - `chat:write`, `chat:write.public`
-   - `commands`, `app_mentions:read`
-   - `im:read`, `im:write`
-   - `channels:read`, `groups:read`
-   - `files:write`, `users:read`
+   - `files:write`
 
-3. Enable Interactivity with Request URL: `<your-url>/slack/events`
+3. Install the app to your workspace and get the Bot Token
 
-4. Add slash commands:
-   - `/tf` → `<your-url>/slack/events`
-   - `/tf-dashboard` → `<your-url>/slack/events`
-   - `/tf-health` → `<your-url>/slack/events`
-
-5. Set environment variables:
+4. Set the environment variable:
    ```bash
-   export SERVICES_SLACK_BOT_TOKEN=xoxb-...
-   export SERVICES_SLACK_SIGNING_SECRET=...
-   export SERVICES_SLACK_ALLOWED_USERS=U12345,U67890  # Optional
-   export SERVICES_SLACK_ALLOWED_CHANNELS=C12345     # Optional
+   export SLACK_BOT_TOKEN=xoxb-...
    ```
 
-6. Start the bot:
-   ```bash
-   tf-slack start
-   ```
+### Usage
 
-### Dashboard Options
+```python
+from taskflows import task, Alerts
+from taskflows.alerts import Slack
 
-- **App Home**: Click the app in your Slack sidebar
-- **Channel**: `/tf dashboard` or `/tf-dashboard`
-- **Modal**: `/tf-dashboard modal`
-- **Web**: `/tf-dashboard web`
+@task(
+    name="my-task",
+    alerts=Alerts(
+        send_to=Slack(channel="alerts"),
+        send_on=["start", "error", "finish"]
+    )
+)
+async def my_task():
+    # Your code here
+    pass
+```
+
+### Programmatic Usage
+
+```python
+from taskflows.alerts.slack import send_slack_message
+from taskflows.alerts.components import Text, Table
+
+await send_slack_message(
+    channel="alerts",
+    subject="Task Complete",
+    content=[Text("Processing finished successfully")],
+)
+```
 
 ## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `TASKFLOWS_ENABLE_UI` | Enable web UI serving | `0` |
 | `TASKFLOWS_DISPLAY_TIMEZONE` | Display timezone | `UTC` |
 | `TASKFLOWS_FLUENT_BIT` | Fluent Bit endpoint | `localhost:24224` |
 | `TASKFLOWS_GRAFANA` | Grafana URL | `localhost:3000` |
@@ -1079,18 +1077,13 @@ Interactive service management via Slack.
 | `ENVIRONMENT` | Environment name | `production` |
 | `APP_NAME` | Application name | - |
 
-### Slack Bot Variables
+### Slack Alert Variables
 
-| Variable | Description |
-|----------|-------------|
-| `SERVICES_SLACK_BOT_TOKEN` | Bot OAuth token |
-| `SERVICES_SLACK_SIGNING_SECRET` | Signing secret |
-| `SERVICES_SLACK_ALLOWED_USERS` | Comma-separated user IDs |
-| `SERVICES_SLACK_ALLOWED_CHANNELS` | Comma-separated channel IDs |
-| `SERVICES_SLACK_USE_SOCKET_MODE` | Use socket mode |
-| `SERVICES_SLACK_APP_TOKEN` | App token for socket mode |
-| `SERVICES_SLACK_RATE_LIMIT_PER_MINUTE` | Rate limit (default: 10) |
-| `SERVICES_SLACK_DANGEROUS_COMMANDS` | Commands requiring confirmation |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SLACK_BOT_TOKEN` | Slack Bot OAuth token | - |
+| `SLACK_ATTACHMENT_MAX_SIZE_MB` | Max attachment size in MB | `20` |
+| `SLACK_INLINE_TABLES_MAX_ROWS` | Max rows for inline tables | `200` |
 
 ## Development
 

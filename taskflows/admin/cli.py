@@ -153,8 +153,8 @@ def setup_ui(username: str, password: str):
 
     click.echo(f"✅ Web UI configured successfully!")
     click.echo(f"   Username: {username}")
-    click.echo(f"⚠️  Restart the API server with --enable-ui flag:")
-    click.echo(f"   tf api start --enable-ui")
+    click.echo(f"⚠️  Restart the API server with UI enabled:")
+    click.echo(f"   TASKFLOWS_ENABLE_UI=1 tf api start")
 
 
 @cli.command

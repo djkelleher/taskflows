@@ -54,7 +54,7 @@ def with_hostname(data: dict) -> dict:
     return {**data, "hostname": HOSTNAME}
 
 
-def get_unit_files(
+async def get_unit_files(
     unit_type: Optional[Literal["service", "timer"]] = None,
     match: Optional[str] = None,
     states: Optional[str | Sequence[str]] = None,
@@ -71,7 +71,7 @@ def get_unit_files(
     """
     # don't alter internal services
     protected_units = {"taskflows-srv-api", "stop-taskflows-srv-api"}
-    files = _get_unit_files(unit_type=unit_type, match=match, states=states)
+    files = await _get_unit_files(unit_type=unit_type, match=match, states=states)
     kept = []
     for f in files:
         stem = Path(f).stem
@@ -178,7 +178,7 @@ async def list_services(
     if host is None:
         # Call local free function
         logger.info(f"list_services called with match={match}")
-        files = get_unit_files(match=match, unit_type="service")
+        files = await get_unit_files(match=match, unit_type="service")
         srv_names = [extract_service_name(f) for f in files]
         srv_names = sort_service_names(srv_names)
         logger.debug(f"list_services found {len(srv_names)} services")
@@ -293,32 +293,32 @@ async def status(
         ]
 
         # Gather service states
-        srv_states = get_unit_file_states(unit_type="service", match=match)
+        srv_states = await get_unit_file_states(unit_type="service", match=match)
         if not srv_states:
             return with_hostname({"status": []})
 
         # Build units metadata
-        manager = systemd_manager()
+        manager = await systemd_manager()
         units_meta = defaultdict(dict)
 
         # Process services and timers
         for file_path, enabled_status in srv_states.items():
             stem = Path(file_path).stem
             units_meta[stem]["Service\nEnabled"] = enabled_status
-            manager.LoadUnit(Path(file_path).name)
+            await manager.call_load_unit(Path(file_path).name)
 
-        for file_path, enabled_status in get_unit_file_states(
+        for file_path, enabled_status in (await get_unit_file_states(
             unit_type="timer", match=match
-        ).items():
+        )).items():
             units_meta[Path(file_path).stem]["Timer\nEnabled"] = enabled_status
 
         # Add unit runtime data
-        for unit in get_units(unit_type="service", match=match, states=None):
+        for unit in await get_units(unit_type="service", match=match, states=None):
             units_meta[Path(unit["unit_name"]).stem].update(unit)
 
         # Enrich with schedule info and service names
         for unit_name, data in units_meta.items():
-            data.update(get_schedule_info(unit_name))
+            data.update(await get_schedule_info(unit_name))
             data["Service"] = extract_service_name(unit_name)
 
         # Filter out not-found units
@@ -469,7 +469,7 @@ async def show(
     if host is None:
         # Call local free function
         logger.info(f"show called with match={match}")
-        files = get_unit_files(match=match)
+        files = await get_unit_files(match=match)
         logger.debug(f"show returned files for {match}")
         data = with_hostname({"files": load_service_files(files)})
     else:
@@ -565,10 +565,10 @@ async def create(
             ]
 
         for srv in services:
-            srv.create(defer_reload=True)
+            await srv.create(defer_reload=True)
         for dashboard in dashboards:
             dashboard.create()
-        reload_unit_files()
+        await reload_unit_files()
 
         logger.info(
             f"create created {len(services)} services, {len(dashboards)} dashboards"
@@ -639,8 +639,8 @@ async def start(
             unit_type = "service"
         elif timers:
             unit_type = "timer"
-        files = get_unit_files(match=match, unit_type=unit_type)
-        _start_service(files)
+        files = await get_unit_files(match=match, unit_type=unit_type)
+        await _start_service(files)
         logger.info(f"start started {len(files)} units")
         result = with_hostname({"started": files})
     else:
@@ -693,8 +693,8 @@ async def stop(
             unit_type = "service"
         elif timers:
             unit_type = "timer"
-        files = get_unit_files(match=match, unit_type=unit_type)
-        _stop_service(files)
+        files = await get_unit_files(match=match, unit_type=unit_type)
+        await _stop_service(files)
         logger.info(f"stop stopped {len(files)} units")
         result = with_hostname({"stopped": files})
     else:
@@ -734,10 +734,10 @@ async def restart(
 
     if host is None:
         # Call local free function
-        files = get_unit_files(match=match, unit_type="service")
+        files = await get_unit_files(match=match, unit_type="service")
         # Filter out stop-* and restart-* auxiliary services
         files = [f for f in files if is_start_service(f)]
-        _restart_service(files)
+        await _restart_service(files)
         result = with_hostname({"restarted": files})
     else:
         # Call via API
@@ -775,9 +775,9 @@ async def remove(
     if host is None:
         # Call local free function
         logger.info(f"remove called with match={match}")
-        service_files = get_unit_files(match=match, unit_type="service")
-        timer_files = get_unit_files(match=match, unit_type="timer")
-        _remove_service(
+        service_files = await get_unit_files(match=match, unit_type="service")
+        timer_files = await get_unit_files(match=match, unit_type="timer")
+        await _remove_service(
             service_files=service_files,
             timer_files=timer_files,
         )
@@ -836,8 +836,8 @@ async def disable(
             unit_type = "service"
         elif timers:
             unit_type = "timer"
-        files = get_unit_files(match=match, unit_type=unit_type)
-        _disable_service(files)
+        files = await get_unit_files(match=match, unit_type=unit_type)
+        await _disable_service(files)
         logger.info(f"disable disabled {len(files)} units")
         result = with_hostname({"disabled": files})
     else:
@@ -890,8 +890,8 @@ async def enable(
             unit_type = "service"
         elif timers:
             unit_type = "timer"
-        files = get_unit_files(match=match, unit_type=unit_type)
-        _enable_service(files)
+        files = await get_unit_files(match=match, unit_type=unit_type)
+        await _enable_service(files)
         logger.info(f"enable enabled {len(files)} units")
         result = with_hostname({"enabled": files})
     else:

@@ -17,14 +17,14 @@ def test_hmac_auth():
     security_config_file = Path.home() / ".taskflows" / "security.json"
 
     if not security_config_file.exists():
-        print("❌ Security config not found. Run 'tf security setup' first.")
+        print("❌ Security config not found. Run 'tf api security setup' first.")
         return
 
     with open(security_config_file, "r") as f:
         security_config = json.load(f)
 
     if not security_config.get("enable_hmac") or not security_config.get("hmac_secret"):
-        print("❌ HMAC not enabled. Run 'tf security setup' first.")
+        print("❌ HMAC not enabled. Run 'tf api security setup' first.")
         return
 
     hmac_secret = security_config["hmac_secret"]
