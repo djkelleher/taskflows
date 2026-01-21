@@ -629,12 +629,21 @@ tf api start
 tf api stop
 tf api restart
 
-# Setup web UI authentication
+# Setup web UI authentication (interactive, file-based)
 tf api setup-ui --username admin
 ```
 
 To enable the web UI, set the environment variable before starting:
 ```bash
+export TASKFLOWS_ENABLE_UI=1
+tf api start
+```
+
+Alternatively, use environment variables for Docker/automation:
+```bash
+export TF_JWT_SECRET=$(tf api generate-secret)
+export TF_ADMIN_USER=admin
+export TF_ADMIN_PASSWORD=yourpassword
 export TASKFLOWS_ENABLE_UI=1
 tf api start
 ```
@@ -786,16 +795,32 @@ Configuration stored in `~/.services/security.json`.
 
 #### JWT Authentication (Web UI)
 
-The web UI uses JWT tokens with bcrypt password hashing:
+The web UI uses JWT tokens with bcrypt password hashing. There are two methods to configure authentication:
+
+**Method 1: File-based (Interactive Setup)**
 
 ```bash
 tf api setup-ui --username admin
+# Prompts for password interactively
 ```
 
-Configuration stored in `~/.services/ui_config.json`.
+Configuration stored in `~/.taskflows/data/ui_config.json` and `~/.taskflows/data/users.json`.
+
+**Method 2: Environment Variables (Docker/Automation)**
+
+```bash
+# Generate a JWT secret
+export TF_JWT_SECRET=$(tf api generate-secret)
+export TF_ADMIN_USER=admin
+export TF_ADMIN_PASSWORD=yourpassword
+export TASKFLOWS_ENABLE_UI=1
+tf api start
+```
+
+Environment variables take precedence over file-based configuration.
 
 **Token Features:**
-- Bcrypt hashed passwords (12 rounds)
+- Bcrypt hashed passwords (12 rounds) for file-based auth
 - 1-hour token expiration
 - Automatic refresh on activity
 - Secure HTTP-only cookies (when HTTPS enabled)

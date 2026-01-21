@@ -295,88 +295,88 @@ async def status(
         # Gather service states
         srv_states = await get_unit_file_states(unit_type="service", match=match)
         if not srv_states:
-            return with_hostname({"status": []})
+            data = with_hostname({"status": []})
+        else:
+            # Build units metadata
+            manager = await systemd_manager()
+            units_meta = defaultdict(dict)
 
-        # Build units metadata
-        manager = await systemd_manager()
-        units_meta = defaultdict(dict)
+            # Process services and timers
+            for file_path, enabled_status in srv_states.items():
+                stem = Path(file_path).stem
+                units_meta[stem]["Service\nEnabled"] = enabled_status
+                await manager.call_load_unit(Path(file_path).name)
 
-        # Process services and timers
-        for file_path, enabled_status in srv_states.items():
-            stem = Path(file_path).stem
-            units_meta[stem]["Service\nEnabled"] = enabled_status
-            await manager.call_load_unit(Path(file_path).name)
+            for file_path, enabled_status in (await get_unit_file_states(
+                unit_type="timer", match=match
+            )).items():
+                units_meta[Path(file_path).stem]["Timer\nEnabled"] = enabled_status
 
-        for file_path, enabled_status in (await get_unit_file_states(
-            unit_type="timer", match=match
-        )).items():
-            units_meta[Path(file_path).stem]["Timer\nEnabled"] = enabled_status
+            # Add unit runtime data
+            for unit in await get_units(unit_type="service", match=match, states=None):
+                units_meta[Path(unit["unit_name"]).stem].update(unit)
 
-        # Add unit runtime data
-        for unit in await get_units(unit_type="service", match=match, states=None):
-            units_meta[Path(unit["unit_name"]).stem].update(unit)
+            # Enrich with schedule info and service names
+            for unit_name, unit_data in units_meta.items():
+                unit_data.update(await get_schedule_info(unit_name))
+                unit_data["Service"] = extract_service_name(unit_name)
 
-        # Enrich with schedule info and service names
-        for unit_name, data in units_meta.items():
-            data.update(await get_schedule_info(unit_name))
-            data["Service"] = extract_service_name(unit_name)
+            # Filter out not-found units
+            units_meta = {
+                k: v for k, v in units_meta.items() if v.get("load_state") != "not-found"
+            }
 
-        # Filter out not-found units
-        units_meta = {
-            k: v for k, v in units_meta.items() if v.get("load_state") != "not-found"
-        }
+            # Process rows
+            srv_data = {row["Service"]: row for row in units_meta.values()}
+            result = []
 
-        # Process rows
-        srv_data = {row["Service"]: row for row in units_meta.values()}
-        result = []
+            for srv_name in sort_service_names(srv_data.keys()):
+                row = srv_data[srv_name]
 
-        for srv_name in sort_service_names(srv_data.keys()):
-            row = srv_data[srv_name]
+                # Apply running filter
+                if running and row.get("active_state") != "active":
+                    continue
 
-            # Apply running filter
-            if running and row.get("active_state") != "active":
-                continue
+                # Filter out stop-* and restart-* services unless all flag is set
+                if not all and (srv_name.startswith("stop-") or srv_name.startswith("restart-")):
+                    continue
 
-            # Filter out stop-* and restart-* services unless all flag is set
-            if not all and (srv_name.startswith("stop-") or srv_name.startswith("restart-")):
-                continue
+                # Format timers
+                timers = [
+                    f"{t['base']}({t['spec']})" for t in row.get("Timers Calendar", [])
+                ] + [f"{t['base']}({t['offset']})" for t in row.get("Timers Monotonic", [])]
+                row["Timers"] = "\n".join(timers) or "-"
 
-            # Format timers
-            timers = [
-                f"{t['base']}({t['spec']})" for t in row.get("Timers Calendar", [])
-            ] + [f"{t['base']}({t['offset']})" for t in row.get("Timers Monotonic", [])]
-            row["Timers"] = "\n".join(timers) or "-"
+                # Calculate uptime
+                if row.get("active_state") == "active" and (
+                    last_start := row.get("Last Start")
+                ):
+                    row["Uptime"] = str(datetime.now() - last_start).split(".")[0]
 
-            # Calculate uptime
-            if row.get("active_state") == "active" and (
-                last_start := row.get("Last Start")
-            ):
-                row["Uptime"] = str(datetime.now() - last_start).split(".")[0]
+                # Format datetime columns
+                tz = ZoneInfo(config.display_timezone)
+                for dt_col in ("Last Start", "Last Finish", "Next Start"):
+                    if isinstance(row.get(dt_col), datetime):
+                        row[dt_col] = (
+                            row[dt_col].astimezone(tz).strftime("%Y-%m-%d %I:%M:%S %p")
+                        )
 
-            # Format datetime columns
-            tz = ZoneInfo(config.display_timezone)
-            for dt_col in ("Last Start", "Last Finish", "Next Start"):
-                if isinstance(row.get(dt_col), datetime):
-                    row[dt_col] = (
-                        row[dt_col].astimezone(tz).strftime("%Y-%m-%d %I:%M:%S %p")
-                    )
+                # Build output row with emoji prefixes
+                output_row = {}
+                for col in COLUMNS:
+                    val = str(row.get(col, "-"))
 
-            # Build output row with emoji prefixes
-            output_row = {}
-            for col in COLUMNS:
-                val = str(row.get(col, "-"))
+                    # Add color emoji if mapping exists
+                    if col in COLUMN_COLORS:
+                        color = COLUMN_COLORS[col].get(val)
+                        if color and color in COLOR_EMOJI:
+                            val = f"{COLOR_EMOJI[color]} {val}"
 
-                # Add color emoji if mapping exists
-                if col in COLUMN_COLORS:
-                    color = COLUMN_COLORS[col].get(val)
-                    if color and color in COLOR_EMOJI:
-                        val = f"{COLOR_EMOJI[color]} {val}"
+                    output_row[col] = val
 
-                output_row[col] = val
-
-            result.append(output_row)
-        logger.debug(f"status returning {len(result)} rows")
-        data = with_hostname({"status": result})
+                result.append(output_row)
+            logger.debug(f"status returning {len(result)} rows")
+            data = with_hostname({"status": result})
 
     else:
         # Call via API

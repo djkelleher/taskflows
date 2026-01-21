@@ -129,7 +129,12 @@ def security_status():
 @click.option("--username", default="admin", help="Admin username")
 @click.option("--password", prompt=True, hide_input=True, confirmation_prompt=True, help="Admin password")
 def setup_ui(username: str, password: str):
-    """Setup web UI with admin credentials."""
+    """Setup web UI with admin credentials.
+
+    This creates file-based credentials. For Docker/automation, you can also
+    use environment variables instead:
+      TF_ADMIN_USER, TF_ADMIN_PASSWORD, TF_JWT_SECRET
+    """
     from taskflows.admin.auth import (
         create_admin_user,
         generate_jwt_secret,
@@ -141,7 +146,7 @@ def setup_ui(username: str, password: str):
     ui_config = load_ui_config()
     if not ui_config.jwt_secret:
         ui_config.jwt_secret = generate_jwt_secret()
-        click.echo(f"🔐 Generated JWT secret")
+        click.echo(f"Generated JWT secret")
 
     ui_config.enabled = True
 
@@ -151,10 +156,29 @@ def setup_ui(username: str, password: str):
     # Create admin user
     create_admin_user(username, password)
 
-    click.echo(f"✅ Web UI configured successfully!")
+    click.echo(f"Web UI configured successfully!")
     click.echo(f"   Username: {username}")
-    click.echo(f"⚠️  Restart the API server with UI enabled:")
+    click.echo(f"Restart the API server with UI enabled:")
     click.echo(f"   TASKFLOWS_ENABLE_UI=1 tf api start")
+
+
+@api.command("generate-secret")
+def generate_secret():
+    """Generate a JWT secret for use with environment variables.
+
+    Use this to generate a secret for TF_JWT_SECRET when configuring
+    authentication via environment variables instead of setup-ui.
+
+    Example usage:
+      export TF_JWT_SECRET=$(tf api generate-secret)
+      export TF_ADMIN_USER=admin
+      export TF_ADMIN_PASSWORD=yourpassword
+      export TASKFLOWS_ENABLE_UI=1
+      tf api start
+    """
+    from taskflows.admin.auth import generate_jwt_secret
+
+    click.echo(generate_jwt_secret())
 
 
 @cli.command
