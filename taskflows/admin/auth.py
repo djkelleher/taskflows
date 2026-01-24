@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +11,11 @@ from passlib.context import CryptContext
 from pydantic import BaseModel
 
 from taskflows.common import logger, services_data_dir
+
+# Environment variable names for credentials
+ENV_ADMIN_USER = "TF_ADMIN_USER"
+ENV_ADMIN_PASSWORD = "TF_ADMIN_PASSWORD"
+ENV_JWT_SECRET = "TF_JWT_SECRET"
 
 # JWT configuration
 JWT_ALGORITHM = "HS256"
@@ -73,10 +79,22 @@ def generate_jwt_secret() -> str:
 
 
 def load_ui_config() -> UIConfig:
-    """Load UI configuration from file."""
+    """Load UI configuration from file or environment variables.
+
+    Environment variable TF_JWT_SECRET takes precedence over file config.
+    """
+    config = UIConfig()
     if ui_config_file.exists():
-        return UIConfig(**json.loads(ui_config_file.read_text()))
-    return UIConfig()
+        config = UIConfig(**json.loads(ui_config_file.read_text()))
+
+    # Environment variable takes precedence
+    env_jwt_secret = os.getenv(ENV_JWT_SECRET)
+    if env_jwt_secret:
+        config.jwt_secret = env_jwt_secret
+        config.enabled = True
+        logger.debug("Using JWT secret from environment variable")
+
+    return config
 
 
 def save_ui_config(config: UIConfig) -> None:
@@ -186,7 +204,28 @@ def verify_token(token: str, jwt_secret: str, token_type: str = "access") -> Opt
 
 
 def authenticate_user(username: str, password: str) -> Optional[User]:
-    """Authenticate a user with username and password."""
+    """Authenticate a user with username and password.
+
+    Checks environment variables TF_ADMIN_USER and TF_ADMIN_PASSWORD first,
+    then falls back to file-based users.
+    """
+    # Check environment variable credentials first
+    env_user = os.getenv(ENV_ADMIN_USER)
+    env_password = os.getenv(ENV_ADMIN_PASSWORD)
+
+    if env_user and env_password:
+        if username == env_user and password == env_password:
+            logger.debug("User authenticated via environment variables")
+            return User(
+                username=username,
+                password_hash="",  # Not needed for env-based auth
+                role="admin",
+                created_at=datetime.now(timezone.utc),
+            )
+        # If env vars are set but don't match, still check file-based users
+        # This allows both methods to coexist
+
+    # Fall back to file-based users
     user = get_user(username)
     if not user:
         logger.warning(f"User {username} not found")

@@ -55,26 +55,30 @@ def test_config():
     assert isinstance(v.unit_entries, set)
 
 
-def test_service_management(log_dir):
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_service_management(log_dir):
     # create a minimal service.
     test_name = create_test_name()
     log_file = (log_dir / f"{test_name}.log").resolve()
     srv = Service(
         name=test_name, start_command=f"bash -c 'echo {test_name} >> {log_file}'"
     )
-    srv.create()
+    await srv.create()
     service_file = systemd_dir / f"{_SYSTEMD_FILE_PREFIX}{test_name}.service"
     assert service_file.is_file()
     assert len(service_file.read_text())
-    srv.start()
+    await srv.start()
     sleep(0.5)
     assert log_file.is_file()
     assert log_file.read_text().strip() == test_name
-    srv.remove()
+    await srv.remove()
     assert not service_file.exists()
 
 
-def test_schedule(log_dir):
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_schedule(log_dir):
     test_name = create_test_name()
     log_file = (log_dir / f"{test_name}.log").resolve()
     run_time = datetime.now(timezone.utc) + timedelta(seconds=1)
@@ -83,7 +87,7 @@ def test_schedule(log_dir):
         start_command=f"bash -c 'echo {test_name} >> {log_file}'",
         start_schedule=Calendar.from_datetime(run_time),
     )
-    srv.create()
+    await srv.create()
     timer_file = systemd_dir / f"{_SYSTEMD_FILE_PREFIX}{test_name}.timer"
     assert timer_file.is_file()
     assert len(timer_file.read_text())
@@ -91,11 +95,13 @@ def test_schedule(log_dir):
     sleep((run_time - datetime.now(timezone.utc)).total_seconds() + 0.5)
     assert log_file.is_file()
     assert log_file.read_text().strip() == test_name
-    srv.remove()
+    await srv.remove()
     assert not timer_file.exists()
 
 
-def test_service_enable_without_arguments(log_dir):
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_service_enable_without_arguments(log_dir):
     """Test that Service.enable() works without arguments (default parameter)."""
     test_name = create_test_name()
     log_file = (log_dir / f"{test_name}.log").resolve()
@@ -104,22 +110,24 @@ def test_service_enable_without_arguments(log_dir):
         start_command=f"bash -c 'echo {test_name} >> {log_file}'",
         start_schedule=Calendar.from_datetime(datetime.now(timezone.utc) + timedelta(seconds=10)),
     )
-    srv.create()
+    await srv.create()
 
     # This should not raise TypeError (the bug we fixed)
     # Just verify it doesn't crash - enable() has no return value
     try:
-        srv.enable()
+        await srv.enable()
         enable_succeeded = True
     except TypeError:
         enable_succeeded = False
 
     assert enable_succeeded, "enable() should work without arguments"
 
-    srv.remove()
+    await srv.remove()
 
 
-def test_service_enable_timers_only(log_dir):
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_service_enable_timers_only(log_dir):
     """Test that Service.enable(timers_only=True) accepts the parameter."""
     test_name = create_test_name()
     log_file = (log_dir / f"{test_name}.log").resolve()
@@ -128,21 +136,23 @@ def test_service_enable_timers_only(log_dir):
         start_command=f"bash -c 'echo {test_name} >> {log_file}'",
         start_schedule=Calendar.from_datetime(datetime.now(timezone.utc) + timedelta(seconds=10)),
     )
-    srv.create()
+    await srv.create()
 
     # This should not raise TypeError (verify parameter works)
     try:
-        srv.enable(timers_only=True)
+        await srv.enable(timers_only=True)
         enable_succeeded = True
     except TypeError:
         enable_succeeded = False
 
     assert enable_succeeded, "enable(timers_only=True) should work"
 
-    srv.remove()
+    await srv.remove()
 
 
-def test_service_registry_enable():
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_service_registry_enable():
     """Test that ServiceRegistry.enable() works correctly."""
     test_name1 = create_test_name()
     test_name2 = create_test_name()
@@ -155,12 +165,12 @@ def test_service_registry_enable():
     registry.add(srv1, srv2)
 
     try:
-        srv1.create()
-        srv2.create()
+        await srv1.create()
+        await srv2.create()
 
         # This should not raise TypeError (the bug we fixed)
         try:
-            registry.enable()
+            await registry.enable()
             enable_succeeded = True
         except TypeError:
             enable_succeeded = False
@@ -169,8 +179,8 @@ def test_service_registry_enable():
 
     finally:
         # Clean up
-        srv1.remove()
-        srv2.remove()
+        await srv1.remove()
+        await srv2.remove()
 
 
 def test_cgroup_multiple_device_limits():
@@ -204,7 +214,9 @@ def test_cgroup_multiple_device_limits():
     assert "/dev/sdb 1048576" in write_values
 
 
-def test_cgroup_device_limits_in_service_unit(log_dir):
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_cgroup_device_limits_in_service_unit(log_dir):
     """Test that service unit file contains all device limits."""
     test_name = create_test_name()
     log_file = (log_dir / f"{test_name}.log").resolve()
@@ -221,7 +233,7 @@ def test_cgroup_device_limits_in_service_unit(log_dir):
         start_command=f"bash -c 'echo {test_name} >> {log_file}'",
         cgroup_config=cgroup,
     )
-    srv.create()
+    await srv.create()
 
     # Read the service file
     service_file = systemd_dir / f"{_SYSTEMD_FILE_PREFIX}{test_name}.service"
@@ -232,4 +244,4 @@ def test_cgroup_device_limits_in_service_unit(log_dir):
     assert "IOReadBandwidthMax=/dev/sda 1048576" in service_content
     assert "IOReadBandwidthMax=/dev/sdb 2097152" in service_content
 
-    srv.remove()
+    await srv.remove()

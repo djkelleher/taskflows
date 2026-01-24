@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -71,8 +71,6 @@ class TestAPIAuthentication(unittest.TestCase):
         """Test that all protected endpoints fail without authentication."""
         endpoints = [
             ("GET", "/list-servers"),
-            ("POST", "/register-server", {"address": "test"}),
-            ("DELETE", "/remove-server", {"address_or_alias": "test"}),
             ("GET", "/history"),
             ("GET", "/list"),
             ("GET", "/status"),
@@ -93,10 +91,6 @@ class TestAPIAuthentication(unittest.TestCase):
                     response = self.client.get(endpoint)
                 elif method == "POST":
                     response = self.client.post(endpoint, json=body[0] if body else {})
-                elif method == "DELETE":
-                    response = self.client.delete(
-                        endpoint, json=body[0] if body else {}
-                    )
 
                 self.assertEqual(
                     response.status_code,
@@ -109,42 +103,43 @@ class TestAPIAuthentication(unittest.TestCase):
 
     def test_endpoints_with_valid_auth_succeed(self):
         """Test that all endpoints work with valid authentication."""
-        # Mock necessary dependencies
-        with patch("taskflows.admin.api.list_servers", return_value=[]):
-            with patch("taskflows.admin.api.register_server"):
-                with patch("taskflows.admin.api.remove_server"):
+        # Mock necessary dependencies - patch where used (api module), not where defined
+        with patch("taskflows.admin.api.list_servers", new_callable=AsyncMock, return_value=[]):
+            with patch(
+                "taskflows.admin.api.list_services", new_callable=AsyncMock, return_value={"services": [], "hostname": "test"}
+            ):
+                with patch(
+                    "taskflows.admin.api.service_status", new_callable=AsyncMock, return_value={"services": [], "hostname": "test"}
+                ):
                     with patch(
-                        "taskflows.admin.api.get_unit_files", return_value=[]
+                        "taskflows.admin.api.task_history", new_callable=AsyncMock, return_value={"history": [], "hostname": "test"}
                     ):
                         with patch(
-                            "taskflows.admin.api.get_unit_file_states",
-                            return_value={},
+                            "taskflows.admin.api.logs", new_callable=AsyncMock, return_value={"logs": "", "hostname": "test"}
                         ):
                             with patch(
-                                "taskflows.admin.api.find_instances",
-                                return_value=[],
+                                "taskflows.admin.api.create", new_callable=AsyncMock, return_value={"created": [], "hostname": "test"}
                             ):
                                 with patch(
-                                    "taskflows.admin.api.reload_unit_files"
+                                    "taskflows.admin.api.start", new_callable=AsyncMock, return_value={"started": [], "hostname": "test"}
                                 ):
                                     with patch(
-                                        "taskflows.admin.api._start_service"
+                                        "taskflows.admin.api.stop", new_callable=AsyncMock, return_value={"stopped": [], "hostname": "test"}
                                     ):
                                         with patch(
-                                            "taskflows.admin.api._stop_service"
+                                            "taskflows.admin.api.restart", new_callable=AsyncMock, return_value={"restarted": [], "hostname": "test"}
                                         ):
                                             with patch(
-                                                "taskflows.admin.api._restart_service"
+                                                "taskflows.admin.api.enable", new_callable=AsyncMock, return_value={"enabled": [], "hostname": "test"}
                                             ):
                                                 with patch(
-                                                    "taskflows.admin.api._enable_service"
+                                                    "taskflows.admin.api.disable", new_callable=AsyncMock, return_value={"disabled": [], "hostname": "test"}
                                                 ):
                                                     with patch(
-                                                        "taskflows.admin.api._disable_service"
+                                                        "taskflows.admin.api.remove", new_callable=AsyncMock, return_value={"removed": [], "hostname": "test"}
                                                     ):
                                                         with patch(
-                                                            "taskflows.admin.api._remove_service",
-                                                            return_value=0,
+                                                            "taskflows.admin.api.show", new_callable=AsyncMock, return_value={"files": [], "hostname": "test"}
                                                         ):
                                                             self._test_all_endpoints_with_auth()
 
@@ -152,8 +147,6 @@ class TestAPIAuthentication(unittest.TestCase):
         """Helper to test all endpoints with valid auth."""
         test_cases = [
             ("GET", "/list-servers", None, 200),
-            ("POST", "/register-server", {"address": "http://test:8000"}, 200),
-            ("DELETE", "/remove-server", {"address_or_alias": "test"}, 200),
             ("GET", "/history?limit=1", None, 200),
             ("GET", "/list", None, 200),
             ("GET", "/status", None, 200),
@@ -180,10 +173,6 @@ class TestAPIAuthentication(unittest.TestCase):
                     response = self.client.get(endpoint, headers=headers)
                 elif method == "POST":
                     response = self.client.post(
-                        endpoint, data=body_str, headers=headers
-                    )
-                elif method == "DELETE":
-                    response = self.client.delete(
                         endpoint, data=body_str, headers=headers
                     )
 
@@ -264,15 +253,17 @@ class TestAPIAuthentication(unittest.TestCase):
         headers = self.generate_hmac_headers(body_str)
         headers["Content-Type"] = "application/json"
 
-        with patch("taskflows.admin.api.get_unit_files", return_value=[]):
-            with patch("taskflows.admin.api._start_service"):
+        with patch("taskflows.admin.core.get_unit_files", new_callable=AsyncMock, return_value=[]):
+            with patch("taskflows.admin.core._start_service", new_callable=AsyncMock):
                 response = self.client.post("/start", data=body_str, headers=headers)
                 self.assertEqual(response.status_code, 200)
 
     def test_security_headers_present(self):
         """Test that security headers are added to responses."""
         headers = self.generate_hmac_headers()
-        response = self.client.get("/list", headers=headers)
+
+        with patch("taskflows.admin.api.list_services", new_callable=AsyncMock, return_value={"services": [], "hostname": "test"}):
+            response = self.client.get("/list", headers=headers)
 
         expected_headers = {
             "X-Content-Type-Options": "nosniff",
@@ -291,5 +282,4 @@ class TestAPIAuthentication(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
     unittest.main()

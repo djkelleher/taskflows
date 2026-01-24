@@ -128,8 +128,20 @@ async def add_security_headers(request: Request, call_next):
 # HMAC validation middleware
 @app.middleware("http")
 async def hmac_validation(request: Request, call_next):
-    """Validate HMAC headers unless disabled or health endpoint."""
-    if not security_config.enable_hmac or request.url.path == "/health":
+    """Validate HMAC headers for API endpoints only."""
+    # Skip HMAC for:
+    # 1. When HMAC is disabled
+    # 2. Health check
+    # 3. UI routes (all non-API routes) - only API endpoints need HMAC
+    # 4. Auth endpoints (they have their own authentication)
+    # 5. Assets
+    if (
+        not security_config.enable_hmac
+        or request.url.path == "/health"
+        or not request.url.path.startswith("/api/")
+        or request.url.path.startswith("/auth/")
+        or request.url.path.startswith("/assets/")
+    ):
         logger.debug(f"HMAC skipped for {request.url.path}")
         return await call_next(request)
 
@@ -193,59 +205,22 @@ async def jwt_validation(request: Request, call_next):
     # Skip JWT for:
     # 1. API endpoints (use HMAC)
     # 2. Auth endpoints (login, refresh)
-    # 3. Static files
+    # 3. Static files and UI routes (React handles auth client-side)
     # 4. Health check
-    public_paths = ["/health", "/login", "/auth/login", "/auth/refresh"]
+    #
+    # For React SPA: All non-API routes serve index.html, React handles authentication
     if (
         request.url.path.startswith("/api/")
-        or request.url.path in public_paths
-        or request.url.path.startswith("/static/")
+        or request.url.path.startswith("/auth/")
+        or request.url.path.startswith("/assets/")
+        or request.url.path == "/health"
     ):
         logger.debug(f"JWT skipped for {request.url.path}")
         return await call_next(request)
 
-    # Check for JWT token in Authorization header
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        logger.warning(f"Missing JWT token for {request.url.path}")
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"detail": "Not authenticated"},
-        )
-
-    # Import here to avoid circular dependency
-    from taskflows.admin.auth import load_ui_config, verify_token
-
-    try:
-        token = auth_header.split(" ")[1]
-        ui_config = load_ui_config()
-
-        if not ui_config.jwt_secret:
-            logger.error("JWT secret not configured")
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": "JWT secret not configured"},
-            )
-
-        username = verify_token(token, ui_config.jwt_secret, "access")
-        if not username:
-            logger.warning(f"Invalid JWT token for {request.url.path}")
-            return JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"detail": "Invalid or expired token"},
-            )
-
-        # Attach user to request state
-        request.state.user = username
-        logger.debug(f"JWT validated for user {username} on {request.url.path}")
-        return await call_next(request)
-
-    except Exception as e:
-        logger.error(f"JWT validation error: {e}")
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"detail": "Authentication failed"},
-        )
+    # All other routes are UI routes - allow access, React will handle auth
+    logger.debug(f"JWT skipped for UI route {request.url.path}")
+    return await call_next(request)
 
 
 # CSRF validation middleware (for UI routes)
@@ -270,7 +245,7 @@ async def csrf_validation(request: Request, call_next):
         request.method in ["GET", "HEAD", "OPTIONS"]
         or request.url.path in ["/health", "/auth/login", "/auth/refresh"]
         or request.url.path.startswith("/api/")  # HMAC-protected
-        or request.url.path.startswith("/static/")
+        or request.url.path.startswith("/assets/")
     ):
         logger.debug(f"CSRF skipped for {request.method} {request.url.path}")
         return await call_next(request)
@@ -645,78 +620,35 @@ if os.getenv("TASKFLOWS_ENABLE_UI"):
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
-    # Static file serving and HTML routes
+    # Static file serving for React SPA
     from pathlib import Path
     from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import HTMLResponse, FileResponse
+    from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, PlainTextResponse
 
-    ui_static_dir = Path(__file__).parent.parent / "ui" / "static"
+    frontend_dist_dir = Path(__file__).parent.parent.parent / "frontend" / "dist"
 
-    # Mount static files
-    app.mount("/static", StaticFiles(directory=ui_static_dir), name="static")
+    # Mount React assets (JS/CSS bundles with hashes)
+    app.mount("/assets", StaticFiles(directory=frontend_dist_dir / "assets"), name="assets")
 
-    # HTML routes
-    @app.get("/login", response_class=HTMLResponse)
-    async def serve_login():
-        """Serve login page."""
-        html_file = ui_static_dir / "login.html"
-        if not html_file.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Login page not found. Run 'python -m taskflows.ui.build' to build the UI.",
+    # Serve index.html for all UI routes (React Router handles client-side routing)
+    @app.exception_handler(404)
+    async def spa_404_handler(request, exc):
+        """Serve index.html for UI routes, return JSON 404 for API routes."""
+        # API routes should return JSON 404
+        if request.url.path.startswith("/api/") or request.url.path.startswith("/auth/"):
+            return JSONResponse(
+                status_code=404,
+                content={"detail": "Not found"}
             )
-        return FileResponse(html_file)
 
-    @app.get("/", response_class=HTMLResponse)
-    async def serve_dashboard():
-        """Serve dashboard page."""
-        html_file = ui_static_dir / "index.html"
-        if not html_file.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Dashboard page not found. Run 'python -m taskflows.ui.build' to build the UI.",
+        # For all other routes, serve React SPA index.html
+        index_file = frontend_dist_dir / "index.html"
+        if not index_file.exists():
+            return PlainTextResponse(
+                "Frontend not built. Run 'cd frontend && npm run build'",
+                status_code=503
             )
-        return FileResponse(html_file)
-
-    @app.get("/logs/{service_name}", response_class=HTMLResponse)
-    async def serve_logs(service_name: str):
-        """Serve logs page for a specific service."""
-        # Generate logs page dynamically
-        from taskflows.ui.pages.logs import create_logs_page
-
-        page = create_logs_page(service_name)
-        return HTMLResponse(content=page.html.render())
-
-    @app.get("/environments", response_class=HTMLResponse)
-    async def serve_environments_list():
-        """Serve environments list page."""
-        html_file = ui_static_dir / "environments.html"
-        if not html_file.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Environments page not found. Run 'python -m taskflows.ui.build' to build the UI.",
-            )
-        return FileResponse(html_file)
-
-    @app.get("/environments/create", response_class=HTMLResponse)
-    async def serve_environments_create():
-        """Serve environment creation page."""
-        html_file = ui_static_dir / "environments_create.html"
-        if not html_file.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Environment creation page not found. Run 'python -m taskflows.ui.build' to build the UI.",
-            )
-        return FileResponse(html_file)
-
-    @app.get("/environments/edit", response_class=HTMLResponse)
-    async def serve_environments_edit(name: str = Query(...)):
-        """Serve environment edit page."""
-        # Generate edit page dynamically with the environment name
-        from taskflows.ui.pages.environments import create_environments_page
-
-        page = create_environments_page(mode="edit", env_name=name)
-        return HTMLResponse(content=page.html.render())
+        return FileResponse(index_file)
 
 
 @click.command("start")

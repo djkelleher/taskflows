@@ -10,7 +10,9 @@ from pathlib import Path
 from pprint import pformat, pprint
 from typing import Callable, Dict, List, Literal, Optional, Sequence, Set, Union
 
-import dbus
+from dbus_next import BusType
+from dbus_next.aio import MessageBus
+from dbus_next.errors import DBusError
 from pydantic.dataclasses import dataclass as pdataclass
 
 from .common import (
@@ -75,48 +77,48 @@ class ServiceRegistry:
         with self._lock:
             return list(self._services.values())
 
-    def create(self):
+    async def create(self):
         """Create all services (operations are atomic per service)."""
         # Get snapshot of services to avoid holding lock during long operations
         services_snapshot = self.services
         for s in services_snapshot:
-            s.create()
+            await s.create()
 
-    def start(self):
+    async def start(self):
         """Start all services (operations are atomic per service)."""
         services_snapshot = self.services
         for s in services_snapshot:
-            s.start()
+            await s.start()
 
-    def stop(self):
+    async def stop(self):
         """Stop all services (operations are atomic per service)."""
         services_snapshot = self.services
         for s in services_snapshot:
-            s.stop()
+            await s.stop()
 
-    def enable(self):
+    async def enable(self):
         """Enable all services (operations are atomic per service)."""
         services_snapshot = self.services
         for s in services_snapshot:
-            s.enable()
+            await s.enable()
 
-    def disable(self):
+    async def disable(self):
         """Disable all services (operations are atomic per service)."""
         services_snapshot = self.services
         for s in services_snapshot:
-            s.disable()
+            await s.disable()
 
-    def restart(self):
+    async def restart(self):
         """Restart all services (operations are atomic per service)."""
         services_snapshot = self.services
         for s in services_snapshot:
-            s.restart()
+            await s.restart()
 
-    def remove(self):
+    async def remove(self):
         """Remove all services (operations are atomic per service)."""
         services_snapshot = self.services
         for s in services_snapshot:
-            s.remove()
+            await s.remove()
 
     def __getitem__(self, name):
         """Get service by name (thread-safe)."""
@@ -599,42 +601,42 @@ class Service:
     def exists(self) -> bool:
         return all(os.path.exists(f) for f in self.unit_files)
 
-    def start(self):
+    async def start(self):
         """Start this service."""
-        _start_service(self.unit_files)
+        await _start_service(self.unit_files)
 
-    def stop(self, timers: bool = False):
+    async def stop(self, timers: bool = False):
         """Stop this service."""
-        _stop_service(self.unit_files if timers else self.service_files)
+        await _stop_service(self.unit_files if timers else self.service_files)
 
-    def restart(self):
+    async def restart(self):
         """Restart this service."""
-        _restart_service(self.service_files)
+        await _restart_service(self.service_files)
 
-    def enable(self, timers_only: bool = False):
+    async def enable(self, timers_only: bool = False):
         """Enable this service."""
         if timers_only:
-            _enable_service(self.timer_files)
+            await _enable_service(self.timer_files)
         else:
-            _enable_service(self.unit_files)
+            await _enable_service(self.unit_files)
 
-    def disable(self):
+    async def disable(self):
         """Disable this service."""
-        _disable_service(self.unit_files)
+        await _disable_service(self.unit_files)
 
-    def remove(self, preserve_container: bool = False):
+    async def remove(self, preserve_container: bool = False):
         """Remove this service.
 
         Args:
             preserve_container: If True, don't delete the Docker container (for persisted containers)
         """
-        _remove_service(
+        await _remove_service(
             service_files=self.service_files,
             timer_files=self.timer_files,
             preserve_container=preserve_container,
         )
 
-    def create(self, defer_reload: bool = False):
+    async def create(self, defer_reload: bool = False):
         """Create this service."""
         logger.info(f"Creating service {self}")
         # Remove old version if exists
@@ -643,7 +645,7 @@ class Service:
             isinstance(self.environment, DockerContainer)
             and self.environment.persisted
         )
-        self.remove(preserve_container=preserve_container)
+        await self.remove(preserve_container=preserve_container)
         self._write_timer_units()
         self._write_service_units()
 
@@ -667,11 +669,11 @@ class Service:
                 # For run services, no need to do anything here since
                 # the docker run command is directly in the systemd service file
 
-            self.enable(timers_only=not self.enabled)
+            await self.enable(timers_only=not self.enabled)
             # Start timers now
-            _start_service(self.timer_files)
+            await _start_service(self.timer_files)
             if not defer_reload:
-                reload_unit_files()
+                await reload_unit_files()
         except Exception as e:
             # Clean up pickle files if service creation fails after they were written
             logger.error(f"Service creation failed, cleaning up pickle files: {e}")
@@ -838,118 +840,156 @@ def service_logs(service_name: str, n_lines: int = 1000):
     return "\n\n".join(txt).strip()
 
 
-# DBus connection management with automatic reconnection
-# FIXED: Replaced @cache with proper connection lifecycle management
-# to handle systemd restarts and stale connections
+# DBus connection management with automatic reconnection (async dbus-next)
+# Uses asyncio for non-blocking D-Bus operations
 
-_dbus_connection_lock = threading.Lock()
-_dbus_session_bus = None
+import asyncio
+
+# Use a dict to store locks per event loop to avoid "bound to different event loop" errors
+_dbus_connection_locks: dict = {}
+_dbus_session_bus: Optional[MessageBus] = None
 _dbus_manager = None
+_dbus_manager_introspection = None
 _dbus_last_error_time = 0
 _dbus_error_cooldown = 5  # Seconds between reconnection attempts
 
 
-def _reset_dbus_connections():
+def _get_dbus_lock() -> asyncio.Lock:
+    """Get the asyncio lock for the current event loop.
+
+    This handles the case where tests run with different event loops.
+    Each event loop gets its own lock.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    loop_id = id(loop) if loop else 0
+    if loop_id not in _dbus_connection_locks:
+        _dbus_connection_locks[loop_id] = asyncio.Lock()
+    return _dbus_connection_locks[loop_id]
+
+
+async def _reset_dbus_connections():
     """Reset DBus connections (called when connection becomes stale)."""
-    global _dbus_session_bus, _dbus_manager
+    global _dbus_session_bus, _dbus_manager, _dbus_manager_introspection
+    if _dbus_session_bus is not None:
+        try:
+            _dbus_session_bus.disconnect()
+        except Exception:
+            pass
     _dbus_session_bus = None
     _dbus_manager = None
+    _dbus_manager_introspection = None
     logger.info("DBus connections reset for reconnection")
 
 
-def session_dbus():
-    """Get or create the D-Bus session bus connection.
+async def _session_dbus_unlocked() -> MessageBus:
+    """Internal: Get or create the D-Bus session bus connection without acquiring lock.
 
-    FIXED: Implements automatic reconnection on connection failure instead of
-    caching forever. Handles systemd restarts gracefully.
-
-    Returns:
-        dbus.SessionBus instance
-
-    Raises:
-        dbus.exceptions.DBusException: If connection cannot be established
+    MUST be called with _get_dbus_lock() already held.
     """
     global _dbus_session_bus, _dbus_last_error_time
     import time
 
-    with _dbus_connection_lock:
-        # Try to use existing connection
-        if _dbus_session_bus is not None:
-            try:
-                # Health check: try to ping the bus
-                _dbus_session_bus.get_unique_name()
-                return _dbus_session_bus
-            except (dbus.exceptions.DBusException, Exception) as e:
-                logger.warning(f"DBus session bus health check failed: {e}")
-                _dbus_session_bus = None
+    # Try to use existing connection
+    if _dbus_session_bus is not None and _dbus_session_bus.connected:
+        return _dbus_session_bus
 
-        # Apply cooldown to avoid tight reconnection loops
-        current_time = time.time()
-        if current_time - _dbus_last_error_time < _dbus_error_cooldown:
-            time.sleep(0.5)  # Brief delay
+    if _dbus_session_bus is not None:
+        logger.warning("DBus session bus disconnected, reconnecting...")
+        _dbus_session_bus = None
 
-        # Create new connection
-        try:
-            logger.info("Creating new DBus session bus connection")
-            _dbus_session_bus = dbus.SessionBus()
-            # Verify connection works
-            _dbus_session_bus.get_unique_name()
-            logger.info("DBus session bus connection established successfully")
-            return _dbus_session_bus
-        except Exception as e:
-            _dbus_last_error_time = current_time
-            logger.error(f"Failed to create DBus session bus: {e}", exc_info=True)
-            raise
+    # Apply cooldown to avoid tight reconnection loops
+    current_time = time.time()
+    if current_time - _dbus_last_error_time < _dbus_error_cooldown:
+        await asyncio.sleep(0.5)  # Brief delay
+
+    # Create new connection
+    try:
+        logger.info("Creating new DBus session bus connection")
+        _dbus_session_bus = await MessageBus(bus_type=BusType.SESSION).connect()
+        logger.info("DBus session bus connection established successfully")
+        return _dbus_session_bus
+    except Exception as e:
+        _dbus_last_error_time = current_time
+        logger.error(f"Failed to create DBus session bus: {e}", exc_info=True)
+        raise
 
 
-def systemd_manager():
-    """Get or create the systemd D-Bus manager interface.
+async def session_dbus() -> MessageBus:
+    """Get or create the D-Bus session bus connection.
 
-    FIXED: Implements automatic reconnection on connection failure instead of
-    caching forever. Handles systemd restarts gracefully.
+    Implements automatic reconnection on connection failure.
+    Handles systemd restarts gracefully.
 
     Returns:
-        dbus.Interface to systemd manager
+        MessageBus instance
 
     Raises:
-        dbus.exceptions.DBusException: If manager cannot be accessed
+        DBusError: If connection cannot be established
     """
-    global _dbus_manager
+    async with _get_dbus_lock():
+        return await _session_dbus_unlocked()
 
-    with _dbus_connection_lock:
-        # Try to use existing manager
+
+async def systemd_manager():
+    """Get or create the systemd D-Bus manager interface.
+
+    Implements automatic reconnection on connection failure.
+    Handles systemd restarts gracefully.
+
+    Returns:
+        Proxy interface to systemd manager
+
+    Raises:
+        DBusError: If manager cannot be accessed
+    """
+    global _dbus_manager, _dbus_manager_introspection
+
+    async with _get_dbus_lock():
+        # Get bus (will reconnect if needed) - use unlocked version since we already hold the lock
+        bus = await _session_dbus_unlocked()
+
+        # Try to use existing manager if bus is still the same
         if _dbus_manager is not None:
             try:
-                # Health check: try a simple method call
-                _ = _dbus_manager.Version
+                # Health check: try a simple property access
+                version = await _dbus_manager.get_version()
                 return _dbus_manager
-            except (dbus.exceptions.DBusException, Exception) as e:
+            except (DBusError, Exception) as e:
                 logger.warning(f"DBus manager health check failed: {e}")
-                _reset_dbus_connections()
-
-        # Get bus (will reconnect if needed)
-        bus = session_dbus()
+                await _reset_dbus_connections()
+                bus = await _session_dbus_unlocked()
 
         # Create new manager interface
         try:
             logger.info("Creating new systemd D-Bus manager interface")
-            systemd = bus.get_object("org.freedesktop.systemd1", "/org/freedesktop/systemd1")
-            _dbus_manager = dbus.Interface(systemd, dbus_interface="org.freedesktop.systemd1.Manager")
+            _dbus_manager_introspection = await bus.introspect(
+                "org.freedesktop.systemd1", "/org/freedesktop/systemd1"
+            )
+            proxy = bus.get_proxy_object(
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1",
+                _dbus_manager_introspection,
+            )
+            _dbus_manager = proxy.get_interface("org.freedesktop.systemd1.Manager")
             # Verify manager works
-            _ = _dbus_manager.Version
-            logger.info(f"Systemd D-Bus manager connected (version: {_dbus_manager.Version})")
+            version = await _dbus_manager.get_version()
+            logger.info(f"Systemd D-Bus manager connected (version: {version})")
             return _dbus_manager
         except Exception as e:
             logger.error(f"Failed to create systemd manager: {e}", exc_info=True)
-            _reset_dbus_connections()
+            await _reset_dbus_connections()
             raise
 
 
-def _dbus_operation_with_retry(operation, operation_name, max_retries=2):
+async def _dbus_operation_with_retry(operation, operation_name, max_retries=2):
     """Execute a D-Bus operation with automatic retry on connection failure.
 
     Args:
-        operation: Callable that performs the D-Bus operation
+        operation: Async callable that performs the D-Bus operation
         operation_name: Human-readable name for logging
         max_retries: Maximum number of retry attempts
 
@@ -957,19 +997,17 @@ def _dbus_operation_with_retry(operation, operation_name, max_retries=2):
         Result of the operation
 
     Raises:
-        dbus.exceptions.DBusException: If all retries fail
+        DBusError: If all retries fail
     """
-    import time
-
     for attempt in range(max_retries + 1):
         try:
-            return operation()
-        except dbus.exceptions.DBusException as e:
-            error_name = getattr(e, "get_dbus_name", lambda: "Unknown")()
+            return await operation()
+        except DBusError as e:
+            error_str = str(e).lower()
 
             # Check if this is a connection-related error
             is_connection_error = any(
-                keyword in str(e).lower()
+                keyword in error_str
                 for keyword in ["connection", "disconnected", "not available", "no reply"]
             )
 
@@ -979,8 +1017,8 @@ def _dbus_operation_with_retry(operation, operation_name, max_retries=2):
                     f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
                 )
                 # Reset connections and retry
-                _reset_dbus_connections()
-                time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                await _reset_dbus_connections()
+                await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
                 continue
             else:
                 # Non-connection error or final attempt - propagate
@@ -995,70 +1033,85 @@ def _dbus_operation_with_retry(operation, operation_name, max_retries=2):
             raise
 
 
-def reload_unit_files():
+async def reload_unit_files():
     """Reload systemd unit files with automatic retry on connection failure."""
-    _dbus_operation_with_retry(
-        lambda: systemd_manager().Reload(),
-        "reload_unit_files"
-    )
+    async def _reload():
+        mgr = await systemd_manager()
+        await mgr.call_reload()
+    await _dbus_operation_with_retry(_reload, "reload_unit_files")
 
 
-def escape_path(path) -> str:
+async def escape_path(path) -> str:
     """Escape a path so that it can be used in a systemd file."""
-    return systemd_manager().EscapePath(path)
+    mgr = await systemd_manager()
+    return await mgr.call_escape_path(path)
 
 
-def get_schedule_info(unit: str):
+async def _get_unit_proxy(bus: MessageBus, unit_path: str):
+    """Get a proxy object for a unit at the given path."""
+    introspection = await bus.introspect("org.freedesktop.systemd1", unit_path)
+    return bus.get_proxy_object("org.freedesktop.systemd1", unit_path, introspection)
+
+
+async def get_schedule_info(unit: str):
     """Get the schedule information for a unit."""
     unit_stem = Path(unit).stem
     if not unit_stem.startswith(_SYSTEMD_FILE_PREFIX):
         unit_stem = f"{_SYSTEMD_FILE_PREFIX}{unit_stem}"
-    manager = systemd_manager()
-    bus = session_dbus()
-    # service_path = manager.GetUnit(f"{unit_stem}.service")
-    service_path = manager.LoadUnit(f"{unit_stem}.service")
-    service = bus.get_object("org.freedesktop.systemd1", service_path)
-    service_properties = dbus.Interface(
-        service, dbus_interface="org.freedesktop.DBus.Properties"
-    )
+    manager = await systemd_manager()
+    bus = await session_dbus()
+
+    # Load service unit
+    service_path = await manager.call_load_unit(f"{unit_stem}.service")
+    service_proxy = await _get_unit_proxy(bus, service_path)
+    service_props = service_proxy.get_interface("org.freedesktop.DBus.Properties")
+
     schedule = {
         # timestamp of the last time a unit entered the active state.
-        "Last Start": service_properties.Get(
+        "Last Start": await service_props.call_get(
             "org.freedesktop.systemd1.Unit", "ActiveEnterTimestamp"
         ),
         # timestamp of the last time a unit exited the active state.
-        "Last Finish": service_properties.Get(
+        "Last Finish": await service_props.call_get(
             "org.freedesktop.systemd1.Unit", "ActiveExitTimestamp"
         ),
     }
-    timer_path = manager.LoadUnit(f"{unit_stem}.timer")
-    timer = bus.get_object("org.freedesktop.systemd1", timer_path)
-    timer_properties = dbus.Interface(
-        timer, dbus_interface="org.freedesktop.DBus.Properties"
-    )
-    schedule["Next Start"] = timer_properties.Get(
+
+    # Load timer unit
+    timer_path = await manager.call_load_unit(f"{unit_stem}.timer")
+    timer_proxy = await _get_unit_proxy(bus, timer_path)
+    timer_props = timer_proxy.get_interface("org.freedesktop.DBus.Properties")
+
+    schedule["Next Start"] = await timer_props.call_get(
         "org.freedesktop.systemd1.Timer", "NextElapseUSecRealtime"
     )
-    # "org.freedesktop.systemd1.Timer", "LastTriggerUSec"
+
     missing_dt = datetime(1970, 1, 1, 0, 0, 0)
 
     def timestamp_to_dt(timestamp):
         try:
+            # Handle Variant type from dbus-next
+            if hasattr(timestamp, "value"):
+                timestamp = timestamp.value
             dt = datetime.fromtimestamp(timestamp / 1_000_000)
             if dt == missing_dt:
                 return None
             return dt
-        except ValueError:
-            # "year 586524 is out of range"
+        except (ValueError, TypeError):
+            # "year 586524 is out of range" or type error
             return None
 
     schedule = {field: timestamp_to_dt(val) for field, val in schedule.items()}
-    # TimersCalendar contains an array of structs that contain information about all realtime/calendar timers of this timer unit. The structs contain a string identifying the timer base, which may only be "OnCalendar" for now; the calendar specification string; the next elapsation point on the CLOCK_REALTIME clock, relative to its epoch.
+
+    # TimersCalendar
     timers_cal = []
-    # for timer_type in ("TimersMonotonic", "TimersCalendar"):
-    for timer in timer_properties.Get(
+    timers_calendar_raw = await timer_props.call_get(
         "org.freedesktop.systemd1.Timer", "TimersCalendar"
-    ):
+    )
+    # Handle Variant type
+    if hasattr(timers_calendar_raw, "value"):
+        timers_calendar_raw = timers_calendar_raw.value
+    for timer in timers_calendar_raw:
         base, spec, next_start = timer
         timers_cal.append(
             {
@@ -1072,11 +1125,16 @@ def get_schedule_info(unit: str):
         next_start := [t["next_start"] for t in timers_cal if t["next_start"]]
     ):
         schedule["Next Start"] = min(next_start)
-    # TimersMonotonic contains an array of structs that contain information about all monotonic timers of this timer unit. The structs contain a string identifying the timer base, which is one of "OnActiveUSec", "OnBootUSec", "OnStartupUSec", "OnUnitActiveUSec", or "OnUnitInactiveUSec" which correspond to the settings of the same names in the timer unit files; the microsecond offset from this timer base in monotonic time; the next elapsation point on the CLOCK_MONOTONIC clock, relative to its epoch.
+
+    # TimersMonotonic
     timers_mono = []
-    for timer in timer_properties.Get(
+    timers_monotonic_raw = await timer_props.call_get(
         "org.freedesktop.systemd1.Timer", "TimersMonotonic"
-    ):
+    )
+    # Handle Variant type
+    if hasattr(timers_monotonic_raw, "value"):
+        timers_monotonic_raw = timers_monotonic_raw.value
+    for timer in timers_monotonic_raw:
         base, offset, next_start = timer
         timers_mono.append(
             {
@@ -1089,17 +1147,17 @@ def get_schedule_info(unit: str):
     return schedule
 
 
-def get_unit_files(
+async def get_unit_files(
     unit_type: Optional[Literal["service", "timer"]] = None,
     match: Optional[str] = None,
     states: Optional[str | Sequence[str]] = None,
 ) -> List[str]:
     """Get a list of paths of taskflows unit files."""
-    file_states = get_unit_file_states(unit_type=unit_type, match=match, states=states)
+    file_states = await get_unit_file_states(unit_type=unit_type, match=match, states=states)
     return list(file_states.keys())
 
 
-def get_unit_file_states(
+async def get_unit_file_states(
     unit_type: Optional[Literal["service", "timer"]] = None,
     match: Optional[str] = None,
     states: Optional[str | Sequence[str]] = None,
@@ -1107,14 +1165,15 @@ def get_unit_file_states(
     """Map taskflows unit file path to unit state."""
     states = states or []
     pattern = _make_unit_match_pattern(unit_type=unit_type, match=match)
-    files = list(systemd_manager().ListUnitFilesByPatterns(states, [pattern]))
+    mgr = await systemd_manager()
+    files = await mgr.call_list_unit_files_by_patterns(states, [pattern])
     logger.debug(f"Found {len(files)} units matching: {pattern}")
     if not files:
         logger.error(f"No taskflows unit files found matching: {pattern}")
     return {str(file): str(state) for file, state in files}
 
 
-def get_units(
+async def get_units(
     unit_type: Optional[Literal["service", "timer"]] = None,
     match: Optional[str] = None,
     states: Optional[str | Sequence[str]] = None,
@@ -1122,7 +1181,8 @@ def get_units(
     """Get metadata for taskflows units."""
     states = states or []
     pattern = _make_unit_match_pattern(unit_type=unit_type, match=match)
-    files = list(systemd_manager().ListUnitsByPatterns(states, [pattern]))
+    mgr = await systemd_manager()
+    files = await mgr.call_list_units_by_patterns(states, [pattern])
     fields = [
         "unit_name",
         "description",
@@ -1166,99 +1226,100 @@ def is_start_service(unit_file: str) -> bool:
     return not (filename.startswith("stop-") or filename.startswith("restart-"))
 
 
-def _start_service(files: Sequence[str]):
+async def _start_service(files: Sequence[str]):
     from taskflows.metrics import service_state
 
-    mgr = systemd_manager()
+    mgr = await systemd_manager()
     for sf in files:
         sf = os.path.basename(sf)
         if is_start_service(sf):
             service_name = extract_service_name(sf)
             logger.info(f"Running: {sf}")
-            mgr.StartUnit(sf, "replace")
+            await mgr.call_start_unit(sf, "replace")
             # Track service state change
             service_state.labels(service_name=service_name, state="active").set(1)
             service_state.labels(service_name=service_name, state="inactive").set(0)
 
 
-def _stop_service(files: Sequence[str]):
+async def _stop_service(files: Sequence[str]):
     from taskflows.metrics import service_state
 
-    mgr = systemd_manager()
+    mgr = await systemd_manager()
     for sf in files:
         sf = os.path.basename(sf)
         service_name = extract_service_name(sf)
         logger.info(f"Stopping: {sf}")
         try:
-            mgr.StopUnit(sf, "replace")
+            await mgr.call_stop_unit(sf, "replace")
             # Track service state change
             service_state.labels(service_name=service_name, state="inactive").set(1)
             service_state.labels(service_name=service_name, state="active").set(0)
-        except dbus.exceptions.DBusException as err:
+        except DBusError as err:
             logger.warning(f"Could not stop {sf}: ({type(err)}) {err}")
 
         # remove any failed status caused by stopping service.
-        # mgr.ResetFailedUnit(sf)
+        # await mgr.call_reset_failed_unit(sf)
 
 
-def _restart_service(files: Sequence[str]):
+async def _restart_service(files: Sequence[str]):
     from taskflows.metrics import service_restarts
 
     units = [os.path.basename(f) for f in files]
     # only restart main service units
     units = [u for u in units if is_start_service(u)]
-    mgr = systemd_manager()
+    mgr = await systemd_manager()
     for sf in units:
         service_name = extract_service_name(sf)
         logger.info(f"Restarting: {sf}")
         try:
-            mgr.RestartUnit(sf, "replace")
+            await mgr.call_restart_unit(sf, "replace")
             # Track restart
             service_restarts.labels(service_name=service_name, reason="manual").inc()
-        except dbus.exceptions.DBusException as err:
+        except DBusError as err:
             logger.warning(f"Could not restart {sf}: ({type(err)}) {err}")
 
 
-def _enable_service(files: Sequence[str]):
-    mgr = systemd_manager()
+async def _enable_service(files: Sequence[str]):
+    mgr = await systemd_manager()
     logger.info(f"Enabling: {pformat(files)}")
 
-    def enable_files(files, is_retry=False):
+    async def enable_files(files, is_retry=False):
         try:
             # the first bool controls whether the unit shall be enabled for runtime only (true, /run), or persistently (false, /etc).
             # The second one controls whether symlinks pointing to other units shall be replaced if necessary.
-            mgr.EnableUnitFiles(files, False, True)
-        except dbus.exceptions.DBusException as err:
+            await mgr.call_enable_unit_files(files, False, True)
+        except DBusError as err:
             logger.warning(f"Could not enable {files}: ({type(err)}) {err}")
             if not is_retry and len(files) > 1:
                 for file in files:
-                    enable_files([file], is_retry=True)
+                    await enable_files([file], is_retry=True)
 
-    enable_files(files)
+    await enable_files(files)
 
 
-def _disable_service(files: Sequence[str]):
-    mgr = systemd_manager()
+async def _disable_service(files: Sequence[str]):
+    mgr = await systemd_manager()
     files = [os.path.basename(f) for f in files]
     logger.info(f"Disabling: {pformat(files)}")
 
-    def disable_files(files, is_retry=False):
+    async def disable_files(files, is_retry=False):
         try:
             # the first bool controls whether the unit shall be enabled for runtime only (true, /run), or persistently (false, /etc).
             # The second one controls whether symlinks pointing to other units shall be replaced if necessary.
-            for meta in mgr.DisableUnitFiles(files, False):
+            result = await mgr.call_disable_unit_files(files, False)
+            for meta in result:
                 # meta has: the type of the change (one of symlink or unlink), the file name of the symlink and the destination of the symlink.
                 logger.info(f"{meta[0]} {meta[1]} {meta[2]}")
-        except dbus.exceptions.DBusException as err:
+        except DBusError as err:
             logger.warning(f"Could not disable {files}: ({type(err)}) {err}")
             if not is_retry and len(files) > 1:
                 for file in files:
-                    disable_files([file], is_retry=True)
+                    await disable_files([file], is_retry=True)
 
-    disable_files(files)
+    await disable_files(files)
 
 
-def _remove_service(service_files: Sequence[str], timer_files: Sequence[str], preserve_container: bool = False):
+async def _remove_service(service_files: Sequence[str], timer_files: Sequence[str], preserve_container: bool = False):
     def valid_file_paths(files):
         files = [Path(f) for f in files]
         return [f for f in files if f.is_file()]
@@ -1269,16 +1330,16 @@ def _remove_service(service_files: Sequence[str], timer_files: Sequence[str], pr
         f"Removing {len(service_files)} services and {len(timer_files)} timers"
     )
     files = service_files + timer_files
-    _stop_service(files)
-    _disable_service(files)
+    await _stop_service(files)
+    await _disable_service(files)
     container_names = set()
-    mgr = systemd_manager()
+    mgr = await systemd_manager()
     for srv_file in service_files:
         logger.info(f"Cleaning cache and runtime directories: {srv_file}.")
         try:
             # the possible values are "configuration", "state", "logs", "cache", "runtime", "fdstore", and "all".
-            mgr.CleanUnit(srv_file.name, ["all"])
-        except dbus.exceptions.DBusException as err:
+            await mgr.call_clean_unit(srv_file.name, ["all"])
+        except DBusError as err:
             logger.warning(f"Could not clean {srv_file}: ({type(err)}) {err}")
         container_name = re.search(
             r"docker (?:start|stop) ([\w-]+)", srv_file.read_text()
@@ -1298,4 +1359,4 @@ def _remove_service(service_files: Sequence[str], timer_files: Sequence[str], pr
     logger.info(
         f"Finished removing {len(service_files)} services and {len(timer_files)} timers"
     )
-    reload_unit_files()
+    await reload_unit_files()

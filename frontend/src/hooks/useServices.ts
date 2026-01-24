@@ -14,7 +14,7 @@ export function useServices() {
 
 export function useServiceAction() {
   const queryClient = useQueryClient();
-  const timeoutRef = useRef<number>();
+  const timeoutRef = useRef<number | undefined>(undefined);
 
   // Cleanup timeout on unmount
   useEffect(() => {
@@ -43,7 +43,7 @@ export function useServiceAction() {
 
 export function useBatchAction() {
   const queryClient = useQueryClient();
-  const timeoutRef = useRef<number>();
+  const timeoutRef = useRef<number | undefined>(undefined);
 
   // Cleanup timeout on unmount
   useEffect(() => {
