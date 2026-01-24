@@ -1362,8 +1362,6 @@ class GoogleDrive:
             Channel ID if successful, None otherwise
         """
         try:
-            import uuid
-
             channel_body = {
                 "id": str(uuid.uuid4()),
                 "type": "web_hook",
@@ -1428,7 +1426,7 @@ class GoogleDrive:
     def duplicate_file(
         self, file_id: str, new_title: Optional[str] = None
     ) -> Optional[str]:
-        """Duplicate a file using PyDrive.
+        """Duplicate a file using Google Drive API copy method.
 
         Args:
             file_id: Google Drive file ID to duplicate
@@ -1438,23 +1436,17 @@ class GoogleDrive:
             New file ID if successful, None otherwise
         """
         try:
-            # Get original file info
-            original_file = self.pydrive_client.CreateFile({"id": file_id})
-            original_file.FetchMetadata()
+            # Get original file info for the title if not provided
+            if not new_title:
+                original_file = self.service.files().get(fileId=file_id, fields="name").execute()
+                new_title = f"Copy of {original_file['name']}"
 
-            # Create a copy
-            duplicate_file = self.pydrive_client.CreateFile(
-                {
-                    "title": new_title or f"Copy of {original_file['title']}",
-                    "parents": original_file["parents"],
-                }
-            )
+            # Use the copy API method to properly duplicate the file with its content
+            body = {"name": new_title}
+            copied_file = self.service.files().copy(fileId=file_id, body=body, fields="id").execute()
 
-            # Copy the file
-            duplicate_file.Upload()
-
-            logger.info(f"Duplicated file {file_id} to {duplicate_file['id']}")
-            return duplicate_file["id"]
+            logger.info(f"Duplicated file {file_id} to {copied_file['id']}")
+            return copied_file["id"]
 
         except Exception as e:
             logger.error(f"Failed to duplicate file {file_id}: {e}")

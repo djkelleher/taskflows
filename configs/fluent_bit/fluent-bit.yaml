@@ -53,8 +53,8 @@ pipeline:
       host: ${LOKI_HOST}
       port: ${LOKI_PORT}
       labels: log_source=$log_source,host=${HOSTNAME}
-      label_keys: $service_name
-      remove_keys: service_name,log_source
+      label_keys: $service_name,$level,$logger,$app,$environment
+      remove_keys: service_name,log_source,level,logger,app,environment,event
       drop_single_key: true
       auto_kubernetes_labels: false
       retry_limit: 5

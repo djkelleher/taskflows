@@ -1,9 +1,26 @@
--- Log processor for plain text messages from journald
+-- Log processor for plain text and JSON messages from journald
 -- Handles both user services and Docker containers
+-- Parses JSON messages from structlog and extracts Loki labels
+
+local cjson = require("cjson.safe")
 
 -- State for timestamp tie-breaking
 local last_ts_us_by_service = {}
 local last_offset_by_service = {}
+
+-- Try to parse JSON and extract fields for Loki labels
+local function extract_json_fields(message)
+    if not message or message:sub(1, 1) ~= "{" then
+        return nil
+    end
+
+    local parsed, err = cjson.decode(message)
+    if not parsed or type(parsed) ~= "table" then
+        return nil
+    end
+
+    return parsed
+end
 
 function process_log(tag, timestamp, record)
     local message = record["MESSAGE"] or record["log_message"] or ""
@@ -68,13 +85,41 @@ function process_log(tag, timestamp, record)
         end
     end
     
-    -- Build clean record with the plain text message
+    -- Build clean record - try to extract JSON fields for Loki labels
     local clean_record = {
-        MESSAGE = message,  -- Keep the plain text message as-is
+        MESSAGE = message,
         service_name = service_name,
         log_source = record["log_source"]
     }
-    
+
+    -- Try to parse JSON and extract label fields
+    local json_data = extract_json_fields(message)
+    if json_data then
+        -- Extract key fields as Loki labels (low cardinality)
+        if json_data.level_name then
+            clean_record["level"] = json_data.level_name
+        elseif json_data.level then
+            clean_record["level"] = json_data.level
+        end
+
+        if json_data.logger then
+            clean_record["logger"] = json_data.logger
+        end
+
+        if json_data.app then
+            clean_record["app"] = json_data.app
+        end
+
+        if json_data.environment then
+            clean_record["environment"] = json_data.environment
+        end
+
+        -- Extract event/message for easier querying
+        if json_data.event then
+            clean_record["event"] = json_data.event
+        end
+    end
+
     -- If new_ts is provided, use it; otherwise keep the original timestamp
     if new_ts then
         return 2, new_ts, clean_record

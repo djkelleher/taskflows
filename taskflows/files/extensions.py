@@ -12,16 +12,6 @@ file_extensions = [
     "CATPart",
     "CATProduct",
     "CGR",
-    "GIF",
-    "Gif",
-    "JPEG",
-    "JPG",
-    "Jpeg",
-    "Jpg",
-    "PDF",
-    "Pdf",
-    "ZIP",
-    "Zip",
     "a",
     "aac",
     "aaf",
@@ -370,4 +360,4 @@ file_extensions = [
     "zst",
 ]
 
-file_extensions_re = re.compile(r"\.(" + "|".join(file_extensions) + r")$")
+file_extensions_re = re.compile(r"\.(" + "|".join(file_extensions) + r")$", re.IGNORECASE)

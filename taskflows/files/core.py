@@ -112,7 +112,7 @@ class Files:
                     )
                 else:
                     if os.path.isdir(dst_path):
-                        dst_path = f"{dst_path}/{Path(src_path).name}"
+                        dst_path = Path(dst_path) / Path(src_path).name
                     # TODO make work with miltiple files.
                     try:
                         self.s3.download_file(
@@ -165,7 +165,3 @@ class Files:
                     # would  already be checked for s3 move.
                     raise FileNotFoundError(f"Destination file {dst_path} does not exist after transfer")
                 self.delete(src_path)
-        finally:
-            # Additional cleanup if error occurred and delete_src was requested
-            # but source wasn't deleted yet (only applies if error in delete_src path)
-            pass

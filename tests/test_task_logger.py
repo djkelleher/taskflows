@@ -51,10 +51,9 @@ def test_build_loki_query_url_timestamps():
     assert to_ts in url
 
 
-@pytest.mark.asyncio
-async def test_task_logger_creation():
+def test_task_logger_creation():
     """Test TaskLogger creation without database."""
-    task_logger = await TaskLogger.create(
+    task_logger = TaskLogger(
         name="test_task",
         required=False,
     )
@@ -68,7 +67,7 @@ async def test_task_logger_creation():
 @pytest.mark.asyncio
 async def test_task_logger_on_task_start():
     """Test task start records time."""
-    task_logger = await TaskLogger.create(
+    task_logger = TaskLogger(
         name="test_task",
         required=False,
     )
@@ -83,7 +82,7 @@ async def test_task_logger_on_task_start():
 @pytest.mark.asyncio
 async def test_task_logger_on_task_error():
     """Test task error is recorded in errors list."""
-    task_logger = await TaskLogger.create(
+    task_logger = TaskLogger(
         name="test_task",
         required=False,
     )
@@ -99,7 +98,7 @@ async def test_task_logger_on_task_error():
 @pytest.mark.asyncio
 async def test_task_logger_on_task_finish_success():
     """Test successful task finish."""
-    task_logger = await TaskLogger.create(
+    task_logger = TaskLogger(
         name="test_task",
         required=False,
     )
@@ -116,7 +115,7 @@ async def test_task_logger_on_task_finish_success():
 @pytest.mark.asyncio
 async def test_task_logger_on_task_finish_with_errors_required():
     """Test that required task raises on errors."""
-    task_logger = await TaskLogger.create(
+    task_logger = TaskLogger(
         name="test_task",
         required=True,
     )
@@ -132,7 +131,7 @@ async def test_task_logger_on_task_finish_with_errors_required():
 @pytest.mark.asyncio
 async def test_task_logger_on_task_finish_with_multiple_errors():
     """Test that multiple errors are aggregated."""
-    task_logger = await TaskLogger.create(
+    task_logger = TaskLogger(
         name="test_task",
         required=True,
     )
@@ -156,7 +155,7 @@ async def test_task_logger_error_alert_includes_loki_url(mock_send_alert):
     mock_dst = MagicMock(spec=MsgDst)
     alerts = [Alerts(send_to=mock_dst, send_on=["error"])]
 
-    task_logger = await TaskLogger.create(
+    task_logger = TaskLogger(
         name="test_task",
         required=False,
         alerts=alerts,
@@ -195,7 +194,7 @@ async def test_task_logger_finish_alert_includes_loki_url(mock_send_alert):
     mock_dst = MagicMock(spec=MsgDst)
     alerts = [Alerts(send_to=mock_dst, send_on=["finish"])]
 
-    task_logger = await TaskLogger.create(
+    task_logger = TaskLogger(
         name="test_task",
         required=False,
         alerts=alerts,

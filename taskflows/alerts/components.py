@@ -1,5 +1,7 @@
 import csv
+import json
 import pickle
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime
@@ -57,6 +59,29 @@ def font_size_css(font_size: FontSize) -> str:
         FontSize.LARGE: "20px",
     }
     return fonts.get(font_size, fonts[FontSize.MEDIUM])
+
+
+def get_color_hex(color: str, theme: str = "dark") -> str:
+    """Convert a color name to hex value based on theme.
+
+    Args:
+        color: Color name (green, red, yellow, blue, orange, gray, purple) or hex value.
+        theme: Theme name ('dark' or 'light').
+
+    Returns:
+        Hex color value.
+    """
+    colors = get_theme_colors(theme)
+    color_map = {
+        "green": colors["success"],
+        "red": colors["error"],
+        "yellow": colors["warning"],
+        "blue": colors["important"],
+        "orange": "#EA580C" if theme == "light" else "#FB923C",
+        "gray": colors["neutral"],
+        "purple": "#7C3AED" if theme == "light" else "#A78BFA",
+    }
+    return color_map.get(color.lower(), color)
 
 
 def get_theme_colors(theme: str = "dark") -> dict:
@@ -744,7 +769,7 @@ class LineBreak(Component):
         return container
 
     def classic_md(self) -> str:
-        return "".join(["\n" for _ in range(self.n_break)])
+        return "\n" * self.n_break
 
     def slack_md(self) -> str:
         return self.classic_md()
@@ -1074,19 +1099,6 @@ class StatusIndicator(Component):
         self.color = color
         self.show_icon = show_icon
 
-    def _get_color_hex(self, color: str, theme: str = "dark") -> str:
-        """Convert color name to hex."""
-        colors = get_theme_colors(theme)
-        color_map = {
-            "green": colors["success"],
-            "red": colors["error"],
-            "yellow": colors["warning"],
-            "blue": colors["important"],
-            "orange": "#EA580C" if theme == "light" else "#FB923C",
-            "gray": colors["neutral"],
-        }
-        return color_map.get(color.lower(), color)
-
     def _get_icon(self, color: str) -> str:
         """Get appropriate icon for color."""
         icon_map = {
@@ -1100,7 +1112,7 @@ class StatusIndicator(Component):
         return icon_map.get(color.lower(), "●")
 
     def html(self, theme: str = "dark") -> d.html_tag:
-        color_hex = self._get_color_hex(self.color, theme)
+        color_hex = get_color_hex(self.color, theme)
         icon = self._get_icon(self.color)
 
         with (
@@ -1180,22 +1192,9 @@ class ProgressBar(Component):
         self.show_percentage = show_percentage
         self.width = width
 
-    def _get_color_hex(self, color: str, theme: str = "dark") -> str:
-        """Get hex color for the progress bar."""
-        colors = get_theme_colors(theme)
-        color_map = {
-            "blue": colors["important"],
-            "green": colors["success"],
-            "red": colors["error"],
-            "yellow": colors["warning"],
-            "purple": "#7C3AED" if theme == "light" else "#A78BFA",
-            "gray": colors["neutral"],
-        }
-        return color_map.get(color.lower(), color)
-
     def html(self, theme: str = "dark") -> d.html_tag:
         percentage = (self.value / self.max_value) * 100
-        color_hex = self._get_color_hex(self.color, theme)
+        color_hex = get_color_hex(self.color, theme)
 
         with (container := d.div(style=f"width: {self.width}px;")):
             if self.show_percentage:
@@ -1255,8 +1254,6 @@ class ProgressBar(Component):
             progress.update(task, completed=self.value)
 
             # Add a brief pause to show the progress bar
-            import time
-
             time.sleep(0.1)
 
 
@@ -1944,8 +1941,6 @@ class JSONComponent(Component):
         self.sort_keys = sort_keys
 
     def html(self, theme: str = "dark") -> d.html_tag:
-        import json
-
         json_str = json.dumps(self.data, indent=self.indent, sort_keys=self.sort_keys)
         return d.pre(
             json_str,
@@ -1953,8 +1948,6 @@ class JSONComponent(Component):
         )
 
     def classic_md(self) -> str:
-        import json
-
         json_str = json.dumps(self.data, indent=self.indent, sort_keys=self.sort_keys)
         return f"```json\n{json_str}\n```"
 
@@ -2010,8 +2003,6 @@ class SpinnerComponent(Component):
     def console(self, console: Optional[Console] = None) -> None:
         if console is None:
             console = Console()
-
-        import time
 
         with console.status(
             f"[bold green]{self.text}[/bold green]", spinner=self.spinner_style
@@ -2272,7 +2263,7 @@ class LogEntry(Component):
         level_color = level_css_color(self.level, theme)
 
         container = d.div(
-            style=f"margin: 8px 0; padding: 12px; background-color: {colors['secondary']}; border-left: 4px solid {level_color}; border-radius: 4px;"
+            style=f"margin: 8px 0; padding: 12px; background-color: {colors['code_bg']}; border-left: 4px solid {level_color}; border-radius: 4px;"
         )
 
         header = d.div(
@@ -2304,8 +2295,8 @@ class LogEntry(Component):
 
         return container
 
-    def md(self, slack_format: bool = False, discord_format: bool = False) -> str:
-        """Render the log entry as Markdown."""
+    def classic_md(self) -> str:
+        """Render the log entry as traditional Markdown."""
         timestamp_str = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
         # Build header parts
@@ -2314,20 +2305,53 @@ class LogEntry(Component):
             header_parts.append(f"`[{self.source}]`")
         header_parts.append(f"**{self.level.name}**")
 
-        # Format the message
-        if slack_format or discord_format:
-            # Use code formatting for the message
-            message_formatted = f"```\n{self.message}\n```"
+        # Use inline code for shorter messages, code blocks for longer
+        if len(self.message) <= 100 and "\n" not in self.message:
+            message_formatted = f"`{self.message}`"
         else:
-            # Use inline code for shorter messages, code blocks for longer
-            if len(self.message) <= 100 and "\n" not in self.message:
-                message_formatted = f"`{self.message}`"
-            else:
-                message_formatted = f"```\n{self.message}\n```"
+            message_formatted = f"```\n{self.message}\n```"
 
         return f"{' '.join(header_parts)}\n{message_formatted}"
 
-    def rich_text(self) -> RichText:
+    def slack_md(self) -> str:
+        """Render the log entry for Slack."""
+        timestamp_str = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Build header parts
+        header_parts = [f"`{timestamp_str}`"]
+        if self.source:
+            header_parts.append(f"`[{self.source}]`")
+        header_parts.append(f"*{self.level.name}*")
+
+        # Use code formatting for the message
+        message_formatted = f"```\n{self.message}\n```"
+
+        return f"{' '.join(header_parts)}\n{message_formatted}"
+
+    def discord_md(self) -> str:
+        """Render the log entry for Discord."""
+        timestamp_str = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Build header parts
+        header_parts = [f"`{timestamp_str}`"]
+        if self.source:
+            header_parts.append(f"`[{self.source}]`")
+        header_parts.append(f"**{self.level.name}**")
+
+        # Use code formatting for the message
+        message_formatted = f"```\n{self.message}\n```"
+
+        return f"{' '.join(header_parts)}\n{message_formatted}"
+
+    def console(self, console: Optional[Console] = None) -> None:
+        """Render the log entry to the console using Rich."""
+        if console is None:
+            console = Console()
+
+        text = self._rich_text()
+        console.print(text)
+
+    def _rich_text(self) -> RichText:
         """Render the log entry for Rich console output."""
         timestamp_str = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
 

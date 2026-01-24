@@ -20,6 +20,11 @@ from .common import logger, services_data_dir
 # and audit logging to prevent tampering and track usage.
 
 
+def _set_secure_permissions(path: Path, mode: int = stat.S_IRUSR | stat.S_IWUSR) -> None:
+    """Set secure file permissions (default: 0600)."""
+    os.chmod(path, mode)
+
+
 def _get_hmac_secret() -> bytes:
     """Get or generate HMAC secret key for pickle file integrity verification.
 
@@ -31,7 +36,7 @@ def _get_hmac_secret() -> bytes:
     # Ensure services_data_dir has proper permissions (700)
     try:
         services_data_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(services_data_dir, stat.S_IRWXU)  # 700 (owner rwx only)
+        _set_secure_permissions(services_data_dir, stat.S_IRWXU)  # 700
     except Exception as e:
         logger.warning(f"Failed to set directory permissions: {e}")
 
@@ -40,17 +45,32 @@ def _get_hmac_secret() -> bytes:
         file_stat = secret_file.stat()
         if file_stat.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
             logger.error(f"SECURITY: Secret file {secret_file} has insecure permissions!")
-            # Fix permissions
-            os.chmod(secret_file, stat.S_IRUSR | stat.S_IWUSR)  # 600
+            _set_secure_permissions(secret_file)
 
-        return secret_file.read_bytes()
+        secret = secret_file.read_bytes()
+        # Validate secret is usable (not empty or too short)
+        if len(secret) < 32:
+            logger.error("SECURITY: Secret file is invalid (too short), regenerating")
+            # Fall through to generate new secret
+        else:
+            return secret
 
-    # Generate new secret
+    # Generate new secret using atomic file creation to prevent race conditions
     logger.info("Generating new HMAC secret for pickle integrity verification")
     secret = secrets.token_bytes(32)  # 256 bits
-    secret_file.write_bytes(secret)
-    os.chmod(secret_file, stat.S_IRUSR | stat.S_IWUSR)  # 600 (owner rw only)
-    return secret
+
+    try:
+        # O_CREAT | O_EXCL atomically creates file only if it doesn't exist
+        fd = os.open(secret_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, stat.S_IRUSR | stat.S_IWUSR)
+        try:
+            os.write(fd, secret)
+        finally:
+            os.close(fd)
+        return secret
+    except FileExistsError:
+        # Another process created the file first - read their secret
+        logger.info("Secret file created by another process, reading existing secret")
+        return secret_file.read_bytes()
 
 
 def _sign_pickle(pickle_data: bytes) -> bytes:

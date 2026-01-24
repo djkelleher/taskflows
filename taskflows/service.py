@@ -2,12 +2,10 @@ import os
 import re
 import subprocess
 import threading
-from abc import abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from functools import cache
 from pathlib import Path
-from pprint import pformat, pprint
+from pprint import pformat
 from typing import Callable, Dict, List, Literal, Optional, Sequence, Set, Union
 
 from dbus_next import BusType
@@ -35,11 +33,8 @@ from .constraints import (
 )
 from .docker import (
     DockerContainer,
-    DockerImage,
-    Ulimit,
     Volume,
     delete_docker_container,
-    get_docker_client,
 )
 from .exec import PickledFunction
 from .schedule import Calendar, Periodic, Schedule
@@ -205,14 +200,39 @@ class RestartPolicy:
 @dataclass
 class Venv:
     env_name: str
+    custom_path: Optional[str | Path] = None
 
-    @abstractmethod
     def create_env_command(self, command: str) -> str:
+        # If custom path is provided, use it directly
+        if self.custom_path:
+            exe = Path(self.custom_path)
+            if not exe.is_file():
+                raise FileNotFoundError(f"Custom executable not found: {exe}")
+            return f"{exe} run -n {self.env_name} --no-capture-output {command}"
+
         home = Path.home()
         exes = (
+            # Mamba distributions
             home.joinpath("mambaforge", "bin", "mamba"),
             home.joinpath("miniforge3", "bin", "mamba"),
+            home.joinpath("micromamba", "bin", "micromamba"),
+            home.joinpath(".local", "bin", "micromamba"),
+            # Conda distributions
             home.joinpath("miniconda3", "condabin", "conda"),
+            home.joinpath("miniconda3", "bin", "conda"),
+            home.joinpath("anaconda3", "condabin", "conda"),
+            home.joinpath("anaconda3", "bin", "conda"),
+            home.joinpath("miniconda", "condabin", "conda"),
+            home.joinpath("miniconda", "bin", "conda"),
+            home.joinpath("anaconda", "condabin", "conda"),
+            home.joinpath("anaconda", "bin", "conda"),
+            # Common system-wide locations
+            Path("/opt/conda/bin/conda"),
+            Path("/opt/miniconda3/bin/conda"),
+            Path("/opt/anaconda3/bin/conda"),
+            # Pyenv conda installations
+            home.joinpath(".pyenv", "versions", "miniconda3-latest", "bin", "conda"),
+            home.joinpath(".pyenv", "versions", "anaconda3-latest", "bin", "conda"),
         )
         for exe in exes:
             if exe.is_file():
@@ -501,8 +521,6 @@ class Service:
             self.unit_entries.add(f"Requires={join(self.requires)}")
         if self.requisite:
             self.unit_entries.add(f"Requisite={join(self.requisite)}")
-        if self.conflicts:
-            self.unit_entries.add(f"Conflicts={join(self.conflicts)}")
         if self.binds_to:
             self.unit_entries.add(f"BindsTo={join(self.binds_to)}")
         if self.propagate_stop_to:
@@ -691,7 +709,7 @@ class Service:
         return service_logs(self.name)
 
     def show_files(self):
-        pprint(dict(load_service_files(self.unit_files)))
+        print(pformat(dict(load_service_files(self.unit_files))))
 
     def _write_timer_units(self):
         for prefix, schedule in (

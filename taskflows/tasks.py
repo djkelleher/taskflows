@@ -7,18 +7,18 @@ from typing import Any, Callable, List, Literal, Optional, Sequence
 from urllib.parse import quote
 
 import anyio
-from .alerts import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
 from anyio.from_thread import BlockingPortal
+from pydantic import BaseModel
+
+from .alerts import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
+from .common import config
+from .common import logger as default_logger
 from .loggers import (
     clear_request_context,
     generate_request_id,
     get_struct_logger,
     set_request_context,
 )
-from pydantic import BaseModel
-
-from .common import config
-from .common import logger as default_logger
 
 TaskEvent = Literal["start", "error", "finish"]
 
@@ -119,25 +119,16 @@ class _RuntimeManager:
         """Check if the portal is healthy and usable.
 
         Returns:
-            True if portal exists, thread is alive, and portal is functional
+            True if portal exists and thread is alive
         """
         if self._portal is None or self._thread is None:
             return False
 
         if not self._thread.is_alive():
-            logger.warning("Portal thread is not alive, needs restart")
+            default_logger.warning("Portal thread is not alive, needs restart")
             return False
 
-        # Perform lightweight health check by checking portal state
-        # The portal's internal state should be accessible
-        try:
-            # Check if we can access portal internals (it's not closed)
-            # If the portal is closed or broken, accessing it may raise an error
-            _ = self._portal._call_portal
-            return True
-        except (AttributeError, RuntimeError) as e:
-            logger.warning(f"Portal health check failed: {e}")
-            return False
+        return True
 
     def get_portal(self) -> BlockingPortal:
         """Get or create the blocking portal for running async code from sync context.
@@ -171,12 +162,12 @@ class _RuntimeManager:
             # Check portal health
             if not self._is_portal_healthy():
                 needs_restart = True
-                logger.info(f"Portal unhealthy, attempting restart (attempt {attempt + 1}/{max_retries})")
+                default_logger.info(f"Portal unhealthy, attempting restart (attempt {attempt + 1}/{max_retries})")
             else:
                 # Portal looks healthy, update health status
                 self._portal_healthy = True
                 self._last_health_check = current_time
-                logger.debug("Portal health check passed")
+                default_logger.debug("Portal health check passed")
                 return self._portal
 
             # Restart portal if needed
@@ -187,11 +178,11 @@ class _RuntimeManager:
                         try:
                             # Clean up old portal if it exists
                             if self._portal is not None:
-                                logger.debug("Stopping old portal before restart")
+                                default_logger.debug("Stopping old portal before restart")
                                 try:
                                     self._portal.call(self._portal.stop)
                                 except Exception as e:
-                                    logger.debug(f"Error stopping old portal: {e}")
+                                    default_logger.debug(f"Error stopping old portal: {e}")
 
                             # Start new runtime
                             self._start_runtime()
@@ -200,13 +191,13 @@ class _RuntimeManager:
                             if self._is_portal_healthy():
                                 self._portal_healthy = True
                                 self._last_health_check = time.time()
-                                logger.info("Portal successfully restarted and verified")
+                                default_logger.info("Portal successfully restarted and verified")
                                 return self._portal
                             else:
-                                logger.error("Portal restart succeeded but health check failed")
+                                default_logger.error("Portal restart succeeded but health check failed")
 
                         except Exception as e:
-                            logger.error(f"Portal restart failed: {e}", exc_info=True)
+                            default_logger.error(f"Portal restart failed: {e}", exc_info=True)
                             self._portal_healthy = False
 
             # Wait before retry (except on last attempt)
@@ -235,14 +226,14 @@ class _RuntimeManager:
                     async with anyio.from_thread.BlockingPortal() as portal:
                         portal_holder["portal"] = portal
                         ready_event.set()
-                        logger.debug("Async runtime started, portal ready")
+                        default_logger.debug("Async runtime started, portal ready")
                         await portal.sleep_until_stopped()
-                        logger.debug("Async runtime stopped")
+                        default_logger.debug("Async runtime stopped")
 
                 anyio.run(main, backend="asyncio")
             except Exception as e:
                 error_holder["error"] = e
-                logger.error(f"Async runtime error: {e}", exc_info=True)
+                default_logger.error(f"Async runtime error: {e}", exc_info=True)
                 ready_event.set()  # Unblock waiting thread
 
         self._thread = threading.Thread(target=run_async_runtime, daemon=True, name="TaskflowsAsyncRuntime")
@@ -260,7 +251,7 @@ class _RuntimeManager:
         if not self._portal:
             raise RuntimeError("Failed to initialize async runtime: portal not created")
 
-        logger.debug("Async runtime initialization completed successfully")
+        default_logger.debug("Async runtime initialization completed successfully")
 
 
 # Global singleton for runtime management
@@ -280,12 +271,22 @@ class Alerts(BaseModel):
             self.send_on = [self.send_on]
 
 
+def _normalize_alerts(
+    alerts: Optional[Sequence["Alerts | MsgDst"]],
+) -> Optional[List[Alerts]]:
+    """Normalize alert configuration to a list of Alerts objects."""
+    if not alerts:
+        return None
+    if not isinstance(alerts, (list, tuple)):
+        alerts = [alerts]
+    return [a if isinstance(a, Alerts) else Alerts(send_to=a) for a in alerts]
+
+
 class TaskLogger:
     """Utility class for handling task logging and sending alerts with Loki URLs."""
 
-    @classmethod
-    async def create(
-        cls,
+    def __init__(
+        self,
         name: str,
         required: bool,
         alerts: Optional[Sequence[Alerts]] = None,
@@ -293,7 +294,7 @@ class TaskLogger:
         task_id: Optional[str] = None,
     ):
         """
-        Create and initialize an TaskLogger instance.
+        Initialize a TaskLogger instance.
 
         Args:
             name (str): Name of the task.
@@ -301,15 +302,12 @@ class TaskLogger:
             alerts (Optional[Sequence[Alerts]], optional): Alert configurations / destinations. Defaults to None.
             task_id (Optional[str], optional): Unique task ID. Generated if not provided.
         """
-        self = cls()
         self.name = name
         self.required = required
         self.alerts = alerts or []
         self.error_msg_max_length = error_msg_max_length
         self.errors = []
         self.task_id = task_id or generate_request_id()
-
-        return self
 
     async def on_task_start(self):
         """
@@ -470,21 +468,8 @@ class TaskLogger:
             clear_request_context()
 
     def _event_alerts(self, event: Literal["start", "error", "finish"]) -> List[MsgDst]:
-        """
-        Get the list of destinations to send alerts for the given event.
-
-        Args:
-            event: The event (start, error, or finish) for which to get the
-                alert destinations.
-
-        Returns:
-            A list of destinations to send the alert to.
-        """
-        send_to = []
-        for alert in self.alerts:
-            if event in alert.send_on:
-                send_to += alert.send_to
-        return send_to
+        """Get the list of destinations to send alerts for the given event."""
+        return [dst for alert in self.alerts if event in alert.send_on for dst in alert.send_to]
 
 
 async def _async_task_wrapper(
@@ -493,6 +478,7 @@ async def _async_task_wrapper(
     timeout: Optional[float],
     task_logger: TaskLogger,
     logger: Logger,
+    is_async: Optional[bool] = None,
     *args,
     **kwargs,
 ):
@@ -510,19 +496,13 @@ async def _async_task_wrapper(
     start_time = time.time()
     status = "failure"  # Default status
 
+    # Determine if function is async (use cached value if provided)
+    func_is_async = is_async if is_async is not None else asyncio.iscoroutinefunction(func)
+
     # Retry loop: range(retries + 1) gives us (retries + 1) total attempts
-    # Examples:
-    #   retries=0 -> 1 attempt  (initial attempt only, no retries)
-    #   retries=1 -> 2 attempts (initial attempt + 1 retry)
-    #   retries=3 -> 4 attempts (initial attempt + 3 retries)
-    # The loop variable 'i' represents the attempt number (0-indexed):
-    #   i=0 is the initial attempt
-    #   i=1 is the first retry
-    #   i=2 is the second retry, etc.
     for i in range(retries + 1):
         try:
-            # Check if function is async
-            if asyncio.iscoroutinefunction(func):
+            if func_is_async:
                 if timeout:
                     result = await asyncio.wait_for(
                         func(*args, **kwargs), timeout=timeout
@@ -531,7 +511,6 @@ async def _async_task_wrapper(
                     result = await func(*args, **kwargs)
             else:
                 # For sync functions, run them in a thread pool with context propagation
-                # Capture current context to propagate task_id to the worker thread
                 ctx = contextvars.copy_context()
 
                 def run_in_context():
@@ -594,10 +573,10 @@ async def run_task(
     *args,
     **kwargs,
 ):
-    """Run an async function as a task with retry, timeout, and logging capabilities.
+    """Run a function as a task with retry, timeout, and logging capabilities.
 
     Args:
-        func (Callable): The async function to run as a task.
+        func (Callable): The function to run as a task.
         *args: Positional arguments to pass to the function.
         name (str): Name which should be used to identify the task.
         required (bool, optional): Required tasks will raise exceptions. Defaults to False.
@@ -610,23 +589,17 @@ async def run_task(
     Returns:
         The result of the function execution.
     """
-    logger = logger or default_logger
-    if alerts:
-        if not isinstance(alerts, (list, tuple)):
-            alerts = [alerts]
-        alerts = [a if isinstance(a, Alerts) else Alerts(send_to=a) for a in alerts]
-
-    task_logger = await TaskLogger.create(
+    task_logger = TaskLogger(
         name=name or func.__name__,
         required=required,
-        alerts=alerts,
+        alerts=_normalize_alerts(alerts),
     )
     return await _async_task_wrapper(
         func=func,
         retries=retries,
         timeout=timeout,
         task_logger=task_logger,
-        logger=logger,
+        logger=logger or default_logger,
         *args,
         **kwargs,
     )
@@ -650,28 +623,27 @@ def task(
         alerts (Optional[Sequence[Alerts]], optional): Alert configurations / destinations.
         logger (Optional[Logger], optional): Logger to use for error logging.
     """
-    logger = logger or default_logger
-    if alerts:
-        if not isinstance(alerts, (list, tuple)):
-            alerts = [alerts]
-        alerts = [a if isinstance(a, Alerts) else Alerts(send_to=a) for a in alerts]
+    normalized_alerts = _normalize_alerts(alerts)
+    task_logger_inst = logger or default_logger
 
     def task_decorator(func):
-        # Check if the function is async
-        is_async = asyncio.iscoroutinefunction(func)
+        # Check if the function is async at decoration time (once)
+        func_is_async = asyncio.iscoroutinefunction(func)
+        task_name = name or func.__name__
 
         async def async_wrapper(*args, **kwargs):
-            task_logger = await TaskLogger.create(
-                name=name or func.__name__,
+            task_logger = TaskLogger(
+                name=task_name,
                 required=required,
-                alerts=alerts,
+                alerts=normalized_alerts,
             )
             return await _async_task_wrapper(
                 func=func,
                 retries=retries,
                 timeout=timeout,
                 task_logger=task_logger,
-                logger=logger,
+                logger=task_logger_inst,
+                is_async=func_is_async,
                 *args,
                 **kwargs,
             )
@@ -680,7 +652,7 @@ def task(
             # Smart wrapper that works with uvloop and existing event loops
             try:
                 # Check if we're already in an async context
-                loop = asyncio.get_running_loop()
+                asyncio.get_running_loop()
                 # Return a coroutine/task that can be awaited
                 return asyncio.create_task(async_wrapper(*args, **kwargs))
             except RuntimeError:
@@ -689,6 +661,6 @@ def task(
                 return portal.call(async_wrapper, *args, **kwargs)
 
         # Return the appropriate wrapper based on whether the function is async
-        return async_wrapper if is_async else sync_wrapper
+        return async_wrapper if func_is_async else sync_wrapper
 
     return task_decorator
