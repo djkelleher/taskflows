@@ -32,8 +32,8 @@ def get_logger(
 ):
     """Create a new logger or return an existing logger with the given name.
 
-    All arguments besides for `name` can be set via environment variables in the form `{LOGGER NAME}_{VARIABLE NAME}` or `loggers_{VARIABLE NAME}`.
-    Variables including logger name will be chosen before `loggers_` variables. Variables can be uppercase or lowercase.
+    All arguments besides for `name` can be set via environment variables in the form `{LOGGER NAME}_{VARIABLE NAME}` or `LOGGERS_{VARIABLE NAME}`.
+    Variables including logger name will be chosen before `LOGGERS_` variables. Variables can be uppercase or lowercase.
 
     Args:
         name (Optional[str], optional): Name for the logger. Defaults to None.
@@ -59,34 +59,34 @@ def get_logger(
     if no_terminal is None:
         if name:
             no_terminal = any_case_env_var(f"{name}_NO_TERMINAL")
-        no_terminal = no_terminal or any_case_env_var("loggers_NO_TERMINAL")
+        no_terminal = no_terminal or any_case_env_var("LOGGERS_NO_TERMINAL")
 
     if file_dir is None:
         if name:
             file_dir = any_case_env_var(f"{name}_FILE_DIR")
-        file_dir = file_dir or any_case_env_var("loggers_FILE_DIR")
+        file_dir = file_dir or any_case_env_var("LOGGERS_FILE_DIR")
 
     if level is None:
         if name:
             level = any_case_env_var(f"{name}_LOG_LEVEL")
-        level = level or any_case_env_var("loggers_LOG_LEVEL", "INFO")
+        level = level or any_case_env_var("LOGGERS_LOG_LEVEL", "INFO")
 
     if show_source is None:
         if name:
             show_source = any_case_env_var(f"{name}_SHOW_SOURCE")
-        show_source = show_source or any_case_env_var("loggers_SHOW_SOURCE", "filename")
+        show_source = show_source or any_case_env_var("LOGGERS_SHOW_SOURCE", "filename")
 
     if file_max_bytes is None:
         if name:
             file_max_bytes = any_case_env_var(f"{name}_FILE_MAX_BYTES")
-        file_max_bytes = file_max_bytes or any_case_env_var("loggers_FILE_MAX_BYTES")
+        file_max_bytes = file_max_bytes or any_case_env_var("LOGGERS_FILE_MAX_BYTES")
     if file_max_bytes:
         file_max_bytes = int(file_max_bytes)
 
     if max_rotations is None:
         if name:
             max_rotations = any_case_env_var(f"{name}_MAX_ROTATIONS")
-        max_rotations = max_rotations or any_case_env_var("loggers_MAX_ROTATIONS")
+        max_rotations = max_rotations or any_case_env_var("LOGGERS_MAX_ROTATIONS")
     if max_rotations:
         max_rotations = int(max_rotations)
 

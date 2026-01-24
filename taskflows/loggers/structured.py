@@ -80,50 +80,6 @@ def add_event_fingerprint(logger, method_name, event_dict):
     return event_dict
 
 
-# Processor to move non-indexed fields to nested structure
-def organize_fields_for_loki(logger, method_name, event_dict):
-    """Organize fields to minimize Loki cardinality"""
-    # Fields that should be indexed (labels)
-    indexed_fields = {
-        "app",
-        "environment",
-        "hostname",
-        "severity",
-        "level_name",
-        "logger",
-        "request_id",
-        "trace_id",
-        "service_name",
-        "container_name",
-    }
-
-    # Move non-indexed fields to a nested 'context' dict
-    context = {}
-    keys_to_move = []
-
-    for key, value in event_dict.items():
-        if key not in indexed_fields and not key.startswith("_"):
-            # Keep timestamp and event message at top level
-            if key not in {
-                "timestamp",
-                "event",
-                "message",
-                "timestamp_ns",
-                "event_fingerprint",
-            }:
-                context[key] = value
-                keys_to_move.append(key)
-
-    # Remove moved keys and add context
-    for key in keys_to_move:
-        del event_dict[key]
-
-    if context:
-        event_dict["context"] = context
-
-    return event_dict
-
-
 # Default structlog configuration (can be overridden by configure_loki_logging)
 _default_processors = [
     # Add context early
@@ -153,8 +109,6 @@ _default_processors = [
     structlog.processors.format_exc_info,
     # Ensure unicode
     structlog.processors.UnicodeDecoder(),
-    # Organize fields for Loki (minimize cardinality)
-    organize_fields_for_loki,
     # Filter by level before rendering
     structlog.stdlib.filter_by_level,
     # Render as JSON for Fluent Bit parsing
@@ -352,8 +306,6 @@ def configure_loki_logging(
             structlog.processors.UnicodeDecoder(),
             # Truncate long strings
             truncate_strings,
-            # Organize fields for Loki
-            organize_fields_for_loki,
             # Filter by level before rendering
             structlog.stdlib.filter_by_level,
         ]

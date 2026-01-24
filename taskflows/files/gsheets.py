@@ -257,9 +257,6 @@ class SheetBot(RetryGetattributeMixin):
                 except JSONDecodeError:
                     logger.exception(
                         f"Error updating columns {df_cols}. Values: {values}",
-                        exc_info=True,
-                        stack_info=True,
-                        extra=True,
                     )
 
         set_columns_data(raw_cols, True)

@@ -8,6 +8,10 @@ class Schedule:
     """Base class for schedules."""
 
     def __init__(self, accuracy: str):
+        # AccuracySec controls the maximum delay systemd may add to timer events.
+        # By default, systemd batches timer activations within a 1-minute window
+        # for power efficiency (reduces CPU wake-ups). Setting a low accuracy like
+        # "1ms" ensures timers fire at their exact scheduled time.
         self.unit_entries = {f"AccuracySec={accuracy}"}
 
 

@@ -41,7 +41,8 @@ class ShutdownHandler:
                 uncaught exceptions. Defaults to False.
         """
         self.shutdown_on_exception = shutdown_on_exception
-        self.loop = asyncio.get_event_loop_policy().get_event_loop()
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
         self.callbacks = []
         self._shutdown_task = None
         self._exit_code = None
@@ -194,7 +195,6 @@ def get_shutdown_handler():
 
 def async_entrypoint(blocking: bool = False, shutdown_on_exception: bool = True):
     def decorator(f):
-        loop = asyncio.get_event_loop_policy().get_event_loop()
         sdh = get_shutdown_handler()
         sdh.shutdown_on_exception = shutdown_on_exception
 
@@ -210,6 +210,7 @@ def async_entrypoint(blocking: bool = False, shutdown_on_exception: bool = True)
 
         @wraps(f)
         def wrapper(*args, **kwargs):
+            loop = sdh.loop
             task = loop.create_task(async_entrypoint_async(*args, **kwargs))
             try:
                 if blocking:

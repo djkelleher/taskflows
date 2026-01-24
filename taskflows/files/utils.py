@@ -70,9 +70,7 @@ def csvs_to_parquet(
         func = partial(csv_to_parquet, save_path_generator=save_path_generator)
         max_workers = max(1, min(len(files), int(os.cpu_count() * 0.4)))
         with ProcessPoolExecutor(max_workers=max_workers) as pool:
-            results = pool.map(func, files)
-        for result in results:
-            logger.info(f"File conversion result: {result}")
+            list(pool.map(func, files))
     # remove csv files
     for file in files:
         logger.info(f"Removing: {file}")

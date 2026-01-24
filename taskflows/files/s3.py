@@ -575,7 +575,7 @@ class S3:
             # Check if the path is a file
             self.client.head_object(Bucket=bucket_name, Key=partition)
             return True
-        except self.client.exceptions.ClientError:
+        except ClientError:
             return False
 
     @cached_property

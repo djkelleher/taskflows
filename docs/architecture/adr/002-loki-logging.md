@@ -61,15 +61,63 @@ Grafana (visualization)
 - ❌ No visualization
 
 ## Implementation
-- Fluent Bit configured to read from journald
-- Logs tagged with service metadata
-- Loki stores logs with labels:
-  - `service_name`: Systemd service name
-  - `task_id`: Unique task execution ID
-  - `level`: Log level (info, warning, error)
-  - `hostname`: Server hostname
-- LogQL queries embedded in task error alerts
-- Grafana dashboards for log exploration
+
+### Structured Logging with structlog
+
+Python services use `structlog` via `taskflows.loggers.structured` to emit JSON-formatted logs:
+
+```python
+from taskflows.loggers.structured import configure_loki_logging, get_logger
+
+configure_loki_logging(
+    app_name="my-service",
+    environment="production",
+    log_level="INFO"
+)
+
+log = get_logger()
+log.info("task_started", task_id="abc123", user_id=42)
+```
+
+This produces JSON output:
+```json
+{"timestamp": "2024-01-15T10:30:00Z", "level_name": "INFO", "logger": "my-service", "app": "my-service", "environment": "production", "event": "task_started", "task_id": "abc123", "user_id": 42}
+```
+
+### Fluent Bit JSON Parsing
+
+Fluent Bit reads logs from journald and uses a Lua script (`log_processor.lua`) to:
+
+1. **Detect JSON messages** - Checks if message starts with `{`
+2. **Parse and extract labels** - Pulls out key fields for Loki indexing
+3. **Preserve the full message** - Keeps complete JSON for detailed queries
+
+Extracted fields become Loki labels:
+- `level` - Log level (INFO, WARNING, ERROR)
+- `logger` - Logger name
+- `app` - Application name
+- `environment` - Deployment environment
+
+The Fluent Bit Loki output is configured with:
+```yaml
+label_keys: $service_name,$level,$logger,$app,$environment
+```
+
+### Loki Label Strategy
+
+Labels are indexed and enable fast filtering. We extract only low-cardinality fields:
+
+| Label | Source | Cardinality |
+|-------|--------|-------------|
+| `service_name` | Systemd unit name | Low |
+| `level` | Log level | Very low (5 values) |
+| `logger` | Logger name | Low |
+| `app` | Application name | Low |
+| `environment` | prod/staging/dev | Very low |
+| `log_source` | systemd/docker | Very low |
+| `host` | Hostname | Low |
+
+High-cardinality fields (task_id, user_id, request_id) remain in the JSON body and are accessed via `| json` pipeline.
 
 ### Log Retention
 - Default: 30 days
@@ -98,12 +146,26 @@ TaskLogger class automatically:
 - Includes query links in alert messages
 - Provides context for debugging
 
-Example LogQL query:
+### Example LogQL Queries
+
+**Fast label-based filtering** (no parsing required):
 ```logql
-{service_name="my-task"}
-  |= "task_id=abc123"
+{app="my-service", level="ERROR"}
+{service_name="worker", environment="production"}
+```
+
+**Filter with JSON field extraction** (for high-cardinality fields):
+```logql
+{service_name="my-task"} | json | task_id="abc123"
+{app="api"} | json | user_id=42 | line_format "{{.event}}"
+```
+
+**Combined label + JSON filtering**:
+```logql
+{app="my-service", level="ERROR"}
   | json
-  | level="error"
+  | duration > 5000
+  | line_format "{{.event}} took {{.duration}}ms"
 ```
 
 ## References

@@ -48,8 +48,6 @@ def import_module_attr(module_name_or_path: Union[Path, str], attr_name: str) ->
     return getattr(module, attr_name)
 
 
-
-
 def find_modules(
     package: Union[ModuleType, str],
     search_subpackages: bool = True,
@@ -144,7 +142,7 @@ def find_instances(
     Returns:
         List[Any]: The discovered class instances.
     """
-    if isinstance(search_in, (Path, str)):
+    if not isinstance(search_in, ModuleType):
         search_in = import_module(search_in)
     instances = [
         c
@@ -157,26 +155,19 @@ def find_instances(
 
 def _extract_subclasses_from_module(module: ModuleType, base_class: Union[Type, str], names_only: bool) -> List[Union[str, Type]]:
     """Extract subclasses of base_class from a module.
-    
+
     Args:
         module: Module to search in
         base_class: Base class to search for subclasses of
         names_only: Whether to return class names or class objects
-        
+
     Returns:
         List of subclass names or objects
     """
-    if isinstance(base_class, str):
-        subclass_objects = [
-            obj
-            for obj in module.__dict__.values()
-            if base_class in [c.__name__ for c in getattr(obj, "__bases__", [])]
-        ]
-    else:
-        subclass_objects = [
-            obj
-            for obj in module.__dict__.values()
-            if base_class in getattr(obj, "__bases__", [])
-        ]
-    
+    base_class_name = base_class if isinstance(base_class, str) else base_class.__name__
+    subclass_objects = [
+        obj
+        for obj in module.__dict__.values()
+        if base_class_name in [c.__name__ for c in getattr(obj, "__bases__", [])]
+    ]
     return [c.__name__ for c in subclass_objects] if names_only else subclass_objects
