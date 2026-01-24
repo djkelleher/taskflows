@@ -1,3 +1,4 @@
+import asyncio
 import json
 from dataclasses import dataclass
 from io import BytesIO
@@ -161,7 +162,7 @@ async def _send_single_discord_message(
                         )
 
                     async with session.post(webhook_url, data=data) as response:
-                        if response.status == 200:  # Discord webhook success with files
+                        if response.status == 204:  # Discord webhook success
                             logger.info(
                                 f"Discord message with {len(attachments)} attachments sent successfully on attempt {attempt + 1}"
                             )
@@ -171,8 +172,6 @@ async def _send_single_discord_message(
                             logger.warning(
                                 f"Discord rate limited, waiting {retry_after}s before retry"
                             )
-                            import asyncio
-
                             await asyncio.sleep(float(retry_after))
                             continue
                         else:
@@ -205,8 +204,6 @@ async def _send_single_discord_message(
                             logger.warning(
                                 f"Discord rate limited, waiting {retry_after}s before retry"
                             )
-                            import asyncio
-
                             await asyncio.sleep(float(retry_after))
                             continue
                         else:
@@ -221,8 +218,6 @@ async def _send_single_discord_message(
             )
 
         if attempt < retries:
-            import asyncio
-
             await asyncio.sleep(
                 discord_settings.retry_base_delay**attempt
             )  # Exponential backoff

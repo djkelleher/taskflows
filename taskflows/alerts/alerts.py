@@ -212,13 +212,16 @@ class AlertLogger:
         msg: str,
         level: Literal["info", "warning", "error"] = "info",
         **_,
-    ):
+    ) -> str:
         """Send error message to Slack error channel."""
         if level == "error":
             msg = f"{Emoji.red_exclamation} {msg}"
+            logger.error(msg, stacklevel=3)
         elif level == "warning":
             msg = f"{Emoji.warning} {msg}"
-        getattr(logger, level)(msg, stacklevel=3)
+            logger.warning(msg, stacklevel=3)
+        else:
+            logger.info(msg, stacklevel=3)
         return msg
 
 
@@ -253,7 +256,7 @@ async def send_alert(
     # Check for Text components that need file attachments
     attachment_files = []
     for component in content:
-        if hasattr(component, "create_attachment_if_needed"):
+        if isinstance(component, Text):
             attachment_info = component.create_attachment_if_needed()
             if attachment_info:
                 filename, file_obj = attachment_info
