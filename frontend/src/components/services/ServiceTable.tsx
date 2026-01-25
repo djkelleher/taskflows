@@ -54,7 +54,7 @@ export function ServiceTable({ services, isLoading }: ServiceTableProps) {
 
       <div className="overflow-x-auto">
         <table className="w-full">
-          <thead className="bg-gray-50 border-b border-border">
+          <thead className="bg-muted/30 border-b border-border">
             <tr>
               <th className="px-4 py-3 text-left">
                 <Checkbox

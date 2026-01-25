@@ -1,6 +1,4 @@
 export {
-  api,
-  baseClient,
   login,
   logout,
   getServices,

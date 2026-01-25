@@ -79,10 +79,10 @@ export function ToastProvider({ children }: ToastProviderProps) {
     setToasts((prev) => [...prev, { id, message, type }]);
 
     // Schedule auto-removal and track the timeout
-    const timeoutId = setTimeout(() => {
+    const timeoutId = window.setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
       timeoutsRef.current.delete(id);
-    }, typeDurations[type]) as unknown as number;
+    }, typeDurations[type]);
 
     timeoutsRef.current.set(id, timeoutId);
   }, []);

@@ -1,5 +1,5 @@
 # Fluent Bit v4.2 YAML Configuration
-# Migrated from fluent-bit.conf (INI format)
+# Collects logs from systemd user services and Docker containers via journald
 
 service:
   flush: 5
@@ -15,6 +15,7 @@ pipeline:
     # Input: Systemd Journal for user services (UID 1000) - taskflows only
     - name: systemd
       tag: user_logs
+      systemd_filter_type: and
       systemd_filter:
         - _UID=1000
         - _SYSTEMD_USER_UNIT=taskflows-*.service
@@ -24,10 +25,12 @@ pipeline:
       db.sync: normal
       mem_buf_limit: 10MB
 
-    # Input: Docker containers using journald driver (system journal)
+    # Input: Docker containers using journald driver - pre-filtered to docker.* only
     - name: systemd
       tag: docker_logs
       path: /var/log/journal
+      systemd_filter:
+        - SYSLOG_IDENTIFIER=docker.*
       read_from_tail: true
       strip_underscores: true
       db: /var/log/flb_docker_v3.db
@@ -35,11 +38,6 @@ pipeline:
       mem_buf_limit: 10MB
 
   filters:
-    # Filter: Match only docker.* containers
-    - name: grep
-      match: docker_logs
-      regex: SYSLOG_IDENTIFIER ^docker\.
-
     # Filter: Process all logs with Lua script
     - name: lua
       match: "*_logs"
@@ -55,7 +53,6 @@ pipeline:
       labels: log_source=$log_source,host=${HOSTNAME}
       label_keys: $service_name,$level,$logger,$app,$environment
       remove_keys: service_name,log_source,level,logger,app,environment,event
-      drop_single_key: true
       auto_kubernetes_labels: false
       retry_limit: 5
       compress: gzip

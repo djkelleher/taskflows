@@ -15,6 +15,12 @@ import { EnvironmentEditPage } from "@/pages/EnvironmentEditPage";
 
 function ProtectedRoute() {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const isInitialized = useAuthStore((state) => state.isInitialized);
+
+  // Wait for auth initialization before redirecting
+  if (!isInitialized) {
+    return null;
+  }
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
@@ -25,10 +31,16 @@ function ProtectedRoute() {
 
 function App() {
   const initialize = useAuthStore((state) => state.initialize);
+  const isInitialized = useAuthStore((state) => state.isInitialized);
 
   useEffect(() => {
     initialize();
   }, [initialize]);
+
+  // Show nothing while initializing to prevent flash
+  if (!isInitialized) {
+    return null;
+  }
 
   return (
     <ToastProvider>

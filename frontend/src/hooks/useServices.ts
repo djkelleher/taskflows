@@ -34,9 +34,9 @@ export function useServiceAction() {
         clearTimeout(timeoutRef.current);
       }
       // Refetch services after 1 second to see updated status
-      timeoutRef.current = setTimeout(() => {
+      timeoutRef.current = window.setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ["services"] });
-      }, 1000) as unknown as number;
+      }, 1000);
     },
   });
 }
@@ -63,9 +63,9 @@ export function useBatchAction() {
         clearTimeout(timeoutRef.current);
       }
       // Refetch services after 1 second to see updated status
-      timeoutRef.current = setTimeout(() => {
+      timeoutRef.current = window.setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ["services"] });
-      }, 1000) as unknown as number;
+      }, 1000);
     },
   });
 }

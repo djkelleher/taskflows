@@ -4,9 +4,35 @@
 
 local cjson = require("cjson.safe")
 
--- State for timestamp tie-breaking
+-- State for timestamp tie-breaking (with LRU-style cleanup)
 local last_ts_us_by_service = {}
 local last_offset_by_service = {}
+local service_access_order = {}  -- Track access order for cleanup
+local MAX_TRACKED_SERVICES = 100  -- Limit to prevent unbounded memory growth
+
+-- Clean up oldest service entries when limit is exceeded
+local function cleanup_old_services()
+    while #service_access_order > MAX_TRACKED_SERVICES do
+        local oldest = table.remove(service_access_order, 1)
+        last_ts_us_by_service[oldest] = nil
+        last_offset_by_service[oldest] = nil
+    end
+end
+
+-- Update service access order (move to end = most recently used)
+local function touch_service(svc)
+    -- Remove from current position if present
+    for i, s in ipairs(service_access_order) do
+        if s == svc then
+            table.remove(service_access_order, i)
+            break
+        end
+    end
+    -- Add to end (most recent)
+    table.insert(service_access_order, svc)
+    -- Cleanup if needed
+    cleanup_old_services()
+end
 
 -- Try to parse JSON and extract fields for Loki labels
 local function extract_json_fields(message)
@@ -24,35 +50,40 @@ end
 
 function process_log(tag, timestamp, record)
     local message = record["MESSAGE"] or record["log_message"] or ""
-    if not message then
+    if not message or message == "" then
         return 0  -- Drop logs without MESSAGE
     end
-    
+
     -- Extract service name based on source type
     local service_name = nil
-    
+    local log_source = nil
+
     -- User services (systemd)
     local unit = record["SYSTEMD_USER_UNIT"] or record["_SYSTEMD_USER_UNIT"]
     if unit and unit:match("^taskflows%-.*%.service$") then
         service_name = unit:gsub("%.service$", ""):gsub("^taskflows%-", "")
-        record["log_source"] = "systemd"
+        log_source = "systemd"
     end
-    
+
     -- Docker containers
     local syslog_id = record["SYSLOG_IDENTIFIER"] or record["_SYSLOG_IDENTIFIER"]
     if syslog_id and syslog_id:match("^docker%.") then
         local container_name = syslog_id:match("^docker%.(.+)$")
         if container_name then
-            service_name = container_name:gsub("^taskflows%-", ""):gsub("%-[a-f0-9]+$", "")
-            record["log_source"] = "docker"
+            -- Strip taskflows- prefix and Docker's 12-char hex container ID suffix
+            service_name = container_name:gsub("^taskflows%-", ""):gsub("%-[a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]$", "")
+            log_source = "docker"
         end
     end
-    
+
     -- Skip if we couldn't extract a service name
     if not service_name then
         return 0  -- Drop non-service logs
     end
-    
+
+    -- Update service access tracking for LRU cleanup
+    touch_service(service_name)
+
     -- Build precise sec/nsec timestamp from journald microseconds to preserve strict ordering
     local new_ts = nil
     local realtime_ts = record["SOURCE_REALTIME_TIMESTAMP"] or record["REALTIME_TIMESTAMP"]
@@ -64,10 +95,9 @@ function process_log(tag, timestamp, record)
             local nsec = rem_us * 1000
 
             -- Apply per-service tie-breaker for identical microsecond timestamps
-            local svc = service_name
-            local last_us = last_ts_us_by_service[svc]
-            if last_us == us then
-                local off = (last_offset_by_service[svc] or 0) + 1
+            local last_us = last_ts_us_by_service[service_name]
+            if last_us and last_us == us then
+                local off = (last_offset_by_service[service_name] or 0) + 1
                 -- bump nsec minimally (1ns per duplicate); cap to keep under 1s boundary
                 if nsec + off >= 1000000000 then
                     -- roll over: increment sec if ever needed (extremely unlikely)
@@ -76,20 +106,20 @@ function process_log(tag, timestamp, record)
                 else
                     nsec = nsec + off
                 end
-                last_offset_by_service[svc] = off
+                last_offset_by_service[service_name] = off
             else
-                last_offset_by_service[svc] = 0
-                last_ts_us_by_service[svc] = us
+                last_offset_by_service[service_name] = 0
+                last_ts_us_by_service[service_name] = us
             end
             new_ts = { sec = sec, nsec = nsec }
         end
     end
-    
+
     -- Build clean record - try to extract JSON fields for Loki labels
     local clean_record = {
         MESSAGE = message,
         service_name = service_name,
-        log_source = record["log_source"]
+        log_source = log_source
     }
 
     -- Try to parse JSON and extract label fields

@@ -508,6 +508,7 @@ async def create(
     host: Optional[str] = None,
     match: Optional[str] = None,
     search_in: Optional[str] = None,
+    yaml_file: Optional[str] = None,
     include: Optional[str] = None,
     exclude: Optional[str] = None,
     as_json: bool = False,
@@ -518,6 +519,7 @@ async def create(
         host (str): Host address of the admin API server. If None, calls local function.
         match (str): Alternative name for search_in (from command)
         search_in (str): Directory to search for services
+        yaml_file (str): Path to a YAML file containing service definitions
         include (str): Pattern to include services
         exclude (str): Pattern to exclude services
 
@@ -528,26 +530,36 @@ async def create(
     if match and not search_in:
         search_in = match
 
-    if not search_in:
+    if not search_in and not yaml_file:
         return Table(
-            [{"Error": "search_in parameter is required"}], title="Create - Error"
+            [{"Error": "Either search_in or yaml_file parameter is required"}], title="Create - Error"
         )
 
     if host is None:
         # Call local free function
         logger.info(
-            f"create called with search_in={search_in}, include={include}, exclude={exclude}"
+            f"create called with search_in={search_in}, yaml_file={yaml_file}, include={include}, exclude={exclude}"
         )
-        # Now that deploy.py uses services, let's use the original approach
-        services = find_instances(class_type=Service, search_in=search_in)
-        print(f"Found {len(services)} services")
 
-        for sr in find_instances(class_type=ServiceRegistry, search_in=search_in):
-            print(f"ServiceRegistry found with {len(sr.services)} services")
-            services.extend(sr.services)
+        services = []
+        dashboards = []
 
-        dashboards = find_instances(class_type=Dashboard, search_in=search_in)
-        print(f"Found {len(dashboards)} dashboards")
+        if yaml_file:
+            # Load services from YAML file
+            from taskflows.serialization import load_services_from_yaml
+            services = load_services_from_yaml(yaml_file)
+            print(f"Loaded {len(services)} services from {yaml_file}")
+        else:
+            # Search Python files for Service instances
+            services = find_instances(class_type=Service, search_in=search_in)
+            print(f"Found {len(services)} services")
+
+            for sr in find_instances(class_type=ServiceRegistry, search_in=search_in):
+                print(f"ServiceRegistry found with {len(sr.services)} services")
+                services.extend(sr.services)
+
+            dashboards = find_instances(class_type=Dashboard, search_in=search_in)
+            print(f"Found {len(dashboards)} dashboards")
 
         print(f"Total services: {len(services)}")
         if include:
@@ -581,7 +593,11 @@ async def create(
         )
     else:
         # Call via API
-        data = {"search_in": search_in}
+        data = {}
+        if search_in:
+            data["search_in"] = search_in
+        if yaml_file:
+            data["yaml_file"] = yaml_file
         if include:
             data["include"] = include
         if exclude:

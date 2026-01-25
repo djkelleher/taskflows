@@ -510,6 +510,295 @@ srv = Service(
 
 Create named environments via the Web UI or API. They store complete Venv or DockerContainer configurations that can be reused across services.
 
+### YAML Configuration
+
+Define services in YAML files for easy configuration management. Types are automatically inferred from content, so you don't need explicit `type` fields.
+
+#### Python to YAML Reference
+
+Each Python object has an equivalent YAML representation.
+
+##### Human-Readable Values
+
+YAML files support human-readable memory sizes and time durations for improved readability:
+
+**Memory Sizes** (for `memory_limit`, `memory_high`, `amount`, etc.):
+```yaml
+cgroup_config:
+  memory_limit: 2GB        # Instead of 2147483648
+  memory_high: 1.5GB       # Supports decimals
+  memory_low: 512MB
+  memory_min: 256M         # Short form also works
+
+startup_requirements:
+  - amount: 8GB            # Human-readable Memory constraint
+    constraint: ">="
+```
+
+Supported units (case-insensitive): `B`, `K`/`KB`, `M`/`MB`, `G`/`GB`, `T`/`TB`
+
+**Time Durations** (for `timeout`, `period`, `delay`, `window`, etc.):
+```yaml
+timeout: 5m                # Instead of 300
+restart_schedule:
+  period: 1h               # Instead of 3600
+  start_on: boot
+restart_policy:
+  condition: on-failure
+  delay: 30s
+  window: 5min
+  max_attempts: 5
+```
+
+Supported units (case-insensitive): `s`/`sec`/`seconds`, `m`/`min`/`minutes`, `h`/`hr`/`hours`, `d`/`day`/`days`, `w`/`week`/`weeks`
+
+You can mix human-readable and numeric values in the same file - numeric values are always interpreted as bytes (for memory) or seconds (for time).
+
+##### Type Reference
+
+**Venv** (inferred from `env_name`):
+```python
+Venv(env_name="myenv")
+```
+```yaml
+environment:
+  env_name: myenv
+```
+
+**DockerContainer** (inferred from `image`):
+```python
+DockerContainer(
+    image="python:3.11",
+    name="my-container",
+    ports={"8000/tcp": 8000},
+    volumes=[Volume(host_path="/data", container_path="/app/data")],
+    environment={"DEBUG": "false"},
+)
+```
+```yaml
+environment:
+  image: python:3.11
+  name: my-container
+  ports:
+    8000/tcp: 8000
+  volumes:
+    - /data:/app/data
+  environment:
+    DEBUG: "false"
+```
+
+**Calendar** (inferred from `schedule` key, or use a string directly):
+```python
+Calendar(schedule="Mon-Fri 09:00", persistent=True)
+```
+```yaml
+# As a dict:
+start_schedule:
+  schedule: Mon-Fri 09:00
+  persistent: true
+
+# Or simply as a string:
+start_schedule: "Mon-Fri 09:00"
+```
+
+**Periodic** (inferred from `period`):
+```python
+Periodic(start_on="boot", period=3600, relative_to="finish")
+```
+```yaml
+start_schedule:
+  start_on: boot
+  period: 3600
+  relative_to: finish
+```
+
+**RestartPolicy** (inferred from `condition`, or use a string for simple policies):
+```python
+RestartPolicy(condition="on-failure", delay=10, max_attempts=5)
+```
+```yaml
+# As a dict:
+restart_policy:
+  condition: on-failure
+  delay: 10
+  max_attempts: 5
+
+# Or simply as a string:
+restart_policy: on-failure
+```
+
+**CgroupConfig** (inferred from resource limit keys):
+```python
+CgroupConfig(
+    memory_limit=2147483648,  # 2GB
+    cpu_quota=50000,
+    pids_limit=100,
+)
+```
+```yaml
+cgroup_config:
+  memory_limit: 2GB          # Human-readable (or 2147483648)
+  cpu_quota: 50000
+  pids_limit: 100
+```
+
+**Volume** (string format or dict with `host_path` + `container_path`):
+```python
+Volume(host_path="/data", container_path="/app/data", read_only=False)
+Volume(host_path="/config", container_path="/app/config", read_only=True)
+```
+```yaml
+# Simple string format (like Docker):
+volumes:
+  - /data:/app/data
+  - /config:/app/config:ro
+  - /logs:/app/logs:rw
+
+# Or as dicts:
+volumes:
+  - host_path: /data
+    container_path: /app/data
+    read_only: false
+```
+
+**Memory Constraint** (inferred from `amount` + `constraint`):
+```python
+Memory(amount=1073741824, constraint=">=")  # 1GB
+```
+```yaml
+startup_requirements:
+  - amount: 1GB              # Human-readable (or 1073741824)
+    constraint: ">="
+```
+
+**CPUPressure Constraint** (inferred from `max_percent`):
+```python
+CPUPressure(max_percent=80, timespan="5min")
+```
+```yaml
+startup_requirements:
+  - max_percent: 80
+    timespan: 5min
+```
+
+#### Complete Service Example
+
+**Python:**
+```python
+from taskflows import Service, Venv, CgroupConfig
+from taskflows.schedule import Calendar
+
+service = Service(
+    name="api-server",
+    start_command="uvicorn app:main",
+    description="FastAPI backend",
+    environment=Venv(env_name="api-env"),
+    start_schedule=Calendar(schedule="Mon-Fri 09:00"),
+    restart_policy="on-failure",
+    timeout=300,  # 5 minutes
+    cgroup_config=CgroupConfig(memory_limit=2147483648),  # 2GB
+    env={"DEBUG": "false"},
+    enabled=True,
+)
+```
+
+**YAML:**
+```yaml
+services:
+  - name: api-server
+    start_command: uvicorn app:main
+    description: FastAPI backend
+    environment:
+      env_name: api-env
+    start_schedule: "Mon-Fri 09:00"
+    restart_policy: on-failure
+    timeout: 5m                    # Human-readable time
+    cgroup_config:
+      memory_limit: 2GB            # Human-readable memory
+    env:
+      DEBUG: "false"
+    enabled: true
+```
+
+#### Loading Services from YAML
+
+```python
+from taskflows.serialization import load_services_from_yaml
+
+# Load services from YAML
+services = load_services_from_yaml("services.yaml")
+
+# Create all services
+for service in services:
+    await service.create()
+
+# Or use ServiceRegistry for batch operations
+from taskflows import ServiceRegistry
+
+registry = ServiceRegistry(*services)
+await registry.create()
+await registry.start()
+```
+
+ServiceRegistry also supports direct serialization:
+
+```python
+from taskflows import Service, ServiceRegistry
+
+# Create a registry
+registry = ServiceRegistry(
+    Service(name="web", start_command="python web.py"),
+    Service(name="worker", start_command="python worker.py"),
+)
+
+# Save to YAML file
+registry.to_file("services.yaml")
+
+# Load from file
+restored = ServiceRegistry.from_file("services.yaml")
+
+# Or serialize to string
+yaml_str = registry.to_yaml()
+json_str = registry.to_json()
+```
+
+Export existing services to YAML:
+
+```python
+from taskflows import Service
+from taskflows.serialization import save_services_to_yaml
+
+services = [
+    Service(name="web", start_command="python web.py"),
+    Service(name="worker", start_command="python worker.py"),
+]
+
+save_services_to_yaml(services, "my-services.yaml")
+```
+
+Individual services also support serialization:
+
+```python
+from taskflows import Service
+
+srv = Service(
+    name="my-service",
+    start_command="python app.py",
+    description="My application",
+)
+
+# Serialize to YAML/JSON
+yaml_str = srv.to_yaml()
+json_str = srv.to_json()
+
+# Save to file (format inferred from extension)
+srv.to_file("service.yaml")
+srv.to_file("service.json")
+
+# Load from file
+restored = Service.from_file("service.yaml")
+```
+
 ## Resource Constraints
 
 ### Hardware Constraints

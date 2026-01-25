@@ -154,6 +154,78 @@ class ServiceRegistry:
         with self._lock:
             return bool(self._services)
 
+    # Serialization methods
+    def to_dict(self, include_none: bool = False) -> Dict:
+        """Convert registry to a dictionary representation."""
+        from taskflows.serialization import to_dict as serialize_to_dict
+        with self._lock:
+            return {
+                "services": [serialize_to_dict(s, include_none) for s in self._services.values()]
+            }
+
+    def to_json(self, indent: int = 2, include_none: bool = False) -> str:
+        """Serialize registry to JSON string."""
+        import json
+        data = self.to_dict(include_none)
+        # Remove type field from services since we know they're services
+        for s in data["services"]:
+            s.pop("type", None)
+        return json.dumps(data, indent=indent, default=str)
+
+    def to_yaml(self, include_none: bool = False) -> str:
+        """Serialize registry to YAML string."""
+        import yaml
+        data = self.to_dict(include_none)
+        # Remove type field from services since we know they're services
+        for s in data["services"]:
+            s.pop("type", None)
+        return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    def to_file(self, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None, include_none: bool = False) -> None:
+        """Save registry to a file."""
+        path = Path(path)
+        if format is None:
+            format = "yaml" if path.suffix in (".yaml", ".yml") else "json"
+
+        if format == "yaml":
+            content = self.to_yaml(include_none)
+        else:
+            content = self.to_json(include_none=include_none)
+        path.write_text(content)
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "ServiceRegistry":
+        """Create registry from a dictionary representation."""
+        from taskflows.serialization import from_dict as deserialize_from_dict
+        services_data = data.get("services", [])
+        services = [deserialize_from_dict(s, Service) for s in services_data]
+        return cls(*services)
+
+    @classmethod
+    def from_json(cls, data: str) -> "ServiceRegistry":
+        """Deserialize registry from JSON string."""
+        import json
+        return cls.from_dict(json.loads(data))
+
+    @classmethod
+    def from_yaml(cls, data: str) -> "ServiceRegistry":
+        """Deserialize registry from YAML string."""
+        import yaml
+        return cls.from_dict(yaml.safe_load(data))
+
+    @classmethod
+    def from_file(cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None) -> "ServiceRegistry":
+        """Load registry from a file."""
+        path = Path(path)
+        if format is None:
+            format = "yaml" if path.suffix in (".yaml", ".yml") else "json"
+
+        content = path.read_text()
+        if format == "yaml":
+            return cls.from_yaml(content)
+        else:
+            return cls.from_json(content)
+
 
 @pdataclass
 class RestartPolicy:
@@ -822,6 +894,108 @@ class Service:
             meta["schedule"] = self.start_schedule
         meta = ", ".join(f"{k}={v}" for k, v in meta.items())
         return f"{self.__class__.__name__}({meta})"
+
+    def to_dict(self, include_none: bool = False) -> Dict:
+        """Serialize this service to a dictionary.
+
+        Args:
+            include_none: Whether to include None values.
+
+        Returns:
+            A dictionary representation of the service.
+        """
+        from taskflows.serialization import to_dict
+        return to_dict(self, include_none=include_none)
+
+    def to_json(self, indent: int = 2, include_none: bool = False) -> str:
+        """Serialize this service to JSON.
+
+        Args:
+            indent: Indentation level for pretty printing.
+            include_none: Whether to include None values.
+
+        Returns:
+            A JSON string representation of the service.
+        """
+        from taskflows.serialization import serialize
+        return serialize(self, format="json", indent=indent, include_none=include_none)
+
+    def to_yaml(self, include_none: bool = False) -> str:
+        """Serialize this service to YAML.
+
+        Args:
+            include_none: Whether to include None values.
+
+        Returns:
+            A YAML string representation of the service.
+        """
+        from taskflows.serialization import serialize
+        return serialize(self, format="yaml", include_none=include_none)
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "Service":
+        """Create a Service from a dictionary.
+
+        Args:
+            data: The dictionary data.
+
+        Returns:
+            A Service instance.
+        """
+        from taskflows.serialization import from_dict
+        return from_dict(data, cls)
+
+    @classmethod
+    def from_json(cls, data: str) -> "Service":
+        """Create a Service from a JSON string.
+
+        Args:
+            data: The JSON string.
+
+        Returns:
+            A Service instance.
+        """
+        from taskflows.serialization import deserialize
+        return deserialize(data, cls, format="json")
+
+    @classmethod
+    def from_yaml(cls, data: str) -> "Service":
+        """Create a Service from a YAML string.
+
+        Args:
+            data: The YAML string.
+
+        Returns:
+            A Service instance.
+        """
+        from taskflows.serialization import deserialize
+        return deserialize(data, cls, format="yaml")
+
+    def to_file(self, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None, indent: int = 2, include_none: bool = False) -> None:
+        """Serialize this service to a file.
+
+        Args:
+            path: The file path.
+            format: Output format. If None, inferred from file extension.
+            indent: Indentation level for pretty printing.
+            include_none: Whether to include None values.
+        """
+        from taskflows.serialization import serialize_to_file
+        serialize_to_file(self, path, format=format, indent=indent, include_none=include_none)
+
+    @classmethod
+    def from_file(cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None) -> "Service":
+        """Create a Service from a file.
+
+        Args:
+            path: The file path.
+            format: Input format. If None, inferred from file extension.
+
+        Returns:
+            A Service instance.
+        """
+        from taskflows.serialization import deserialize_from_file
+        return deserialize_from_file(path, cls, format=format)
 
 
 def service_logs(service_name: str, n_lines: int = 1000):

@@ -318,7 +318,14 @@ async def logs(service_name: str, n_lines: int, server: Optional[str] = None):
 
 
 @cli.command(name="create")
-@click.argument("search_in")
+@click.argument("search_in", required=False)
+@click.option(
+    "-f",
+    "--file",
+    "yaml_file",
+    type=click.Path(exists=True),
+    help="Path to a YAML file containing service definitions.",
+)
 @click.option(
     "-i",
     "--include",
@@ -338,9 +345,28 @@ async def logs(service_name: str, n_lines: int, server: Optional[str] = None):
     help="Server(s) to create on. Can be specified multiple times. If not specified, creates on all registered servers.",
 )
 @async_entrypoint(blocking=True)
-async def cli_create(search_in, include, exclude, server: tuple = ()):
-    """Create services and dashboards on specified servers."""
-    kwargs = {"search_in": search_in}
+async def cli_create(search_in, yaml_file, include, exclude, server: tuple = ()):
+    """Create services and dashboards on specified servers.
+
+    Either provide SEARCH_IN (a directory to search for Python service definitions)
+    or use --file/-f to specify a YAML file containing service definitions.
+
+    Examples:
+        tf create ./services              # Search Python files in ./services
+        tf create -f services.yaml        # Load from YAML file
+        tf create -f services.yaml -i "web-*"  # Load from YAML, include only web-* services
+    """
+    if not search_in and not yaml_file:
+        raise click.UsageError("Either SEARCH_IN or --file/-f must be provided.")
+
+    if search_in and yaml_file:
+        raise click.UsageError("Cannot use both SEARCH_IN and --file/-f. Choose one.")
+
+    kwargs = {}
+    if search_in:
+        kwargs["search_in"] = search_in
+    if yaml_file:
+        kwargs["yaml_file"] = yaml_file
     if include:
         kwargs["include"] = include
     if exclude:

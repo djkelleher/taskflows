@@ -1,9 +1,5 @@
-import createClient, { type Middleware } from "openapi-fetch";
 import { useAuthStore } from "@/stores/authStore";
 import type { LoginRequest, LoginResponse, RefreshResponse, NamedEnvironment } from "@/types";
-
-// Base API client without auth (for login endpoint)
-const baseClient = createClient({ baseUrl: "" });
 
 // Mutex to prevent concurrent token refreshes
 let refreshPromise: Promise<string | null> | null = null;
@@ -80,39 +76,7 @@ async function fetchWithAuth(input: RequestInfo | URL, init?: RequestInit): Prom
   return response;
 }
 
-// Auth middleware - adds Authorization header and handles 401s
-const authMiddleware: Middleware = {
-  async onRequest({ request }) {
-    const token = useAuthStore.getState().accessToken;
-    if (token) {
-      request.headers.set("Authorization", `Bearer ${token}`);
-    }
-    return request;
-  },
-
-  async onResponse({ response, request }) {
-    if (response.status === 401) {
-      const newToken = await refreshAccessToken();
-      if (newToken) {
-        // Retry the request with the new token
-        const newRequest = request.clone();
-        newRequest.headers.set("Authorization", `Bearer ${newToken}`);
-        return fetch(newRequest);
-      } else {
-        // Refresh failed, logout
-        // Auth store logout will trigger redirect to /login via protected routes
-        useAuthStore.getState().logout();
-      }
-    }
-    return response;
-  },
-};
-
-// Create authenticated API client
-const api = createClient({ baseUrl: "" });
-api.use(authMiddleware);
-
-// Auth functions (don't use the auth middleware)
+// Auth functions (don't use auth - public endpoints)
 export async function login(username: string, password: string): Promise<LoginResponse> {
   const response = await fetch("/auth/login", {
     method: "POST",
@@ -226,5 +190,3 @@ export async function deleteEnvironment(name: string) {
   if (!response.ok) throw new Error("Failed to delete environment");
   return response.ok;
 }
-
-export { api, baseClient };

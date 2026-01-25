@@ -1,12 +1,12 @@
-import hashlib
 import logging
 import os
 import time
 import uuid
 from contextvars import ContextVar
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 import structlog
+import xxhash
 from structlog.contextvars import (
     bind_contextvars,
     clear_contextvars,
@@ -18,13 +18,22 @@ request_id_var: ContextVar[Optional[str]] = ContextVar("request_id", default=Non
 trace_id_var: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
 
 
+# Configuration storage (avoids mutating os.environ)
+_loki_config: Dict[str, Any] = {
+    "app_name": None,
+    "environment": None,
+    "hostname": None,
+    "extra_labels": {},
+}
+
+
 # Custom processor to add static labels for Loki
 def add_loki_labels(logger, method_name, event_dict):
     """Add static labels that Loki can use for indexing"""
-    # Core labels for Loki indexing (keep minimal for performance)
-    event_dict["app"] = os.getenv("APP_NAME", "dl-logging")
-    event_dict["environment"] = os.getenv("ENVIRONMENT", "production")
-    event_dict["hostname"] = os.getenv("HOSTNAME", "unknown")
+    # Use configured values if set, otherwise fall back to environment variables
+    event_dict["app"] = _loki_config["app_name"] or os.getenv("APP_NAME", "taskflows")
+    event_dict["environment"] = _loki_config["environment"] or os.getenv("ENVIRONMENT", "production")
+    event_dict["hostname"] = _loki_config["hostname"] or os.getenv("HOSTNAME", "unknown")
 
     # Add request/trace IDs if available
     request_id = request_id_var.get()
@@ -65,7 +74,7 @@ def add_nano_timestamp(logger, method_name, event_dict):
 # Add event fingerprint for deduplication
 def add_event_fingerprint(logger, method_name, event_dict):
     """Add event fingerprint for identifying duplicate events"""
-    # Create fingerprint from stable fields
+    # Create fingerprint from stable fields using xxhash (faster than MD5)
     fingerprint_fields = [
         event_dict.get("event", ""),
         event_dict.get("logger", ""),
@@ -74,9 +83,7 @@ def add_event_fingerprint(logger, method_name, event_dict):
         event_dict.get("lineno", ""),
     ]
     fingerprint_str = "|".join(str(f) for f in fingerprint_fields)
-    event_dict["event_fingerprint"] = hashlib.md5(fingerprint_str.encode()).hexdigest()[
-        :8
-    ]
+    event_dict["event_fingerprint"] = xxhash.xxh64(fingerprint_str.encode()).hexdigest()[:8]
     return event_dict
 
 
@@ -195,9 +202,9 @@ def generate_request_id() -> str:
 
 
 def configure_loki_logging(
-    app_name: str = "dl-logging",
-    environment: str = None,
-    extra_labels: Dict[str, str] = None,
+    app_name: str = "taskflows",
+    environment: Optional[str] = None,
+    extra_labels: Optional[Dict[str, str]] = None,
     log_level: str = "INFO",
     enable_console_renderer: bool = False,
     max_string_length: int = 1000,
@@ -216,10 +223,11 @@ def configure_loki_logging(
         include_hostname: Include hostname in logs
         include_process_info: Include process/thread info
     """
-    # Set environment variables for processors to use
-    os.environ["APP_NAME"] = app_name
-    if environment:
-        os.environ["ENVIRONMENT"] = environment
+    # Store configuration in module-level dict (avoids mutating os.environ)
+    _loki_config["app_name"] = app_name
+    _loki_config["environment"] = environment
+    _loki_config["hostname"] = os.getenv("HOSTNAME", "unknown") if include_hostname else None
+    _loki_config["extra_labels"] = extra_labels or {}
 
     labels = extra_labels or {}
 
@@ -272,11 +280,15 @@ def configure_loki_logging(
 
     # Add process info if requested
     if include_process_info:
-        processors.extend(
-            [
-                # Add process and thread info
-                structlog.processors.add_log_level,
-            ]
+        processors.append(
+            structlog.processors.CallsiteParameterAdder(
+                parameters=[
+                    structlog.processors.CallsiteParameter.PROCESS,
+                    structlog.processors.CallsiteParameter.PROCESS_NAME,
+                    structlog.processors.CallsiteParameter.THREAD,
+                    structlog.processors.CallsiteParameter.THREAD_NAME,
+                ]
+            )
         )
 
     processors.extend(

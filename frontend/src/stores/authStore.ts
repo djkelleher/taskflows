@@ -5,6 +5,7 @@ interface AuthState {
   accessToken: string | null;
   refreshToken: string | null;
   isAuthenticated: boolean;
+  isInitialized: boolean;
 }
 
 interface AuthActions {
@@ -20,6 +21,7 @@ export const useAuthStore = create<AuthState & AuthActions>()(
       accessToken: null,
       refreshToken: null,
       isAuthenticated: false,
+      isInitialized: false,
 
       initialize: () => {
         const accessToken = localStorage.getItem("access_token");
@@ -29,7 +31,10 @@ export const useAuthStore = create<AuthState & AuthActions>()(
             accessToken,
             refreshToken,
             isAuthenticated: true,
+            isInitialized: true,
           });
+        } else {
+          set({ isInitialized: true });
         }
       },
 

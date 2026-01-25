@@ -36,9 +36,7 @@ export function DynamicFieldList<T>({
       ) : (
         <div className="space-y-2">
           {items.map((item, index) => {
-            const key = keyExtractor
-              ? keyExtractor(item, index)
-              : `item-${index}-${JSON.stringify(item)}`;
+            const key = keyExtractor ? keyExtractor(item, index) : `item-${index}`;
             return (
               <div key={key} className="flex items-start gap-2">
                 <div className="flex-1">

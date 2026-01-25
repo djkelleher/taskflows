@@ -35,7 +35,7 @@ export function ServiceRow({ service, isSelected, onToggleSelect }: ServiceRowPr
   };
 
   return (
-    <tr className="hover:bg-gray-50">
+    <tr className="hover:bg-muted/30">
       <td className="px-4 py-3">
         <Checkbox
           checked={isSelected}
@@ -91,7 +91,7 @@ export function ServiceRow({ service, isSelected, onToggleSelect }: ServiceRowPr
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => navigate(`/logs/${service.name}`)}
+            onClick={() => navigate(`/logs/${encodeURIComponent(service.name)}`)}
           >
             Logs
           </Button>

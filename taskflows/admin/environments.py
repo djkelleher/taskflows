@@ -1,6 +1,11 @@
-"""Named environment management for storing reusable Venv/DockerContainer configurations."""
+"""Named environment management for storing reusable Venv/DockerContainer configurations.
+
+This module provides functionality to create, store, and manage named environments
+(Venv or DockerContainer configurations) that can be referenced by services.
+
+Uses the general-purpose serialization module for YAML/JSON support.
+"""
 import json
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -10,6 +15,7 @@ from pydantic import BaseModel
 from taskflows.common import logger, services_data_dir
 from taskflows.service import Venv
 from taskflows.docker import DockerContainer, Volume
+from taskflows.serialization import to_dict, from_dict, serialize, deserialize
 
 # File path
 environments_file = services_data_dir / "environments.json"
@@ -25,29 +31,39 @@ class NamedEnvironment(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+    def to_json(self, indent: int = 2) -> str:
+        """Serialize this environment to JSON."""
+        return serialize(self, format="json", indent=indent)
+
+    def to_yaml(self) -> str:
+        """Serialize this environment to YAML."""
+        return serialize(self, format="yaml")
+
+    @classmethod
+    def from_json(cls, data: str) -> "NamedEnvironment":
+        """Deserialize a NamedEnvironment from JSON."""
+        return deserialize(data, cls, format="json")
+
+    @classmethod
+    def from_yaml(cls, data: str) -> "NamedEnvironment":
+        """Deserialize a NamedEnvironment from YAML."""
+        return deserialize(data, cls, format="yaml")
+
 
 def _serialize_environment(env: Union[Venv, DockerContainer]) -> Dict[str, Any]:
     """Serialize a Venv or DockerContainer to a dict, filtering None values."""
-    data = asdict(env)
-    # Filter out None values for cleaner JSON
-    return {k: v for k, v in data.items() if v is not None}
+    data = to_dict(env, include_none=False)
+    # Remove type as we track type separately in NamedEnvironment
+    data.pop("type", None)
+    return data
 
 
 def _deserialize_environment(data: Dict[str, Any], env_type: str) -> Union[Venv, DockerContainer]:
     """Reconstruct a Venv or DockerContainer from serialized data."""
     if env_type == "venv":
-        return Venv(env_name=data["env_name"])
+        return from_dict(data, Venv)
     else:
-        # Handle Volume objects specially - they're nested dataclasses
-        if "volumes" in data and data["volumes"]:
-            volumes = []
-            for v in data["volumes"]:
-                if isinstance(v, dict):
-                    volumes.append(Volume(**v))
-                else:
-                    volumes.append(v)
-            data["volumes"] = volumes
-        return DockerContainer(**data)
+        return from_dict(data, DockerContainer)
 
 
 def load_environments() -> Dict[str, NamedEnvironment]:

@@ -875,8 +875,84 @@ class DockerContainer:
         # Apply timeouts
         if self.cgroup_config.timeout_stop:
             cfg['stop_timeout'] = self.cgroup_config.timeout_stop
-            
+
         return cfg
+
+    def to_dict(self, include_none: bool = False) -> Dict[str, Any]:
+        """Serialize this container to a dictionary.
+
+        Args:
+            include_none: Whether to include None values.
+
+        Returns:
+            A dictionary representation of the container.
+        """
+        from taskflows.serialization import to_dict
+        return to_dict(self, include_none=include_none)
+
+    def to_json(self, indent: int = 2, include_none: bool = False) -> str:
+        """Serialize this container to JSON.
+
+        Args:
+            indent: Indentation level for pretty printing.
+            include_none: Whether to include None values.
+
+        Returns:
+            A JSON string representation of the container.
+        """
+        from taskflows.serialization import serialize
+        return serialize(self, format="json", indent=indent, include_none=include_none)
+
+    def to_yaml(self, include_none: bool = False) -> str:
+        """Serialize this container to YAML.
+
+        Args:
+            include_none: Whether to include None values.
+
+        Returns:
+            A YAML string representation of the container.
+        """
+        from taskflows.serialization import serialize
+        return serialize(self, format="yaml", include_none=include_none)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DockerContainer":
+        """Create a DockerContainer from a dictionary.
+
+        Args:
+            data: The dictionary data.
+
+        Returns:
+            A DockerContainer instance.
+        """
+        from taskflows.serialization import from_dict
+        return from_dict(data, cls)
+
+    @classmethod
+    def from_json(cls, data: str) -> "DockerContainer":
+        """Create a DockerContainer from a JSON string.
+
+        Args:
+            data: The JSON string.
+
+        Returns:
+            A DockerContainer instance.
+        """
+        from taskflows.serialization import deserialize
+        return deserialize(data, cls, format="json")
+
+    @classmethod
+    def from_yaml(cls, data: str) -> "DockerContainer":
+        """Create a DockerContainer from a YAML string.
+
+        Args:
+            data: The YAML string.
+
+        Returns:
+            A DockerContainer instance.
+        """
+        from taskflows.serialization import deserialize
+        return deserialize(data, cls, format="yaml")
 
 
 def delete_docker_container(container_name: str, force: bool = True) -> bool:
