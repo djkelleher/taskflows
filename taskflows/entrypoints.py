@@ -205,7 +205,7 @@ def async_entrypoint(blocking: bool = False, shutdown_on_exception: bool = True)
                 if blocking:
                     await sdh.shutdown(0)
             except Exception as err:
-                logger.exception("Error running main task: %s", err)
+                logger.exception(f"Error running main task: {err}")
                 await sdh.shutdown(1)
 
         @wraps(f)

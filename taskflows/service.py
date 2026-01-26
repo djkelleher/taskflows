@@ -31,10 +31,12 @@ from .constraints import (
     MemoryPressure,
     SystemLoadConstraint,
 )
+import docker.errors
 from .docker import (
     DockerContainer,
     Volume,
     delete_docker_container,
+    get_docker_client,
 )
 from .exec import PickledFunction
 from .schedule import Calendar, Periodic, Schedule
@@ -566,7 +568,13 @@ class Service:
         if self.timeout:
             self.service_entries.add(f"RuntimeMaxSec={self.timeout}")
         if self.env_file:
-            self.service_entries.add(f"EnvironmentFile={self.env_file}")
+            # Read env file and parse it ourselves to handle 'export' prefix
+            # that systemd's EnvironmentFile doesn't understand
+            env_file_vars = self._parse_env_file(self.env_file)
+            if env_file_vars:
+                self.service_entries.add(
+                    "\n".join([f'Environment="{k}={v}"' for k, v in env_file_vars.items()])
+                )
         if self.env:
             self.service_entries.add(
                 "\n".join([f'Environment="{k}={v}"' for k, v in self.env.items()])
@@ -782,6 +790,42 @@ class Service:
 
     def show_files(self):
         print(pformat(dict(load_service_files(self.unit_files))))
+
+    def _parse_env_file(self, path: str) -> dict:
+        """Parse an env file, stripping 'export' prefixes that systemd doesn't understand.
+
+        Args:
+            path: Path to the env file.
+
+        Returns:
+            Dictionary of environment variables.
+        """
+        from pathlib import Path
+        env_vars = {}
+        try:
+            content = Path(path).read_text()
+            for line in content.splitlines():
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                # Strip 'export ' prefix if present
+                if line.startswith('export '):
+                    line = line[7:]  # len('export ') == 7
+                # Parse KEY=value
+                if '=' in line:
+                    key, _, value = line.partition('=')
+                    key = key.strip()
+                    value = value.strip()
+                    # Remove surrounding quotes if present
+                    if (value.startswith('"') and value.endswith('"')) or \
+                       (value.startswith("'") and value.endswith("'")):
+                        value = value[1:-1]
+                    if key:
+                        env_vars[key] = value
+        except Exception as e:
+            logger.warning(f"Could not parse env file {path}: {e}")
+        return env_vars
 
     def _write_timer_units(self):
         for prefix, schedule in (
@@ -999,30 +1043,46 @@ class Service:
 
 
 def service_logs(service_name: str, n_lines: int = 1000):
-    """Get logs command data for a service.
+    """Get logs for a service.
 
-    This function returns the journalctl command that would be used to view logs
-    for the specified service.
+    For Docker containers: reads from docker logs
+    For systemd services: reads from journalctl
 
     Args:
         service_name (str): The name of the service to show logs for.
+        n_lines (int): Number of log lines to retrieve.
 
     Returns:
-        dict: Dictionary containing the service name and journalctl command.
+        str: The log output.
     """
+    container_name = f"{_SYSTEMD_FILE_PREFIX}{service_name}"
+
+    # Check if this is a Docker container
+    try:
+        client = get_docker_client()
+        container = client.containers.get(container_name)
+        # Docker container exists - use docker logs
+        logs = container.logs(tail=n_lines, timestamps=True).decode("utf-8")
+        return logs.strip()
+    except docker.errors.NotFound:
+        pass  # Not a Docker container, fall through to journalctl
+    except Exception as e:
+        logger.debug(f"Docker check failed for {container_name}: {e}")
+
+    # Fall back to journalctl for systemd services
     cmd = [
         "journalctl",
         "--user",
         "-u",
         f"{_SYSTEMD_FILE_PREFIX}{service_name}",
         "-n",
-        str(n_lines),  # Return only the latest log lines
+        str(n_lines),
     ]
     result = subprocess.run(
         cmd,
-        capture_output=True,  # capture stdout & stderr
-        text=True,  # decode to str instead of bytes
-        check=True,  # raise CalledProcessError on non-zero exit
+        capture_output=True,
+        text=True,
+        check=True,
     )
     txt = []
     if result.stderr:

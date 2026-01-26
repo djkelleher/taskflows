@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Button, useToast, useConfirm } from "@/components/ui";
 import { useBatchAction } from "@/hooks/useServices";
 import { useServiceStore } from "@/stores/serviceStore";
+import { logger } from "@/utils/logger";
+import { getErrorMessage } from "@/utils/error";
 import type { BatchOperation } from "@/types";
 
 export function BatchActions() {
@@ -36,9 +38,8 @@ export function BatchActions() {
       showSuccess(`Batch ${operation} initiated for ${selectedCount} service(s)`);
       clearSelection();
     } catch (error) {
-      console.error(`Failed to ${operation} services:`, error);
-      const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      showError(`Failed to ${operation} selected services: ${errorMessage}`);
+      logger.error(`Failed to ${operation} services:`, error);
+      showError(`Failed to ${operation} selected services: ${getErrorMessage(error)}`);
     } finally {
       setActionInProgress(null);
     }

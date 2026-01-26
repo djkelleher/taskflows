@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { Button, Input, Select, Checkbox, Card, CardHeader, CardContent, CardFooter, useToast } from "@/components/ui";
 import { DynamicFieldList, PortMappingField, VolumeMappingField, EnvVarField } from "./DynamicFieldList";
 import { useCreateEnvironment, useUpdateEnvironment } from "@/hooks/useEnvironments";
+import { logger } from "@/utils/logger";
+import { getErrorMessage } from "@/utils/error";
 import type { NamedEnvironment, EnvironmentType, NetworkMode, RestartPolicy, PortMapping, VolumeMapping } from "@/types";
 
 interface EnvironmentFormProps {
@@ -209,12 +211,11 @@ export function EnvironmentForm({ initialData, isEdit = false }: EnvironmentForm
       }
       navigate("/environments");
     } catch (error) {
-      console.error("Failed to save environment:", error);
-      const errorMessage = error instanceof Error ? error.message : "Unknown error";
+      logger.error("Failed to save environment:", error);
       showError(
         isEdit
-          ? `Failed to update environment: ${errorMessage}`
-          : `Failed to create environment: ${errorMessage}`
+          ? `Failed to update environment: ${getErrorMessage(error)}`
+          : `Failed to create environment: ${getErrorMessage(error)}`
       );
     }
   };

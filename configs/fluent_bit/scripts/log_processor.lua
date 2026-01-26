@@ -1,8 +1,15 @@
--- Log processor for plain text and JSON messages from journald
--- Handles both user services and Docker containers
+-- Log processor for systemd user services (journald) and Docker containers (fluentd forward)
+-- Systemd services: collected via journald input
+-- Docker containers: collected via fluentd forward protocol (TCP 24224)
 -- Parses JSON messages from structlog and extracts Loki labels
 
-local cjson = require("cjson.safe")
+-- Decode JSON-escaped unicode sequences (e.g., \u001b -> ESC for ANSI colors)
+local function decode_unicode_escapes(str)
+    if not str then return str end
+    return str:gsub("\\u(%x%x%x%x)", function(hex)
+        return string.char(tonumber(hex, 16))
+    end)
+end
 
 -- State for timestamp tie-breaking (with LRU-style cleanup)
 local last_ts_us_by_service = {}
@@ -34,46 +41,76 @@ local function touch_service(svc)
     cleanup_old_services()
 end
 
--- Try to parse JSON and extract fields for Loki labels
+-- Extract a string value from JSON using pattern matching
+-- Handles: "key": "value" or "key":"value"
+local function extract_json_string(json, key)
+    -- Pattern for "key": "value" (handles escaped quotes in value)
+    local pattern = '"' .. key .. '"%s*:%s*"([^"]*)"'
+    return json:match(pattern)
+end
+
+-- Try to extract fields from JSON message using pattern matching
+-- This avoids the need for cjson library which isn't bundled in Fluent Bit 4.x
 local function extract_json_fields(message)
     if not message or message:sub(1, 1) ~= "{" then
         return nil
     end
 
-    local parsed, err = cjson.decode(message)
-    if not parsed or type(parsed) ~= "table" then
-        return nil
-    end
+    -- Build a table with extracted fields
+    local parsed = {}
+    local found_any = false
 
-    return parsed
+    local level_name = extract_json_string(message, "level_name")
+    if level_name then parsed.level_name = level_name; found_any = true end
+
+    local level = extract_json_string(message, "level")
+    if level then parsed.level = level; found_any = true end
+
+    local logger = extract_json_string(message, "logger")
+    if logger then parsed.logger = logger; found_any = true end
+
+    local app = extract_json_string(message, "app")
+    if app then parsed.app = app; found_any = true end
+
+    local environment = extract_json_string(message, "environment")
+    if environment then parsed.environment = environment; found_any = true end
+
+    local event = extract_json_string(message, "event")
+    if event then parsed.event = event; found_any = true end
+
+    if found_any then
+        return parsed
+    end
+    return nil
 end
 
 function process_log(tag, timestamp, record)
-    local message = record["MESSAGE"] or record["log_message"] or ""
+    -- Handle both journald format (MESSAGE) and fluentd forward format (log)
+    local message = record["MESSAGE"] or record["log_message"] or record["log"] or ""
     if not message or message == "" then
-        return 0  -- Drop logs without MESSAGE
+        return 0  -- Drop logs without message
     end
 
     -- Extract service name based on source type
     local service_name = nil
     local log_source = nil
 
-    -- User services (systemd)
+    -- User services (systemd) - journald format
     local unit = record["SYSTEMD_USER_UNIT"] or record["_SYSTEMD_USER_UNIT"]
     if unit and unit:match("^taskflows%-.*%.service$") then
         service_name = unit:gsub("%.service$", ""):gsub("^taskflows%-", "")
         log_source = "systemd"
     end
 
-    -- Docker containers
-    local syslog_id = record["SYSLOG_IDENTIFIER"] or record["_SYSLOG_IDENTIFIER"]
-    if syslog_id and syslog_id:match("^docker%.") then
-        local container_name = syslog_id:match("^docker%.(.+)$")
-        if container_name then
-            -- Strip taskflows- prefix and Docker's 12-char hex container ID suffix
-            service_name = container_name:gsub("^taskflows%-", ""):gsub("%-[a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]$", "")
-            log_source = "docker"
-        end
+    -- Docker containers - fluentd forward format (from fluentd logging driver)
+    -- The fluentd driver sends container_name field
+    local container_name = record["container_name"]
+    if container_name then
+        -- Strip leading slash if present (Docker adds it)
+        container_name = container_name:gsub("^/", "")
+        -- Strip taskflows- prefix and Docker's 12-char hex container ID suffix
+        service_name = container_name:gsub("^taskflows%-", ""):gsub("%-[a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]$", "")
+        log_source = "docker"
     end
 
     -- Skip if we couldn't extract a service name
@@ -115,38 +152,35 @@ function process_log(tag, timestamp, record)
         end
     end
 
-    -- Build clean record - try to extract JSON fields for Loki labels
-    local clean_record = {
-        MESSAGE = message,
-        service_name = service_name,
-        log_source = log_source
-    }
-
     -- Try to parse JSON and extract label fields
     local json_data = extract_json_fields(message)
+
+    -- For JSON logs, use event field as the message (cleaner output)
+    -- For non-JSON logs, decode any escaped ANSI sequences
+    local final_message = message
+    if json_data and json_data.event then
+        final_message = json_data.event
+    else
+        -- Non-JSON log - decode unicode escapes for ANSI colors
+        final_message = decode_unicode_escapes(message)
+    end
+
+    -- Build clean record with simplified labels
+    local clean_record = {
+        MESSAGE = final_message,
+        service_name = service_name
+    }
+
+    -- Extract label fields from JSON (low cardinality only)
     if json_data then
-        -- Extract key fields as Loki labels (low cardinality)
         if json_data.level_name then
             clean_record["level"] = json_data.level_name
         elseif json_data.level then
             clean_record["level"] = json_data.level
         end
 
-        if json_data.logger then
-            clean_record["logger"] = json_data.logger
-        end
-
-        if json_data.app then
-            clean_record["app"] = json_data.app
-        end
-
         if json_data.environment then
             clean_record["environment"] = json_data.environment
-        end
-
-        -- Extract event/message for easier querying
-        if json_data.event then
-            clean_record["event"] = json_data.event
         end
     end
 

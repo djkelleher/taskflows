@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useDebounce } from "use-debounce";
-import { Input, Checkbox, Card } from "@/components/ui";
+import { Input, Checkbox, Card, LoadingSpinner } from "@/components/ui";
 import { ServiceRow } from "./ServiceRow";
 import { BatchActions } from "./BatchActions";
 import { useServiceStore } from "@/stores/serviceStore";
@@ -13,10 +13,21 @@ interface ServiceTableProps {
 }
 
 export function ServiceTable({ services, isLoading }: ServiceTableProps) {
-  const { selectedServices, searchQuery, setSearchQuery, toggleSelection, selectAll, clearSelection } =
-    useServiceStore();
+  // Use local state for search input to avoid re-rendering on every keystroke
+  const [localSearchQuery, setLocalSearchQuery] = useState("");
+  const [debouncedSearch] = useDebounce(localSearchQuery, 300);
 
-  const [debouncedSearch] = useDebounce(searchQuery, 300);
+  // Only subscribe to selection-related state from store
+  const selectedServices = useServiceStore((state) => state.selectedServices);
+  const toggleSelection = useServiceStore((state) => state.toggleSelection);
+  const selectAll = useServiceStore((state) => state.selectAll);
+  const clearSelection = useServiceStore((state) => state.clearSelection);
+
+  // Sync debounced search to store for other components (e.g., URL state)
+  const setSearchQuery = useServiceStore((state) => state.setSearchQuery);
+  useEffect(() => {
+    setSearchQuery(debouncedSearch);
+  }, [debouncedSearch, setSearchQuery]);
 
   const filteredServices = useMemo(() => {
     if (!debouncedSearch) return services;
@@ -44,8 +55,8 @@ export function ServiceTable({ services, isLoading }: ServiceTableProps) {
           <Input
             type="text"
             placeholder="Search services..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            value={localSearchQuery}
+            onChange={(e) => setLocalSearchQuery(e.target.value)}
             className="pl-9 w-64"
           />
         </div>
@@ -84,28 +95,8 @@ export function ServiceTable({ services, isLoading }: ServiceTableProps) {
             {isLoading && filteredServices.length === 0 ? (
               <tr>
                 <td colSpan={6} className="px-4 py-8 text-center text-muted">
-                  <div className="flex items-center justify-center gap-2">
-                    <svg
-                      className="animate-spin h-5 w-5"
-                      xmlns="http://www.w3.org/2000/svg"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                    >
-                      <circle
-                        className="opacity-25"
-                        cx="12"
-                        cy="12"
-                        r="10"
-                        stroke="currentColor"
-                        strokeWidth="4"
-                      />
-                      <path
-                        className="opacity-75"
-                        fill="currentColor"
-                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                      />
-                    </svg>
-                    Loading services...
+                  <div className="flex items-center justify-center">
+                    <LoadingSpinner label="Loading services..." />
                   </div>
                 </td>
               </tr>

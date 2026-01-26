@@ -4,6 +4,8 @@ import { Button, Checkbox } from "@/components/ui";
 import { StatusBadge } from "./StatusBadge";
 import { useServiceAction } from "@/hooks/useServices";
 import { useToast } from "@/components/ui";
+import { logger } from "@/utils/logger";
+import { getErrorMessage } from "@/utils/error";
 import type { Service } from "@/types";
 
 interface ServiceRowProps {
@@ -26,9 +28,8 @@ export function ServiceRow({ service, isSelected, onToggleSelect }: ServiceRowPr
       await serviceActionMutation.mutateAsync({ serviceName: service.name, action });
       showSuccess(`Service ${service.name} ${action} initiated`);
     } catch (error) {
-      console.error(`Failed to ${action} service:`, error);
-      const errorMessage = error instanceof Error ? error.message : "Unknown error";
-      showError(`Failed to ${action} service ${service.name}: ${errorMessage}`);
+      logger.error(`Failed to ${action} service:`, error);
+      showError(`Failed to ${action} service ${service.name}: ${getErrorMessage(error)}`);
     } finally {
       setActionInProgress(null);
     }

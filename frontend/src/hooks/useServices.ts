@@ -1,6 +1,6 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { getServices, serviceAction, batchAction } from "@/api";
+import { useDelayedInvalidation } from "./useDelayedInvalidation";
 import type { ServicesResponse, BatchOperation } from "@/types";
 
 export function useServices() {
@@ -13,59 +13,21 @@ export function useServices() {
 }
 
 export function useServiceAction() {
-  const queryClient = useQueryClient();
-  const timeoutRef = useRef<number | undefined>(undefined);
-
-  // Cleanup timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-    };
-  }, []);
+  const invalidateServices = useDelayedInvalidation(["services"], 1000);
 
   return useMutation({
     mutationFn: ({ serviceName, action }: { serviceName: string; action: "start" | "stop" | "restart" }) =>
       serviceAction(serviceName, action),
-    onSuccess: () => {
-      // Clear any existing timeout
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-      // Refetch services after 1 second to see updated status
-      timeoutRef.current = window.setTimeout(() => {
-        queryClient.invalidateQueries({ queryKey: ["services"] });
-      }, 1000);
-    },
+    onSuccess: invalidateServices,
   });
 }
 
 export function useBatchAction() {
-  const queryClient = useQueryClient();
-  const timeoutRef = useRef<number | undefined>(undefined);
-
-  // Cleanup timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-    };
-  }, []);
+  const invalidateServices = useDelayedInvalidation(["services"], 1000);
 
   return useMutation({
     mutationFn: ({ serviceNames, operation }: { serviceNames: string[]; operation: BatchOperation }) =>
       batchAction(serviceNames, operation),
-    onSuccess: () => {
-      // Clear any existing timeout
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-      // Refetch services after 1 second to see updated status
-      timeoutRef.current = window.setTimeout(() => {
-        queryClient.invalidateQueries({ queryKey: ["services"] });
-      }, 1000);
-    },
+    onSuccess: invalidateServices,
   });
 }

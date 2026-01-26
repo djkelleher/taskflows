@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useDebounce } from "use-debounce";
-import { Button, Input, Select, Card, CardHeader, CardContent } from "@/components/ui";
+import { Button, Input, Select, Card, CardHeader, CardContent, LoadingSpinner } from "@/components/ui";
 import { useLogs } from "@/hooks/useLogs";
 import { Search, Download, RefreshCw } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -28,13 +28,16 @@ export function LogViewer({ serviceName }: LogViewerProps) {
 
   const logs = data?.logs || "";
 
+  // Memoize line splitting separately from filtering for better performance
+  const logLines = useMemo(() => logs.split("\n"), [logs]);
+
   const filteredLogs = useMemo(() => {
     if (!debouncedSearch) return logs;
-    const lines = logs.split("\n");
-    return lines
-      .filter((line) => line.toLowerCase().includes(debouncedSearch.toLowerCase()))
+    const searchLower = debouncedSearch.toLowerCase();
+    return logLines
+      .filter((line) => line.toLowerCase().includes(searchLower))
       .join("\n");
-  }, [logs, debouncedSearch]);
+  }, [logs, logLines, debouncedSearch]);
 
   // Auto-scroll to bottom when new logs arrive
   useEffect(() => {
@@ -127,27 +130,7 @@ export function LogViewer({ serviceName }: LogViewerProps) {
       <CardContent className="flex-1 overflow-hidden p-0">
         {isLoading ? (
           <div className="flex items-center justify-center h-full text-muted">
-            <svg
-              className="animate-spin h-5 w-5 mr-2"
-              xmlns="http://www.w3.org/2000/svg"
-              fill="none"
-              viewBox="0 0 24 24"
-            >
-              <circle
-                className="opacity-25"
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="currentColor"
-                strokeWidth="4"
-              />
-              <path
-                className="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-              />
-            </svg>
-            Loading logs...
+            <LoadingSpinner label="Loading logs..." />
           </div>
         ) : (
           <pre

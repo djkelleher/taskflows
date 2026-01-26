@@ -25,17 +25,29 @@ We chose Grafana Loki as our logging backend, using Fluent Bit as the log shippe
 6. **Horizontal Scaling**: Can scale to handle high log volume
 
 ### Architecture
+
+**Dual-Path Log Collection:**
 ```
-Services/Tasks (systemd)
-    ↓ journald
-    ↓
-Fluent Bit (log shipper)
-    ↓ Loki protocol
-    ↓
-Loki (storage + query)
-    ↓
-Grafana (visualization)
+┌─────────────────────────────┐    ┌─────────────────────────────┐
+│ Systemd User Services       │    │ Docker Containers           │
+│ (taskflows-*.service)       │    │ (loki, fluent-bit, grafana) │
+└──────────────┬──────────────┘    └──────────────┬──────────────┘
+               ↓                                   ↓
+           journald                        fluentd driver
+        (user journal)                    (TCP port 24224)
+               ↓                                   ↓
+               └───────────────┬───────────────────┘
+                               ↓
+                    Fluent Bit (log shipper)
+                      • systemd input (journald)
+                      • forward input (fluentd)
+                               ↓
+                         Loki (storage)
+                               ↓
+                    Grafana (visualization)
 ```
+
+Docker containers send logs directly to Fluent Bit via TCP using the fluentd logging driver, bypassing journald entirely. This separation improves efficiency and prevents journal size limits from affecting container logs.
 
 ### Alternatives Considered
 
@@ -86,7 +98,7 @@ This produces JSON output:
 
 ### Fluent Bit JSON Parsing
 
-Fluent Bit reads logs from journald and uses a Lua script (`log_processor.lua`) to:
+Fluent Bit collects logs from two sources: journald (for systemd services) and the fluentd forward protocol (for Docker containers). It uses a Lua script (`log_processor.lua`) to:
 
 1. **Detect JSON messages** - Checks if message starts with `{`
 2. **Parse and extract labels** - Pulls out key fields for Loki indexing

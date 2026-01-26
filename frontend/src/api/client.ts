@@ -1,4 +1,5 @@
 import { useAuthStore } from "@/stores/authStore";
+import { logger } from "@/utils/logger";
 import type { LoginRequest, LoginResponse, RefreshResponse, NamedEnvironment } from "@/types";
 
 // Mutex to prevent concurrent token refreshes
@@ -30,7 +31,7 @@ async function refreshAccessToken(): Promise<string | null> {
         return data.access_token;
       }
     } catch (err) {
-      console.error("Token refresh failed:", err);
+      logger.error("Token refresh failed:", err);
     }
 
     return null;
@@ -182,11 +183,10 @@ export async function updateEnvironment(name: string, environment: NamedEnvironm
   return response.json();
 }
 
-export async function deleteEnvironment(name: string) {
+export async function deleteEnvironment(name: string): Promise<void> {
   const response = await fetchWithAuth(`/api/environments/${encodeURIComponent(name)}`, {
     method: "DELETE",
   });
 
   if (!response.ok) throw new Error("Failed to delete environment");
-  return response.ok;
 }

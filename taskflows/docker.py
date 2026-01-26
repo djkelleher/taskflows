@@ -675,8 +675,11 @@ class DockerContainer:
                     else:
                         cmd.extend(["-p", shlex.quote(f"{host_config}:{container_port}")])
 
-        # Log configuration
-        cmd.extend(["--log-driver", "journald"])
+        # Log configuration with resilience options
+        cmd.extend(["--log-driver", "fluentd"])
+        cmd.extend(["--log-opt", "fluentd-address=localhost:24224"])
+        cmd.extend(["--log-opt", "fluentd-async=true"])
+        cmd.extend(["--log-opt", "fluentd-buffer-limit=1048576"])
         cmd.extend(["--log-opt", "tag=docker.{{.Name}}"])
 
         # Image (user-controlled, must be escaped)
@@ -748,10 +751,12 @@ class DockerContainer:
         cfg.pop("persisted", None)
         cfg.pop("cgroup_config", None)
         cfg["log_config"] = LogConfig(
-            type=LogConfigTypesEnum.JOURNALD,
+            type=LogConfigTypesEnum.FLUENTD,
             config={
+                "fluentd-address": "localhost:24224",
+                "fluentd-async": "true",
+                "fluentd-buffer-limit": "1048576",
                 "tag": "docker.{{.Name}}",
-                # "labels": "environment,service_type,version",
             },
         )
         restart_policy = cfg.get("restart_policy")

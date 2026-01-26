@@ -1,5 +1,5 @@
 # Fluent Bit v4.2 YAML Configuration
-# Collects logs from systemd user services and Docker containers via journald
+# Collects logs from systemd user services via journald and Docker containers via fluentd forward protocol
 
 service:
   flush: 5
@@ -12,30 +12,26 @@ service:
 
 pipeline:
   inputs:
-    # Input: Systemd Journal for user services (UID 1000) - taskflows only
+    # Input: Systemd Journal for user services (UID 1000)
+    # Note: systemd_filter does NOT support wildcards, so we filter only by UID
+    # and let the Lua script filter for taskflows-*.service patterns
     - name: systemd
       tag: user_logs
-      systemd_filter_type: and
       systemd_filter:
         - _UID=1000
-        - _SYSTEMD_USER_UNIT=taskflows-*.service
       read_from_tail: true
       strip_underscores: true
       db: /var/log/flb_user.db
       db.sync: normal
       mem_buf_limit: 10MB
 
-    # Input: Docker containers using journald driver - pre-filtered to docker.* only
-    - name: systemd
+    # Input: Docker containers using fluentd driver via Forward protocol
+    - name: forward
       tag: docker_logs
-      path: /var/log/journal
-      systemd_filter:
-        - SYSLOG_IDENTIFIER=docker.*
-      read_from_tail: true
-      strip_underscores: true
-      db: /var/log/flb_docker_v3.db
-      db.sync: normal
-      mem_buf_limit: 10MB
+      listen: 0.0.0.0
+      port: 24224
+      buffer_chunk_size: 1M
+      buffer_max_size: 6M
 
   filters:
     # Filter: Process all logs with Lua script
@@ -50,9 +46,9 @@ pipeline:
       match: "*_logs"
       host: ${LOKI_HOST}
       port: ${LOKI_PORT}
-      labels: log_source=$log_source,host=${HOSTNAME}
-      label_keys: $service_name,$level,$logger,$app,$environment
-      remove_keys: service_name,log_source,level,logger,app,environment,event
+      labels: host=${HOSTNAME}
+      label_keys: $service_name,$level,$environment
+      remove_keys: service_name,level,environment
       auto_kubernetes_labels: false
       retry_limit: 5
       compress: gzip

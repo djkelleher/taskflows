@@ -1,15 +1,28 @@
 import os
 
-# Configure CLI logging to only log to file (no terminal output)
+# Configure CLI logging: disable by default, enable only in DEBUG mode
 # This MUST be set before any taskflows imports that use the logger
-os.environ['TASKFLOWS_NO_TERMINAL'] = '1'
-os.environ['TASKFLOWS_FILE_DIR'] = '/opt/taskflows/data/logs'
+_log_level = (os.environ.get('TASKFLOWS_LOG_LEVEL') or
+              os.environ.get('taskflows_log_level') or
+              os.environ.get('LOGGERS_LOG_LEVEL') or
+              os.environ.get('loggers_log_level') or '').upper()
+
+if _log_level == 'DEBUG':
+    # In DEBUG mode, enable terminal and file logging for troubleshooting
+    os.environ['TASKFLOWS_NO_TERMINAL'] = '0'
+    os.environ['TASKFLOWS_FILE_DIR'] = '/opt/taskflows/data/logs'
+else:
+    # In non-DEBUG mode, disable all logging to keep CLI output clean
+    os.environ['TASKFLOWS_NO_TERMINAL'] = '1'
+    os.environ['TASKFLOWS_FILE_DIR'] = ''  # Empty string prevents default and disables file logging
 
 from functools import lru_cache
 from itertools import cycle
+from pathlib import Path
 from typing import Optional
 
 import click
+import yaml
 from taskflows.alerts.components import Table
 from click import Group
 from rich.console import Console
@@ -318,14 +331,7 @@ async def logs(service_name: str, n_lines: int, server: Optional[str] = None):
 
 
 @cli.command(name="create")
-@click.argument("search_in", required=False)
-@click.option(
-    "-f",
-    "--file",
-    "yaml_file",
-    type=click.Path(exists=True),
-    help="Path to a YAML file containing service definitions.",
-)
+@click.argument("search_in", required=True)
 @click.option(
     "-i",
     "--include",
@@ -345,28 +351,28 @@ async def logs(service_name: str, n_lines: int, server: Optional[str] = None):
     help="Server(s) to create on. Can be specified multiple times. If not specified, creates on all registered servers.",
 )
 @async_entrypoint(blocking=True)
-async def cli_create(search_in, yaml_file, include, exclude, server: tuple = ()):
+async def cli_create(search_in, include, exclude, server: tuple = ()):
     """Create services and dashboards on specified servers.
 
-    Either provide SEARCH_IN (a directory to search for Python service definitions)
-    or use --file/-f to specify a YAML file containing service definitions.
+    SEARCH_IN can be either:
+    - A YAML file (.yaml or .yml) containing service definitions
+    - A Python file (.py) or directory to search for Service instances
 
     Examples:
+        tf create services.yaml           # Load from YAML file
         tf create ./services              # Search Python files in ./services
-        tf create -f services.yaml        # Load from YAML file
-        tf create -f services.yaml -i "web-*"  # Load from YAML, include only web-* services
+        tf create services.yaml -i "web-*"  # Load from YAML, include only web-* services
     """
-    if not search_in and not yaml_file:
-        raise click.UsageError("Either SEARCH_IN or --file/-f must be provided.")
+    from pathlib import Path
 
-    if search_in and yaml_file:
-        raise click.UsageError("Cannot use both SEARCH_IN and --file/-f. Choose one.")
+    path = Path(search_in)
+    is_yaml = path.suffix.lower() in (".yaml", ".yml")
 
     kwargs = {}
-    if search_in:
+    if is_yaml:
+        kwargs["yaml_file"] = search_in
+    else:
         kwargs["search_in"] = search_in
-    if yaml_file:
-        kwargs["yaml_file"] = yaml_file
     if include:
         kwargs["include"] = include
     if exclude:
@@ -589,6 +595,62 @@ async def show(match: str, server: tuple = ()):
         else:
             click.echo(f"{hostname}:")
             result.console()
+
+
+@cli.command(name="discover")
+@click.argument("path", required=False, default=".", type=click.Path(exists=True))
+@click.option("--count", "-c", is_flag=True, help="Show service count per file")
+@click.option("--verbose", "-v", is_flag=True, help="Show parse warnings")
+def discover(path: str, count: bool, verbose: bool):
+    """Discover YAML files with taskflows_services definitions.
+
+    Recursively searches for YAML files containing a 'taskflows_services' key
+    starting from the specified PATH (defaults to current directory).
+
+    Examples:
+        tf discover                    # Search current directory
+        tf discover ./configs          # Search in ./configs
+        tf discover -c ./configs       # Show service counts
+        tf discover -v ./configs       # Show parse warnings
+    """
+    search_path = Path(path)
+    found_files = []
+
+    # Collect all YAML files
+    yaml_files = list(search_path.glob("**/*.yaml")) + list(search_path.glob("**/*.yml"))
+
+    for yaml_file in sorted(yaml_files):
+        try:
+            with open(yaml_file, "r") as f:
+                content = yaml.safe_load(f)
+
+            # Skip empty files or non-dict content
+            if not isinstance(content, dict):
+                continue
+
+            # Check for taskflows_services key
+            if "taskflows_services" in content:
+                services = content["taskflows_services"]
+                service_count = len(services) if isinstance(services, (list, dict)) else 0
+                found_files.append((yaml_file, service_count))
+
+        except yaml.YAMLError as e:
+            if verbose:
+                click.echo(f"Warning: Could not parse {yaml_file}: {e}", err=True)
+        except Exception as e:
+            if verbose:
+                click.echo(f"Warning: Error reading {yaml_file}: {e}", err=True)
+
+    # Output results
+    for file_path, service_count in found_files:
+        if count:
+            click.echo(f"{file_path} ({service_count} services)")
+        else:
+            click.echo(str(file_path))
+
+    # Summary
+    click.echo()
+    click.echo(f"Found {len(found_files)} file(s) with taskflows_services.")
 
 
 def table_column_colors():

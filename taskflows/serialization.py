@@ -861,11 +861,11 @@ _register_taskflows_types()
 def load_services_from_yaml(path: Union[str, Path]) -> List["Service"]:
     """Load multiple services from a YAML file.
 
-    The YAML file should contain a 'services' key with a list of service definitions.
+    The YAML file should contain a 'taskflows_services' key with a list of service definitions.
     Types are automatically inferred from content - no need for explicit 'type' fields.
 
     Example YAML file:
-        services:
+        taskflows_services:
           - name: web-server
             start_command: python -m http.server 8080
             description: Simple web server
@@ -893,7 +893,7 @@ def load_services_from_yaml(path: Union[str, Path]) -> List["Service"]:
         A list of Service instances.
 
     Raises:
-        ValueError: If the YAML file doesn't contain a 'services' key.
+        ValueError: If the YAML file doesn't contain a 'taskflows_services' key.
         FileNotFoundError: If the file doesn't exist.
     """
     from taskflows.service import Service
@@ -905,10 +905,10 @@ def load_services_from_yaml(path: Union[str, Path]) -> List["Service"]:
     if not isinstance(data, dict):
         raise ValueError(f"YAML file must contain a mapping, got {type(data).__name__}")
 
-    if "services" not in data:
-        raise ValueError("YAML file must contain a 'services' key with a list of service definitions")
+    if "taskflows_services" not in data:
+        raise ValueError("YAML file must contain a 'taskflows_services' key with a list of service definitions")
 
-    services_data = data["services"]
+    services_data = data["taskflows_services"]
     if not isinstance(services_data, list):
         raise ValueError(f"'services' must be a list, got {type(services_data).__name__}")
 
