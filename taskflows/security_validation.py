@@ -80,8 +80,16 @@ def validate_service_name(name: str) -> str:
         Validated service name
 
     Raises:
-        ValidationError: If service name contains unsafe characters
+        ValidationError: If service name is None, empty, or contains unsafe characters
     """
+    # Check for None or empty
+    if name is None:
+        raise ValidationError("Service name cannot be None. Please provide a name for the service.")
+    if not isinstance(name, str):
+        raise ValidationError(f"Service name must be a string, got {type(name).__name__}")
+    if not name:
+        raise ValidationError("Service name cannot be empty")
+
     # Allow only safe characters
     if not re.match(r"^[a-zA-Z0-9._-]+$", name):
         raise ValidationError(

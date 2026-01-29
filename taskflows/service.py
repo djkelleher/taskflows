@@ -401,22 +401,7 @@ class Service:
     cgroup_config: Optional['CgroupConfig'] = None
 
     def __post_init__(self):
-        # SECURITY: Validate service name to prevent injection
         from taskflows.security_validation import validate_service_name, validate_env_file_path
-
-        try:
-            self.name = validate_service_name(self.name)
-        except Exception as e:
-            logger.error(f"Invalid service name '{self.name}': {e}")
-            raise
-
-        # SECURITY: Validate env_file path to prevent directory traversal
-        if self.env_file:
-            try:
-                self.env_file = str(validate_env_file_path(self.env_file, allow_nonexistent=True))
-            except Exception as e:
-                logger.error(f"Invalid env_file path: {e}")
-                raise
 
         self._pkl_funcs = []
         self.env = self.env or {}
@@ -434,7 +419,7 @@ class Service:
             logger.info(f"Loaded named environment '{env_name}' for service {self.name}")
             self.environment = env_obj  # Already a Venv or DockerContainer
 
-        # Handle Docker container environments
+        # Handle Docker container environments - sync names before validation
         if isinstance(self.environment, DockerContainer):
             """Setup Docker-specific service configuration."""
             container = self.environment
@@ -448,6 +433,26 @@ class Service:
                 container.name = self.name
             elif not self.name:
                 self.name = container.name
+
+        # SECURITY: Validate service name to prevent injection
+        # This must happen AFTER Docker container name syncing so container name can be used
+        try:
+            self.name = validate_service_name(self.name)
+        except Exception as e:
+            logger.error(f"Invalid service name '{self.name}': {e}")
+            raise
+
+        # SECURITY: Validate env_file path to prevent directory traversal
+        if self.env_file:
+            try:
+                self.env_file = str(validate_env_file_path(self.env_file, allow_nonexistent=True))
+            except Exception as e:
+                logger.error(f"Invalid env_file path: {e}")
+                raise
+
+        # Continue Docker container setup after validation
+        if isinstance(self.environment, DockerContainer):
+            container = self.environment
 
             # Mount the same directory path in container as on host
             # This simplifies the setup and ensures consistency
