@@ -558,7 +558,8 @@ class DockerContainer:
         container_name = self._ensure_name()
         cmd.extend(["--name", shlex.quote(container_name)])
 
-        # Auto-remove container
+        # Auto-remove container (incompatible with --restart, and for
+        # ephemeral containers systemd handles restarts anyway)
         cmd.append("--rm")
 
         # Detach mode (default to True for consistency with previous behavior)
@@ -568,10 +569,6 @@ class DockerContainer:
         # Network mode (user-controlled, must be escaped)
         if self.network_mode:
             cmd.extend(["--network", shlex.quote(self.network_mode)])
-
-        # Restart policy (user-controlled, must be escaped)
-        if self.restart_policy != "no":
-            cmd.extend(["--restart", shlex.quote(self.restart_policy)])
 
         # Init
         if self.init:
