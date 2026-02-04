@@ -28,11 +28,12 @@ services:
       - ENVIRONMENT=${ENVIRONMENT:-production}
       # Use actual machine hostname (not container hostname)
       - HOSTNAME
+      - SERVICE_UID=${SERVICE_UID:-1000}
     volumes:
       - /var/log/journal:/var/log/journal:ro
       - /run/log/journal:/run/log/journal:ro
       - /run/systemd/journal:/run/systemd/journal:ro
-      - /run/user/1000/systemd/journal:/run/user/1000/systemd/journal:ro
+      - /run/user/${SERVICE_UID:-1000}/systemd/journal:/run/user/${SERVICE_UID:-1000}/systemd/journal:ro
       - /etc/machine-id:/etc/machine-id:ro
       - ./configs/fluent_bit/fluent-bit.yaml:/fluent-bit/etc/fluent-bit.yaml:ro
       - ./configs/fluent_bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro

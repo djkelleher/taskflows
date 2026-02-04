@@ -89,6 +89,7 @@ class CgroupConfig:
 
     # Process limits
     pids_limit: Optional[int] = None  # max number of PIDs/tasks
+    nofile_limit: Optional[int] = None  # max number of open file descriptors
 
     # Security and isolation
     oom_score_adj: Optional[int] = None  # OOM killer preference (-1000 to 1000)
@@ -171,6 +172,8 @@ class CgroupConfig:
         # Process limits
         if self.pids_limit:
             args.extend(["--pids-limit", str(self.pids_limit)])
+        if self.nofile_limit:
+            args.extend(["--ulimit", f"nofile={self.nofile_limit}:{self.nofile_limit}"])
 
         # Security and isolation
         if self.oom_score_adj is not None:
@@ -347,6 +350,8 @@ class CgroupConfig:
         # Process limits
         if self.pids_limit:
             directives["TasksMax"] = str(self.pids_limit)
+        if self.nofile_limit:
+            directives["LimitNOFILE"] = str(self.nofile_limit)
 
         # Security and isolation
         if self.oom_score_adj is not None:

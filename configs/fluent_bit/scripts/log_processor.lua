@@ -88,7 +88,7 @@ function process_log(tag, timestamp, record)
     -- Handle both journald format (MESSAGE) and fluentd forward format (log)
     local message = record["MESSAGE"] or record["log_message"] or record["log"] or ""
     if not message or message == "" then
-        return 0  -- Drop logs without message
+        return -1  -- Drop logs without message
     end
 
     -- Extract service name based on source type
@@ -115,7 +115,7 @@ function process_log(tag, timestamp, record)
 
     -- Skip if we couldn't extract a service name
     if not service_name then
-        return 0  -- Drop non-service logs
+        return -1  -- Drop non-service logs
     end
 
     -- Update service access tracking for LRU cleanup

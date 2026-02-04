@@ -451,17 +451,26 @@ class TaskLogger:
 
             # if there were any errors and the task is required, raise an error
             if self.errors and self.required:
-                if len(self.errors) > 1:
-                    error_types = {type(e) for e in self.errors}
-                    if len(error_types) == 1:
-                        errors_str = "\n\n".join([str(e) for e in self.errors])
-                        raise error_types.pop()(
+                if len(self.errors) == 1:
+                    raise self.errors[0]
+                error_types = {type(e) for e in self.errors}
+                if len(error_types) == 1:
+                    # All errors are the same type — try to re-raise as that type
+                    error_type = error_types.pop()
+                    errors_str = "\n\n".join([str(e) for e in self.errors])
+                    try:
+                        raise error_type(
                             f"{len(self.errors)} errors executing task {self.name}:\n{errors_str}"
                         )
-                    raise RuntimeError(
-                        f"{len(self.errors)} errors executing task {self.name}: {self.errors}"
-                    )
-                raise type(self.errors[0])(str(self.errors[0]))
+                    except TypeError:
+                        # Some exception types (e.g. pydantic ValidationError) can't be
+                        # constructed with just a string message
+                        raise RuntimeError(
+                            f"{len(self.errors)} errors executing task {self.name}:\n{errors_str}"
+                        )
+                raise RuntimeError(
+                    f"{len(self.errors)} errors executing task {self.name}: {self.errors}"
+                )
         finally:
             # Clear task context after task completes (success or failure)
             _current_task_id.set(None)

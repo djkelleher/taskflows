@@ -18,7 +18,7 @@ pipeline:
     - name: systemd
       tag: user_logs
       systemd_filter:
-        - _UID=1000
+        - _UID=${SERVICE_UID}
       read_from_tail: true
       strip_underscores: true
       db: /var/log/flb_user.db

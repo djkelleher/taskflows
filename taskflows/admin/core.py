@@ -656,6 +656,8 @@ async def start(
         elif timers:
             unit_type = "timer"
         files = await get_unit_files(match=match, unit_type=unit_type)
+        # Filter out stop-* and restart-* auxiliary units
+        files = [f for f in files if is_start_service(f)]
         await _start_service(files)
         logger.info(f"start started {len(files)} units")
         result = with_hostname({"started": files})
