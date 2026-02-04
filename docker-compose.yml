@@ -8,20 +8,20 @@ services:
       - ./configs/loki/generated/loki-local-dev.yaml:/etc/loki/loki-config.yaml:ro
       - loki-data:/loki
     restart: unless-stopped
+    depends_on:
+      - fluent-bit
+    # Use json-file for loki's own logs to avoid circular dependency
+    # (loki logs -> fluent-bit -> loki)
     logging:
-      driver: fluentd
+      driver: json-file
       options:
-        fluentd-address: localhost:24224
-        fluentd-async: "true"
-        fluentd-buffer-limit: "1048576"
-        tag: docker.{{.Name}}
+        max-size: "10m"
+        max-file: "3"
   fluent-bit:
     image: fluent/fluent-bit:latest
     container_name: fluent-bit
     network_mode: host
     command: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.yaml"]
-    depends_on:
-      - loki
     environment:
       - LOKI_HOST=localhost
       - LOKI_PORT=3100
@@ -61,6 +61,9 @@ services:
       - grafana-data:/var/lib/grafana
       - ./configs/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/loki.yaml:ro
     restart: unless-stopped
+    depends_on:
+      - fluent-bit
+      - loki
     logging:
       driver: fluentd
       options:
@@ -68,8 +71,6 @@ services:
         fluentd-async: "true"
         fluentd-buffer-limit: "1048576"
         tag: docker.{{.Name}}
-    depends_on:
-      - loki
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
       interval: 30s
