@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useServices, useServiceAction, useBatchAction } from "../useServices";
+import {
+  useServices,
+  useServiceAction,
+  useBatchAction,
+  useEnableService,
+  useDisableService,
+  useRemoveService,
+  useShowService,
+  useServers,
+} from "../useServices";
 import { useAuthStore } from "@/stores/authStore";
 import type { ReactNode } from "react";
 
@@ -47,9 +56,24 @@ describe("useServices", () => {
     // Check structure matches MSW mock data
     expect(result.current.data).toEqual({
       services: [
-        { name: "service-1", status: "running", schedule: "* * * * *", last_run: "2024-01-01 12:00:00" },
-        { name: "service-2", status: "stopped", schedule: null, last_run: null },
-        { name: "service-3", status: "failed", schedule: "0 * * * *", last_run: "2024-01-01 11:00:00" },
+        {
+          name: "service-1", status: "running", schedule: "* * * * *", last_run: "2024-01-01 12:00:00",
+          description: "Test service 1", service_enabled: "enabled", timer_enabled: "enabled",
+          load_state: "loaded", active_state: "active", sub_state: "running",
+          uptime: "1:23:45", last_finish: "2024-01-01 11:00:00", next_start: "2024-01-01 13:00:00",
+        },
+        {
+          name: "service-2", status: "stopped", schedule: "-", last_run: "-",
+          description: "Test service 2", service_enabled: "enabled", timer_enabled: "-",
+          load_state: "loaded", active_state: "inactive", sub_state: "dead",
+          uptime: "-", last_finish: "-", next_start: "-",
+        },
+        {
+          name: "service-3", status: "failed", schedule: "0 * * * *", last_run: "2024-01-01 11:00:00",
+          description: "Test service 3", service_enabled: "enabled", timer_enabled: "enabled",
+          load_state: "loaded", active_state: "failed", sub_state: "failed",
+          uptime: null, last_finish: "2024-01-01 11:30:00", next_start: "2024-01-01 12:00:00",
+        },
       ],
     });
     expect(result.current.isLoading).toBe(false);
@@ -218,5 +242,122 @@ describe("useBatchAction", () => {
     const { result: restartResult } = renderHook(() => useBatchAction(), { wrapper });
     restartResult.current.mutate({ serviceNames: ["s1"], operation: "restart" });
     await waitFor(() => expect(restartResult.current.isSuccess).toBe(true));
+  });
+});
+
+describe("useEnableService", () => {
+  beforeEach(() => {
+    useAuthStore.setState({
+      accessToken: "test-token",
+      refreshToken: "test-refresh",
+      isAuthenticated: true,
+    });
+  });
+
+  it("should enable a service successfully", async () => {
+    const wrapper = createWrapper();
+    const { result } = renderHook(() => useEnableService(), { wrapper });
+
+    result.current.mutate("service-1");
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.error).toBeNull();
+  });
+});
+
+describe("useDisableService", () => {
+  beforeEach(() => {
+    useAuthStore.setState({
+      accessToken: "test-token",
+      refreshToken: "test-refresh",
+      isAuthenticated: true,
+    });
+  });
+
+  it("should disable a service successfully", async () => {
+    const wrapper = createWrapper();
+    const { result } = renderHook(() => useDisableService(), { wrapper });
+
+    result.current.mutate("service-1");
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.error).toBeNull();
+  });
+});
+
+describe("useRemoveService", () => {
+  beforeEach(() => {
+    useAuthStore.setState({
+      accessToken: "test-token",
+      refreshToken: "test-refresh",
+      isAuthenticated: true,
+    });
+  });
+
+  it("should remove a service successfully", async () => {
+    const wrapper = createWrapper();
+    const { result } = renderHook(() => useRemoveService(), { wrapper });
+
+    result.current.mutate("service-1");
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.error).toBeNull();
+  });
+});
+
+describe("useShowService", () => {
+  beforeEach(() => {
+    useAuthStore.setState({
+      accessToken: "test-token",
+      refreshToken: "test-refresh",
+      isAuthenticated: true,
+    });
+  });
+
+  it("should fetch service files successfully", async () => {
+    const wrapper = createWrapper();
+    const { result } = renderHook(() => useShowService("service-1"), { wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data).toEqual({
+      files: {
+        "service-1": [
+          {
+            name: "service-1.service",
+            path: "/etc/systemd/user/service-1.service",
+            content: "[Unit]\nDescription=Test service\n\n[Service]\nExecStart=/usr/bin/test",
+          },
+        ],
+      },
+    });
+  });
+
+  it("should not fetch when match is empty", () => {
+    const wrapper = createWrapper();
+    const { result } = renderHook(() => useShowService(""), { wrapper });
+
+    expect(result.current.isFetching).toBe(false);
+  });
+});
+
+describe("useServers", () => {
+  beforeEach(() => {
+    useAuthStore.setState({
+      accessToken: "test-token",
+      refreshToken: "test-refresh",
+      isAuthenticated: true,
+    });
+  });
+
+  it("should fetch servers successfully", async () => {
+    const wrapper = createWrapper();
+    const { result } = renderHook(() => useServers(), { wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data).toEqual([
+      { address: "localhost:7777", hostname: "test-host" },
+    ]);
   });
 });

@@ -1,40 +1,66 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { Button, Checkbox } from "@/components/ui";
+import { Checkbox } from "@/components/ui";
 import { StatusBadge } from "./StatusBadge";
-import { useServiceAction } from "@/hooks/useServices";
-import { useToast } from "@/components/ui";
-import { logger } from "@/utils/logger";
-import { getErrorMessage } from "@/utils/error";
+import { Badge } from "@/components/ui";
+import { useServiceStore } from "@/stores/serviceStore";
 import type { Service } from "@/types";
+import type { ColumnDefinition } from "./columns";
 
 interface ServiceRowProps {
   service: Service;
   isSelected: boolean;
   onToggleSelect: (name: string) => void;
+  columns: ColumnDefinition[];
 }
 
-export function ServiceRow({ service, isSelected, onToggleSelect }: ServiceRowProps) {
-  const navigate = useNavigate();
-  const { showSuccess, showError } = useToast();
-  const serviceActionMutation = useServiceAction();
-  const [actionInProgress, setActionInProgress] = useState<string | null>(null);
+const TIME_COLUMNS = ["last_run", "last_finish", "next_start"];
 
-  const isRunning = service.status === "running" || service.status === "active";
+function formatTime(value: string, timezone: string): string {
+  if (!value || value === "-") return "-";
 
-  const handleAction = async (action: "start" | "stop" | "restart") => {
-    setActionInProgress(action);
-    try {
-      await serviceActionMutation.mutateAsync({ serviceName: service.name, action });
-      showSuccess(`Service ${service.name} ${action} initiated`);
-    } catch (error) {
-      logger.error(`Failed to ${action} service:`, error);
-      showError(`Failed to ${action} service ${service.name}: ${getErrorMessage(error)}`);
-    } finally {
-      setActionInProgress(null);
-    }
-  };
+  try {
+    const date = new Date(value);
+    if (isNaN(date.getTime())) return value;
 
+    return date.toLocaleString("en-US", {
+      timeZone: timezone,
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+  } catch {
+    return value;
+  }
+}
+
+function RenderCell({ service, col }: { service: Service; col: ColumnDefinition }) {
+  const timezone = useServiceStore((state) => state.timezone);
+
+  if (col.id === "status") {
+    return <StatusBadge status={service.status} />;
+  }
+  if (col.id === "name") {
+    return <span className="font-medium text-electric-blue">{service.name}</span>;
+  }
+
+  const value = col.accessor(service);
+
+  // Format time columns with timezone
+  if (TIME_COLUMNS.includes(col.id)) {
+    const formatted = formatTime(value, timezone);
+    return <span className="text-electric-blue">{formatted}</span>;
+  }
+
+  if (col.colorMap && value !== "-") {
+    const variant = col.colorMap[value] ?? "muted";
+    return <Badge variant={variant}>{value}</Badge>;
+  }
+
+  return <span className="text-electric-blue">{value}</span>;
+}
+
+export function ServiceRow({ service, isSelected, onToggleSelect, columns }: ServiceRowProps) {
   return (
     <tr className="hover:bg-muted/30">
       <td className="px-4 py-3">
@@ -43,61 +69,11 @@ export function ServiceRow({ service, isSelected, onToggleSelect }: ServiceRowPr
           onChange={() => onToggleSelect(service.name)}
         />
       </td>
-      <td className="px-4 py-3 text-sm font-medium text-foreground">
-        {service.name}
-      </td>
-      <td className="px-4 py-3 text-sm">
-        <StatusBadge status={service.status} />
-      </td>
-      <td className="px-4 py-3 text-sm text-muted">
-        {service.schedule || "-"}
-      </td>
-      <td className="px-4 py-3 text-sm text-muted">
-        {service.last_run || "-"}
-      </td>
-      <td className="px-4 py-3 text-sm">
-        <div className="flex gap-2">
-          {isRunning ? (
-            <>
-              <Button
-                variant="danger"
-                size="sm"
-                loading={actionInProgress === "stop"}
-                disabled={actionInProgress !== null}
-                onClick={() => handleAction("stop")}
-              >
-                Stop
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                loading={actionInProgress === "restart"}
-                disabled={actionInProgress !== null}
-                onClick={() => handleAction("restart")}
-              >
-                Restart
-              </Button>
-            </>
-          ) : (
-            <Button
-              variant="success"
-              size="sm"
-              loading={actionInProgress === "start"}
-              disabled={actionInProgress !== null}
-              onClick={() => handleAction("start")}
-            >
-              Start
-            </Button>
-          )}
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => navigate(`/logs/${encodeURIComponent(service.name)}`)}
-          >
-            Logs
-          </Button>
-        </div>
-      </td>
+      {columns.map((col) => (
+        <td key={col.id} className="px-4 py-3 text-sm">
+          <RenderCell service={service} col={col} />
+        </td>
+      ))}
     </tr>
   );
 }

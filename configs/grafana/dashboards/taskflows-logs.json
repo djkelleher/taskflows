@@ -1,0 +1,92 @@
+{
+  "uid": "taskflows-service-logs",
+  "title": "Taskflows Service Logs",
+  "tags": ["taskflows", "logs"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "",
+  "templating": {
+    "list": [
+      {
+        "name": "service_name",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": ""
+        },
+        "query": "label_values(service_name)",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "hide": 2,
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "level",
+        "type": "custom",
+        "query": ".*,debug,info,warning,error,critical",
+        "current": {
+          "text": "All",
+          "value": ".*"
+        },
+        "hide": 2,
+        "includeAll": false,
+        "multi": false,
+        "options": [
+          { "text": "All", "value": ".*", "selected": true },
+          { "text": "debug", "value": "debug", "selected": false },
+          { "text": "info", "value": "info", "selected": false },
+          { "text": "warning", "value": "warning", "selected": false },
+          { "text": "error", "value": "error", "selected": false },
+          { "text": "critical", "value": "critical", "selected": false }
+        ]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "logs",
+      "title": "Service Logs",
+      "gridPos": {
+        "h": 24,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": ""
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": ""
+          },
+          "expr": "{service_name=\"$service_name\", level=~\"$level\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    }
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  }
+}

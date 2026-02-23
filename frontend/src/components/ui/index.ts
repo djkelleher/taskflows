@@ -9,3 +9,4 @@ export { useToast } from "@/hooks/useToast";
 export { ConfirmProvider } from "./ConfirmDialog";
 export { useConfirm } from "@/hooks/useConfirm";
 export { LoadingSpinner } from "./LoadingSpinner";
+export { ThemeToggle } from "./ThemeToggle";

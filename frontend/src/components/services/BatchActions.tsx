@@ -21,16 +21,15 @@ export function BatchActions() {
 
     const serviceNames = Array.from(selectedServices);
 
-    // Confirm for destructive actions
-    if (operation === "stop" || operation === "restart") {
-      const confirmed = await confirm({
-        message: `Are you sure you want to ${operation} ${selectedCount} service(s)?`,
-        confirmText: operation.charAt(0).toUpperCase() + operation.slice(1),
-        cancelText: "Cancel",
-        variant: operation === "stop" ? "danger" : "primary",
-      });
-      if (!confirmed) return;
-    }
+    // Confirm all actions
+    const dangerActions = ["stop", "remove", "disable"];
+    const confirmed = await confirm({
+      message: `Are you sure you want to ${operation} ${selectedCount} service(s)?`,
+      confirmText: operation.charAt(0).toUpperCase() + operation.slice(1),
+      cancelText: "Cancel",
+      variant: dangerActions.includes(operation) ? "danger" : "primary",
+    });
+    if (!confirmed) return;
 
     setActionInProgress(operation);
     try {
@@ -76,6 +75,33 @@ export function BatchActions() {
         onClick={() => handleBatchAction("restart")}
       >
         Restart
+      </Button>
+      <Button
+        variant="success"
+        size="sm"
+        disabled={!hasSelection || actionInProgress !== null}
+        loading={actionInProgress === "enable"}
+        onClick={() => handleBatchAction("enable")}
+      >
+        Enable
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        disabled={!hasSelection || actionInProgress !== null}
+        loading={actionInProgress === "disable"}
+        onClick={() => handleBatchAction("disable")}
+      >
+        Disable
+      </Button>
+      <Button
+        variant="danger"
+        size="sm"
+        disabled={!hasSelection || actionInProgress !== null}
+        loading={actionInProgress === "remove"}
+        onClick={() => handleBatchAction("remove")}
+      >
+        Remove
       </Button>
     </div>
   );

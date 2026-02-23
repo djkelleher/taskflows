@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 # Configure CLI logging: disable by default, enable only in DEBUG mode
@@ -59,12 +60,12 @@ def start():
 
 @api.command
 def restart():
-    srv_api.restart()
+    asyncio.run(srv_api.restart())
 
 
 @api.command
 def stop():
-    srv_api.stop()
+    asyncio.run(srv_api.stop())
 
 
 @api.group("security")
@@ -171,8 +172,8 @@ def setup_ui(username: str, password: str):
 
     click.echo(f"Web UI configured successfully!")
     click.echo(f"   Username: {username}")
-    click.echo(f"Restart the API server with UI enabled:")
-    click.echo(f"   TASKFLOWS_ENABLE_UI=1 tf api start")
+    click.echo(f"Restart the API server to enable the UI:")
+    click.echo(f"   tf api restart")
 
 
 @api.command("generate-secret")

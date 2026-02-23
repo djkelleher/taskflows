@@ -4,6 +4,8 @@ import { ToastProvider } from "@/components/ui/Toast";
 import { ConfirmProvider } from "@/components/ui/ConfirmDialog";
 import { MainLayout } from "@/components/layout";
 import { useAuthStore } from "@/stores/authStore";
+import { useTheme } from "@/hooks/useTheme";
+import { usePreline } from "@/hooks/usePreline";
 
 // Pages
 import { LoginPage } from "@/pages/LoginPage";
@@ -12,6 +14,7 @@ import { LogsPage } from "@/pages/LogsPage";
 import { EnvironmentsPage } from "@/pages/EnvironmentsPage";
 import { EnvironmentCreatePage } from "@/pages/EnvironmentCreatePage";
 import { EnvironmentEditPage } from "@/pages/EnvironmentEditPage";
+import { CreateServicePage } from "@/pages/CreateServicePage";
 
 function ProtectedRoute() {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
@@ -33,6 +36,10 @@ function App() {
   const initialize = useAuthStore((state) => state.initialize);
   const isInitialized = useAuthStore((state) => state.isInitialized);
 
+  // Initialize theme and Preline UI components
+  useTheme();
+  usePreline();
+
   useEffect(() => {
     initialize();
   }, [initialize]);
@@ -53,6 +60,7 @@ function App() {
           <Route element={<ProtectedRoute />}>
             <Route element={<MainLayout />}>
               <Route path="/" element={<DashboardPage />} />
+              <Route path="/services/create" element={<CreateServicePage />} />
               <Route path="/logs/:serviceName" element={<LogsPage />} />
               <Route path="/environments" element={<EnvironmentsPage />} />
               <Route path="/environments/create" element={<EnvironmentCreatePage />} />

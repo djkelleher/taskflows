@@ -34,9 +34,24 @@ export const handlers = [
   http.get("/api/services", () => {
     return HttpResponse.json({
       services: [
-        { name: "service-1", status: "running", schedule: "* * * * *", last_run: "2024-01-01 12:00:00" },
-        { name: "service-2", status: "stopped", schedule: null, last_run: null },
-        { name: "service-3", status: "failed", schedule: "0 * * * *", last_run: "2024-01-01 11:00:00" },
+        {
+          name: "service-1", status: "running", schedule: "* * * * *", last_run: "2024-01-01 12:00:00",
+          description: "Test service 1", service_enabled: "enabled", timer_enabled: "enabled",
+          load_state: "loaded", active_state: "active", sub_state: "running",
+          uptime: "1:23:45", last_finish: "2024-01-01 11:00:00", next_start: "2024-01-01 13:00:00",
+        },
+        {
+          name: "service-2", status: "stopped", schedule: "-", last_run: "-",
+          description: "Test service 2", service_enabled: "enabled", timer_enabled: "-",
+          load_state: "loaded", active_state: "inactive", sub_state: "dead",
+          uptime: "-", last_finish: "-", next_start: "-",
+        },
+        {
+          name: "service-3", status: "failed", schedule: "0 * * * *", last_run: "2024-01-01 11:00:00",
+          description: "Test service 3", service_enabled: "enabled", timer_enabled: "enabled",
+          load_state: "loaded", active_state: "failed", sub_state: "failed",
+          uptime: null, last_finish: "2024-01-01 11:30:00", next_start: "2024-01-01 12:00:00",
+        },
       ],
     });
   }),
@@ -57,6 +72,50 @@ export const handlers = [
     const url = new URL(request.url);
     const match = url.searchParams.get("match");
     return HttpResponse.json({ message: `Restarted ${match}` });
+  }),
+
+  http.post("/api/enable", ({ request }) => {
+    const url = new URL(request.url);
+    const match = url.searchParams.get("match");
+    return HttpResponse.json({ enabled: [match] });
+  }),
+
+  http.post("/api/disable", ({ request }) => {
+    const url = new URL(request.url);
+    const match = url.searchParams.get("match");
+    return HttpResponse.json({ disabled: [match] });
+  }),
+
+  http.post("/api/remove", ({ request }) => {
+    const url = new URL(request.url);
+    const match = url.searchParams.get("match");
+    return HttpResponse.json({ removed: [match] });
+  }),
+
+  http.get("/api/show", ({ request }) => {
+    const url = new URL(request.url);
+    const match = url.searchParams.get("match");
+    return HttpResponse.json({
+      files: {
+        [match || "service-1"]: [
+          {
+            name: `${match || "service-1"}.service`,
+            path: `/etc/systemd/user/${match || "service-1"}.service`,
+            content: "[Unit]\nDescription=Test service\n\n[Service]\nExecStart=/usr/bin/test",
+          },
+        ],
+      },
+    });
+  }),
+
+  http.post("/api/create", () => {
+    return HttpResponse.json({ services: ["test-svc"], dashboards: [] });
+  }),
+
+  http.get("/api/servers", () => {
+    return HttpResponse.json([
+      { address: "localhost:7777", hostname: "test-host" },
+    ]);
   }),
 
   http.post("/api/batch", async ({ request }) => {

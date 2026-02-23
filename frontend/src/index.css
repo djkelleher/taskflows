@@ -1,23 +1,39 @@
 @import "tailwindcss";
 
 @theme {
-  /* Taskflows theme colors */
-  --color-electric-blue: #0062FF;
-  --color-neon-green: #00FF66;
-  --color-neon-red: #FF3300;
+  /* Revival color palette */
+  --color-cyan: #00FFFF;
+  --color-blue: #00AEFF;
+  --color-green: #00DE94;
+  --color-bright-green: #00FF52;
 
-  /* Semantic colors */
-  --color-background: #f3f4f6;
-  --color-foreground: #1f2937;
+  /* Legacy aliases */
+  --color-electric-blue: #0088AA;
+  --color-neon-green: #00FF52;
+  --color-neon-red: #FF3366;
+
+  /* Light mode semantic colors (default) */
+  --color-background: #f5f5f5;
+  --color-foreground: #171717;
   --color-card: #ffffff;
-  --color-border: #e5e7eb;
-  --color-muted: #6b7280;
-  --color-accent: #0062FF;
-  --color-positive: #00FF66;
-  --color-negative: #FF3300;
+  --color-border: #e5e5e5;
+  --color-muted: #737373;
+  --color-accent: #00AEFF;
+  --color-positive: #00FF52;
+  --color-negative: #FF3366;
 
   /* Fonts */
   --font-sans: "NeueHaasGroteskText Pro", "Inter", system-ui, sans-serif;
+}
+
+/* Dark mode overrides */
+.dark {
+  --color-electric-blue: #00FFFF;
+  --color-background: #0a0a0a;
+  --color-foreground: #fafafa;
+  --color-card: #171717;
+  --color-border: #2a2a2a;
+  --color-muted: #a3a3a3;
 }
 
 body {
@@ -47,39 +63,39 @@ body {
 }
 
 .btn-primary {
-  background-color: var(--color-electric-blue);
-  color: white;
+  background-color: var(--color-blue);
+  color: #0a0a0a;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background-color: #0051d4;
+  background-color: var(--color-cyan);
 }
 
 .btn-secondary {
-  background-color: #6b7280;
-  color: white;
+  background-color: var(--color-green);
+  color: #0a0a0a;
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background-color: #4b5563;
+  background-color: #00F0A0;
 }
 
 .btn-success {
-  background-color: var(--color-neon-green);
-  color: #1f2937;
+  background-color: var(--color-bright-green);
+  color: #0a0a0a;
 }
 
 .btn-success:hover:not(:disabled) {
-  background-color: #00e65c;
+  background-color: #33FF75;
 }
 
 .btn-danger {
-  background-color: var(--color-neon-red);
+  background-color: var(--color-negative);
   color: white;
 }
 
 .btn-danger:hover:not(:disabled) {
-  background-color: #e62e00;
+  background-color: #FF5588;
 }
 
 /* Toast animations */

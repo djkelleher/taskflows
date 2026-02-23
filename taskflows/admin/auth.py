@@ -22,8 +22,8 @@ JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing - using argon2id (recommended by OWASP) with bcrypt fallback for legacy hashes
+pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
 
 # File paths
 ui_config_file = services_data_dir / "ui_config.json"

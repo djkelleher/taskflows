@@ -126,7 +126,69 @@ export async function serviceAction(serviceName: string, action: "start" | "stop
   return response.json();
 }
 
-export async function batchAction(serviceNames: string[], operation: "start" | "stop" | "restart") {
+export async function enableService(match: string) {
+  const response = await fetchWithAuth(
+    `/api/enable?match=${encodeURIComponent(match)}`,
+    { method: "POST" }
+  );
+
+  if (!response.ok) throw new Error("Failed to enable service");
+  return response.json();
+}
+
+export async function disableService(match: string) {
+  const response = await fetchWithAuth(
+    `/api/disable?match=${encodeURIComponent(match)}`,
+    { method: "POST" }
+  );
+
+  if (!response.ok) throw new Error("Failed to disable service");
+  return response.json();
+}
+
+export async function removeService(match: string) {
+  const response = await fetchWithAuth(
+    `/api/remove?match=${encodeURIComponent(match)}`,
+    { method: "POST" }
+  );
+
+  if (!response.ok) throw new Error("Failed to remove service");
+  return response.json();
+}
+
+export async function showService(match: string) {
+  const response = await fetchWithAuth(
+    `/api/show?match=${encodeURIComponent(match)}`
+  );
+
+  if (!response.ok) throw new Error("Failed to fetch service files");
+  return response.json();
+}
+
+export async function createService(file: File, host?: string, include?: string, exclude?: string) {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (host) formData.append("host", host);
+  if (include) formData.append("include", include);
+  if (exclude) formData.append("exclude", exclude);
+
+  const response = await fetchWithAuth("/api/create", {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) throw new Error("Failed to create services");
+  return response.json();
+}
+
+export async function getServers() {
+  const response = await fetchWithAuth("/api/servers");
+
+  if (!response.ok) throw new Error("Failed to fetch servers");
+  return response.json();
+}
+
+export async function batchAction(serviceNames: string[], operation: "start" | "stop" | "restart" | "enable" | "disable" | "remove") {
   const response = await fetchWithAuth("/api/batch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

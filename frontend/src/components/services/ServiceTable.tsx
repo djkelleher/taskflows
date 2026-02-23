@@ -1,10 +1,13 @@
 import { useMemo, useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { useDebounce } from "use-debounce";
-import { Input, Checkbox, Card, LoadingSpinner } from "@/components/ui";
+import { Input, Checkbox, Card, LoadingSpinner, Button } from "@/components/ui";
 import { ServiceRow } from "./ServiceRow";
 import { BatchActions } from "./BatchActions";
+import { ColumnPicker } from "./ColumnPicker";
+import { COLUMN_DEFINITIONS } from "./columns";
 import { useServiceStore } from "@/stores/serviceStore";
-import { Search } from "lucide-react";
+import { Search, Plus } from "lucide-react";
 import type { Service } from "@/types";
 
 interface ServiceTableProps {
@@ -22,6 +25,7 @@ export function ServiceTable({ services, isLoading }: ServiceTableProps) {
   const toggleSelection = useServiceStore((state) => state.toggleSelection);
   const selectAll = useServiceStore((state) => state.selectAll);
   const clearSelection = useServiceStore((state) => state.clearSelection);
+  const visibleColumns = useServiceStore((state) => state.visibleColumns);
 
   // Sync debounced search to store for other components (e.g., URL state)
   const setSearchQuery = useServiceStore((state) => state.setSearchQuery);
@@ -35,6 +39,14 @@ export function ServiceTable({ services, isLoading }: ServiceTableProps) {
       s.name.toLowerCase().includes(debouncedSearch.toLowerCase())
     );
   }, [services, debouncedSearch]);
+
+  const visibleColumnDefs = useMemo(
+    () => COLUMN_DEFINITIONS.filter((col) => visibleColumns.includes(col.id)),
+    [visibleColumns]
+  );
+
+  // +1 for checkbox column
+  const totalColSpan = visibleColumnDefs.length + 1;
 
   const allSelected = filteredServices.length > 0 && filteredServices.every((s) => selectedServices.has(s.name));
   const someSelected = filteredServices.some((s) => selectedServices.has(s.name)) && !allSelected;
@@ -60,7 +72,16 @@ export function ServiceTable({ services, isLoading }: ServiceTableProps) {
             className="pl-9 w-64"
           />
         </div>
-        <BatchActions />
+        <div className="flex items-center gap-2">
+          <BatchActions />
+          <Link to="/services/create">
+            <Button variant="primary">
+              <Plus className="w-4 h-4" />
+              Create Service
+            </Button>
+          </Link>
+          <ColumnPicker />
+        </div>
       </div>
 
       <div className="overflow-x-auto">
@@ -74,27 +95,20 @@ export function ServiceTable({ services, isLoading }: ServiceTableProps) {
                   onChange={handleSelectAll}
                 />
               </th>
-              <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase tracking-wider">
-                Name
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase tracking-wider">
-                Status
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase tracking-wider">
-                Schedule
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase tracking-wider">
-                Last Run
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase tracking-wider">
-                Actions
-              </th>
+              {visibleColumnDefs.map((col) => (
+                <th
+                  key={col.id}
+                  className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase tracking-wider"
+                >
+                  {col.label}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {isLoading && filteredServices.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-muted">
+                <td colSpan={totalColSpan} className="px-4 py-8 text-center text-muted">
                   <div className="flex items-center justify-center">
                     <LoadingSpinner label="Loading services..." />
                   </div>
@@ -102,7 +116,7 @@ export function ServiceTable({ services, isLoading }: ServiceTableProps) {
               </tr>
             ) : filteredServices.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-muted">
+                <td colSpan={totalColSpan} className="px-4 py-8 text-center text-muted">
                   No services found
                 </td>
               </tr>
@@ -113,6 +127,7 @@ export function ServiceTable({ services, isLoading }: ServiceTableProps) {
                   service={service}
                   isSelected={selectedServices.has(service.name)}
                   onToggleSelect={toggleSelection}
+                  columns={visibleColumnDefs}
                 />
               ))
             )}

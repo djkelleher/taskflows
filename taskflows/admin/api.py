@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import traceback
@@ -8,7 +9,7 @@ import click
 import uvicorn
 
 # from trading.databases.timescale import pgconn
-from fastapi import Body, FastAPI, Query, Request, status
+from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -41,6 +42,8 @@ from taskflows.admin.security import (
 from taskflows.common import Config, logger
 from taskflows.service import RestartPolicy, Service, Venv
 
+from taskflows.admin.grafana_proxy import router as grafana_router
+
 config = Config()
 
 
@@ -69,8 +72,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Check if UI is enabled via env var OR config file
+def _is_ui_enabled() -> bool:
+    """Check if UI is enabled via environment variable or config file."""
+    if os.getenv("TASKFLOWS_ENABLE_UI"):
+        return True
+    try:
+        from taskflows.admin.auth import load_ui_config
+        ui_config = load_ui_config()
+        return bool(ui_config.enabled and ui_config.jwt_secret)
+    except Exception:
+        return False
+
+UI_ENABLED = _is_ui_enabled()
+
 # Add CORS middleware if UI is enabled
-if os.getenv("TASKFLOWS_ENABLE_UI"):
+if UI_ENABLED:
     logger.info("UI enabled, adding CORS middleware")
     app.add_middleware(
         CORSMiddleware,
@@ -84,6 +101,9 @@ if os.getenv("TASKFLOWS_ENABLE_UI"):
 from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
 
 app.add_middleware(PrometheusMiddleware)
+
+# Register Grafana reverse proxy
+app.include_router(grafana_router)
 
 
 @app.exception_handler(Exception)
@@ -115,12 +135,16 @@ async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     if security_config.enable_security_headers:
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains"
         )
-        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        if request.url.path.startswith("/grafana/"):
+            # Allow embedding Grafana in iframes from same origin
+            response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+        else:
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["Content-Security-Policy"] = "default-src 'self'"
         logger.debug(f"Security headers added to response for {request.url.path}")
     return response
 
@@ -144,6 +168,33 @@ async def hmac_validation(request: Request, call_next):
     ):
         logger.debug(f"HMAC skipped for {request.url.path}")
         return await call_next(request)
+
+    # When UI is enabled, accept JWT as alternative to HMAC for /api/ routes
+    if UI_ENABLED:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            from taskflows.admin.auth import load_ui_config, verify_token
+            ui_config = load_ui_config()
+            if ui_config.jwt_secret:
+                username = verify_token(token, ui_config.jwt_secret, "access")
+                if username:
+                    logger.debug(f"JWT auth accepted for {request.url.path} (user: {username})")
+                    request.state.user = username
+                    return await call_next(request)
+            # Invalid JWT
+            logger.warning(f"Invalid JWT for {request.url.path}")
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Invalid or expired token"},
+            )
+        # No Bearer token - if HMAC is not configured, require JWT
+        if not security_config.hmac_secret:
+            logger.warning(f"No auth provided for {request.url.path}")
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Authentication required"},
+            )
 
     secret = security_config.hmac_secret
     if not secret:
@@ -199,7 +250,7 @@ async def hmac_validation(request: Request, call_next):
 async def jwt_validation(request: Request, call_next):
     """Validate JWT for UI routes (when UI is enabled)."""
     # Skip if UI is not enabled
-    if not os.getenv("TASKFLOWS_ENABLE_UI"):
+    if not UI_ENABLED:
         return await call_next(request)
 
     # Skip JWT for:
@@ -232,7 +283,7 @@ async def csrf_validation(request: Request, call_next):
     CSRF-resistant, this provides an additional security layer.
     """
     # Skip if UI is not enabled or CSRF is disabled
-    if not os.getenv("TASKFLOWS_ENABLE_UI") or not security_config.enable_csrf:
+    if not UI_ENABLED or not security_config.enable_csrf:
         return await call_next(request)
 
     # Skip CSRF for:
@@ -364,10 +415,22 @@ async def show_endpoint(
 
 @app.post("/create")
 async def create_endpoint(
-    search_in: str = Body(..., embed=True),
+    search_in: Optional[str] = Body(None, embed=True),
+    yaml_content: Optional[str] = Body(None, embed=True),
     include: Optional[str] = Body(None, embed=True),
     exclude: Optional[str] = Body(None, embed=True),
 ):
+    import tempfile
+    if yaml_content:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+        try:
+            return await create(
+                yaml_file=temp_path, include=include, exclude=exclude, as_json=True
+            )
+        finally:
+            os.unlink(temp_path)
     return await create(
         search_in=search_in, include=include, exclude=exclude, as_json=True
     )
@@ -422,7 +485,7 @@ async def remove_endpoint(match: str = Body(..., embed=True)):
 
 
 # Batch operations endpoint
-if os.getenv("TASKFLOWS_ENABLE_UI"):
+if UI_ENABLED:
     from pydantic import BaseModel as PydanticBaseModel
 
     class BatchOperation(PydanticBaseModel):
@@ -448,6 +511,8 @@ if os.getenv("TASKFLOWS_ENABLE_UI"):
                     result = await enable(match=service_name, as_json=True)
                 elif batch.operation == "disable":
                     result = await disable(match=service_name, as_json=True)
+                elif batch.operation == "remove":
+                    result = await remove(match=service_name, as_json=True)
                 else:
                     results[service_name] = {
                         "status": "error",
@@ -462,9 +527,143 @@ if os.getenv("TASKFLOWS_ENABLE_UI"):
 
         return with_hostname({"batch_results": results})
 
+    # UI-specific API endpoints with /api/ prefix
+    import re as _re
+    _EMOJI_PREFIX_RE = _re.compile(r"^[\U0001f300-\U0001faff\u2600-\u27bf]\s*")
+
+    def _strip_emoji(value: str) -> str:
+        """Strip leading emoji prefix from status values."""
+        if not value or value == "-":
+            return "-"
+        return _EMOJI_PREFIX_RE.sub("", value) or "-"
+
+    def _parse_status(sub_state: str) -> str:
+        """Convert sub_state emoji format to frontend status."""
+        if "running" in sub_state:
+            return "running"
+        elif "dead" in sub_state or "stopped" in sub_state:
+            return "stopped"
+        elif "failed" in sub_state:
+            return "failed"
+        elif "inactive" in sub_state:
+            return "inactive"
+        elif "active" in sub_state:
+            return "active"
+        return "inactive"
+
+    @app.get("/api/services")
+    async def get_services_api(
+        match: Optional[str] = Query(None),
+        running: bool = Query(False),
+        all: bool = Query(False),
+    ):
+        """Get services for UI dashboard."""
+        result = await service_status(match=match, running=running, all=all, as_json=True)
+        # Transform to frontend expected format
+        services = []
+        for svc in result.get("status", []):
+            services.append({
+                # Original fields (backward compatible)
+                "name": svc.get("Service", ""),
+                "status": _parse_status(svc.get("sub_state", "")),
+                "schedule": svc.get("Timers", "-") if svc.get("Timers") and svc.get("Timers") != "-" else "-",
+                "last_run": svc.get("Last Start", "-") if svc.get("Last Start") and svc.get("Last Start") != "-" else "-",
+                # Extended fields
+                "description": _strip_emoji(svc.get("description", "-")),
+                "service_enabled": _strip_emoji(svc.get("Service\nEnabled", "-")),
+                "timer_enabled": _strip_emoji(svc.get("Timer\nEnabled", "-")),
+                "load_state": _strip_emoji(svc.get("load_state", "-")),
+                "active_state": _strip_emoji(svc.get("active_state", "-")),
+                "sub_state": _strip_emoji(svc.get("sub_state", "-")),
+                "uptime": svc.get("Uptime", "-") if svc.get("Uptime") and svc.get("Uptime") != "-" else "-",
+                "last_finish": svc.get("Last Finish", "-") if svc.get("Last Finish") and svc.get("Last Finish") != "-" else "-",
+                "next_start": svc.get("Next Start", "-") if svc.get("Next Start") and svc.get("Next Start") != "-" else "-",
+            })
+        return {"services": services}
+
+    @app.get("/api/logs")
+    async def get_logs_api(
+        service_name: str = Query(...),
+        n_lines: int = Query(1000),
+    ):
+        """Get logs for UI log viewer."""
+        return await logs(service_name=service_name, n_lines=n_lines, as_json=True)
+
+    @app.post("/api/start")
+    async def start_api(match: str = Query(...)):
+        """Start a service from UI."""
+        return await start(match=match, as_json=True)
+
+    @app.post("/api/stop")
+    async def stop_api(match: str = Query(...)):
+        """Stop a service from UI."""
+        return await stop(match=match, as_json=True)
+
+    @app.post("/api/restart")
+    async def restart_api(match: str = Query(...)):
+        """Restart a service from UI."""
+        return await restart(match=match, as_json=True)
+
+    @app.post("/api/enable")
+    async def enable_api(match: str = Query(...)):
+        """Enable a service from UI."""
+        return await enable(match=match, as_json=True)
+
+    @app.post("/api/disable")
+    async def disable_api(match: str = Query(...)):
+        """Disable a service from UI."""
+        return await disable(match=match, as_json=True)
+
+    @app.post("/api/remove")
+    async def remove_api(match: str = Query(...)):
+        """Remove a service from UI."""
+        return await remove(match=match, as_json=True)
+
+    @app.get("/api/show")
+    async def show_api(match: str = Query(...)):
+        """Show service files from UI."""
+        return await show(match=match, as_json=True)
+
+    @app.get("/api/servers")
+    async def servers_api():
+        """List servers from UI."""
+        return await list_servers(as_json=True)
+
+    @app.post("/api/create")
+    async def create_api(
+        file: UploadFile = File(...),
+        host: Optional[str] = Form(None),
+        include: Optional[str] = Form(None),
+        exclude: Optional[str] = Form(None),
+    ):
+        """Create services from uploaded YAML file."""
+        import tempfile
+        content = await file.read()
+        yaml_content = content.decode("utf-8")
+
+        if host:
+            # Forward to remote host via HMAC-authenticated API
+            json_data = {"yaml_content": yaml_content}
+            if include:
+                json_data["include"] = include
+            if exclude:
+                json_data["exclude"] = exclude
+            return call_api(host, "/create", method="POST", json_data=json_data, timeout=30)
+
+        # Local creation: save to temp file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            temp_path = f.name
+        try:
+            return await create(
+                yaml_file=temp_path, include=include, exclude=exclude, as_json=True
+            )
+        finally:
+            os.unlink(temp_path)
+
 
 # Authentication endpoints (only when UI is enabled)
-if os.getenv("TASKFLOWS_ENABLE_UI"):
+if UI_ENABLED:
     from fastapi import HTTPException
     from taskflows.admin.auth import (
         authenticate_user,
@@ -634,8 +833,8 @@ if os.getenv("TASKFLOWS_ENABLE_UI"):
     @app.exception_handler(404)
     async def spa_404_handler(request, exc):
         """Serve index.html for UI routes, return JSON 404 for API routes."""
-        # API routes should return JSON 404
-        if request.url.path.startswith("/api/") or request.url.path.startswith("/auth/"):
+        # API and Grafana routes should return JSON 404
+        if request.url.path.startswith("/api/") or request.url.path.startswith("/auth/") or request.url.path.startswith("/grafana/"):
             return JSONResponse(
                 status_code=404,
                 content={"detail": "Not found"}
@@ -691,5 +890,5 @@ srv_api = Service(
 def start_api_srv():
     if not srv_api.exists:
         logger.info("Creating and starting srv-api service")
-        srv_api.create()
-    srv_api.start()
+        asyncio.run(srv_api.create())
+    asyncio.run(srv_api.start())

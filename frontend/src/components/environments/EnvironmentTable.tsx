@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { Button, Badge, Card, useToast, useConfirm, LoadingSpinner } from "@/components/ui";
 import { useDeleteEnvironment } from "@/hooks/useEnvironments";
-import { Pencil, Trash2 } from "lucide-react";
+import { Pencil, Trash2, Plus } from "lucide-react";
 import { logger } from "@/utils/logger";
 import { getErrorMessage } from "@/utils/error";
 import type { NamedEnvironment } from "@/types";
@@ -37,9 +37,17 @@ export function EnvironmentTable({ environments, isLoading }: EnvironmentTablePr
 
   return (
     <Card>
+      <div className="px-4 py-3 border-b border-border flex items-center justify-end">
+        <Link to="/environments/create">
+          <Button variant="primary">
+            <Plus className="w-4 h-4" />
+            Create Environment
+          </Button>
+        </Link>
+      </div>
       <div className="overflow-x-auto">
         <table className="w-full">
-          <thead className="bg-gray-50 border-b border-border">
+          <thead className="bg-muted/30 border-b border-border">
             <tr>
               <th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase tracking-wider">
                 Name
@@ -75,8 +83,8 @@ export function EnvironmentTable({ environments, isLoading }: EnvironmentTablePr
               </tr>
             ) : (
               environments.map((env) => (
-                <tr key={env.name} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 text-sm font-medium text-foreground">
+                <tr key={env.name} className="hover:bg-muted/20">
+                  <td className="px-4 py-3 text-sm font-medium text-electric-blue">
                     {env.name}
                   </td>
                   <td className="px-4 py-3 text-sm">
@@ -84,7 +92,7 @@ export function EnvironmentTable({ environments, isLoading }: EnvironmentTablePr
                       {env.type === "docker" ? "Docker" : "Venv"}
                     </Badge>
                   </td>
-                  <td className="px-4 py-3 text-sm text-muted">
+                  <td className="px-4 py-3 text-sm text-electric-blue">
                     {env.type === "venv" && env.venv?.name}
                     {env.type === "docker" && env.docker?.image}
                   </td>

@@ -20,6 +20,10 @@ export default defineConfig({
         target: "http://localhost:7777",
         changeOrigin: true,
       },
+      "/grafana": {
+        target: "http://localhost:7777",
+        changeOrigin: true,
+      },
     },
   },
   build: {

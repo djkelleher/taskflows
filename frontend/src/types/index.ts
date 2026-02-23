@@ -1,4 +1,17 @@
-export type { Service, ServiceStatus, ServicesResponse, BatchOperation, BatchRequest } from "./service";
+export type {
+  Service,
+  ServiceStatus,
+  ServicesResponse,
+  BatchOperation,
+  BatchRequest,
+  ColumnId,
+  ShowFileEntry,
+  ShowResponse,
+  CreateResponse,
+  EnableDisableResponse,
+  RemoveResponse,
+  Server,
+} from "./service";
 export type {
   EnvironmentType,
   NetworkMode,
