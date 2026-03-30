@@ -338,13 +338,15 @@ class SheetBot(RetryGetattributeMixin):
             bold=True,
         )
         ## FORMAT COLUMNS VALUES
-        # pct_columns = [c for c, cf in zip(columns, columns_fmt) if "(%)" in cf]
+        pct_columns = [c for c, cf in zip(columns, columns_fmt) if "(%)" in cf]
         dollar_columns = [c for c, cf in zip(columns, columns_fmt) if "($)" in cf]
         numeric_cols = data.select_dtypes(include="number").columns.tolist()
-        numeric_cols_no_unit = [c for c in numeric_cols if c not in dollar_columns]
+        numeric_cols_no_unit = [
+            c for c in numeric_cols if c not in dollar_columns and c not in pct_columns
+        ]
         for cols, col_type, pattern in (
             (numeric_cols_no_unit, "NUMBER", "#,##0.000"),
-            # (pct_columns, "NUMBER", "0.00%"),
+            (pct_columns, "PERCENT", "0.00%"),
             (dollar_columns, "CURRENCY", "$#,##0.00"),
             (datetime_cols, "DATE", "yyyy-mm-dd hh:mm:ss Z"),
         ):
