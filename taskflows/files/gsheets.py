@@ -12,9 +12,6 @@ from requests.exceptions import JSONDecodeError
 
 from .utils import logger
 
-COLUMN_CHARS = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-COLUMN_CHARS += [f"A{c}" for c in COLUMN_CHARS]
-
 
 class RetryGetattributeMixin:
     """Mixin that wraps callable attributes with retry logic via __getattribute__.
@@ -206,6 +203,7 @@ class SheetBot(RetryGetattributeMixin):
         worksheet: str,
         spreadsheet: str,
         has_index: bool = True,
+        header_notes: Optional[Dict[str, str]] = None,
     ):
         """Set sheet data and format it."""
         logger.info("Setting sheet data")
@@ -217,12 +215,22 @@ class SheetBot(RetryGetattributeMixin):
         data = data.copy()
         worksheet.clear()
         columns = [str(c) for c in data.columns]
+        if not columns:
+            return
         columns_fmt = [self._format_column_name(c) for c in columns]
         # set header.
         worksheet.update(
-            f"A1:{COLUMN_CHARS[len(columns) - 1]}1",
+            f"A1:{self._column_label(len(columns) - 1)}1",
             [columns_fmt],
         )
+        if header_notes:
+            notes = {
+                f"{self._column_label(col_idx)}1": header_notes[column]
+                for col_idx, column in enumerate(columns)
+                if column in header_notes and header_notes[column]
+            }
+            if notes:
+                worksheet.insert_notes(notes)
         # strings need to be 'raw' format so they don't get converted to other types (e.g. number or links)
         raw_cols = [str(c) for c in data.select_dtypes(include="object").columns]
         user_entered_cols = [c for c in columns if c not in raw_cols]
@@ -250,7 +258,10 @@ class SheetBot(RetryGetattributeMixin):
                 values = df_cols.values.tolist()
                 try:
                     worksheet.update(
-                        f"{COLUMN_CHARS[start]}2:{COLUMN_CHARS[end]}{len(df_cols)+1}",
+                        (
+                            f"{self._column_label(start)}2:"
+                            f"{self._column_label(end - 1)}{len(df_cols)+1}"
+                        ),
                         values,
                         **kwargs,
                     )
@@ -598,6 +609,17 @@ class SheetBot(RetryGetattributeMixin):
                 start = col_idx
         ranges.append((start, col_idx + 1))
         return ranges
+
+    def _column_label(self, col_idx: int) -> str:
+        """Convert one zero-based column index to an A1-style column label."""
+        if col_idx < 0:
+            raise ValueError(f"Column index must be non-negative, got {col_idx}")
+        label = ""
+        resolved = col_idx + 1
+        while resolved > 0:
+            resolved, remainder = divmod(resolved - 1, 26)
+            label = chr(65 + remainder) + label
+        return label
 
     def _worksheet_chart_ids(
         self, sheet: Spreadsheet
