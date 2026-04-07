@@ -28,19 +28,43 @@ class PeriodicMsgs:
         """
         self.msg_buffer.append(message)
 
-    async def publish(self):
-        if self.msg_buffer:
-            # Convert strings to Text components for send_alert
-            converted_content = []
-            for item in self.msg_buffer:
-                if isinstance(item, str):
-                    converted_content.append(Text(item, ContentType.INFO))
-                else:
-                    converted_content.append(item)
-            await send_alert(converted_content, self.send_to)
-            self.msg_buffer.clear()
+    async def publish(self) -> bool:
+        """Publish the buffered messages.
+
+        Returns
+        -------
+        bool
+            True when buffered messages were delivered successfully or nothing
+            was queued. False when delivery failed and messages were re-queued.
+        """
+        if not self.msg_buffer:
+            if self.on_pub_func:
+                self.on_pub_func()
+            return True
+
+        pending_messages = self.msg_buffer
+        self.msg_buffer = []
+
+        converted_content: List[Component] = []
+        for item in pending_messages:
+            if isinstance(item, str):
+                converted_content.append(Text(item, ContentType.INFO))
+            else:
+                converted_content.append(item)
+
+        try:
+            sent_ok = await send_alert(converted_content, self.send_to)
+        except Exception:
+            self.msg_buffer = pending_messages + self.msg_buffer
+            raise
+
+        if not sent_ok:
+            self.msg_buffer = pending_messages + self.msg_buffer
+            return False
+
         if self.on_pub_func:
             self.on_pub_func()
+        return True
 
 
 class PeriodicMsgSender:
@@ -86,33 +110,37 @@ class PeriodicMsgSender:
                     except Exception as e:
                         logger.error(f"Error publishing periodic message: {e}", exc_info=True)
                         # Continue with other configs even if one fails
-
-                # Sleep for the specified frequency
-                await asyncio.sleep(freq_seconds)
-
             except asyncio.CancelledError:
                 logger.info(f"Periodic message sender cancelled (freq={pub_freq} min)")
                 break
             except Exception as e:
                 logger.error(f"Unexpected error in periodic message loop: {e}", exc_info=True)
-                # Wait a bit before retrying to avoid tight error loops
-                await asyncio.sleep(min(freq_seconds, 60))
 
-    def cancel_periodic_tasks(self):
-        """Cancel all periodic message tasks. Call during shutdown."""
+            try:
+                await asyncio.sleep(freq_seconds)
+            except asyncio.CancelledError:
+                logger.info(f"Periodic message sender cancelled (freq={pub_freq} min)")
+                break
+            except Exception as e:
+                logger.error(f"Periodic message sender sleep failed: {e}", exc_info=True)
+                raise
+
+    def cancel_periodic_tasks(self) -> List[asyncio.Task]:
+        """Cancel all periodic message tasks and return them for awaiting."""
         self._shutting_down = True
+        tasks = list(self._periodic_tasks.values())
         for pub_freq, task in list(self._periodic_tasks.items()):
             if not task.done():
                 logger.debug(f"Cancelling periodic task for freq={pub_freq} min")
                 task.cancel()
-        self._periodic_tasks.clear()
+        return tasks
 
     async def shutdown(self):
         """Graceful shutdown: cancel all tasks and wait for them to complete."""
-        self.cancel_periodic_tasks()
-        # Wait for all tasks to actually cancel
-        if self._periodic_tasks:
-            await asyncio.gather(*self._periodic_tasks.values(), return_exceptions=True)
+        tasks = self.cancel_periodic_tasks()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._periodic_tasks.clear()
 
 
 class AlertLogger:

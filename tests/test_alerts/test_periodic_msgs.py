@@ -46,6 +46,24 @@ class TestPeriodicMsgs:
 
     @patch("taskflows.alerts.alerts.send_alert")
     @pytest.mark.asyncio
+    async def test_publish_requeues_messages_when_send_fails(
+        self,
+        mock_send_alert,
+        slack_channel,
+    ):
+        periodic_msg = PeriodicMsgs(send_to=slack_channel)
+        message = Text("Test message 1", ContentType.INFO)
+        periodic_msg.add_message(message)
+
+        mock_send_alert.return_value = False
+
+        result = await periodic_msg.publish()
+
+        assert result is False
+        assert periodic_msg.msg_buffer == [message]
+
+    @patch("taskflows.alerts.alerts.send_alert")
+    @pytest.mark.asyncio
     async def test_on_pub_func(self, mock_send_alert, slack_channel):
         # Create a callback function to be called after publishing
         callback = MagicMock()
@@ -75,11 +93,17 @@ class TestPeriodicMsgSender:
         with (
             patch.object(hourly_msg, "publish") as mock_hourly_publish,
             patch.object(daily_msg, "publish") as mock_daily_publish,
+            patch("asyncio.create_task") as mock_create_task,
             patch("asyncio.sleep") as mock_sleep,
         ):
+            def close_coro(coro):
+                coro.close()
+                return MagicMock()
+
+            mock_create_task.side_effect = close_coro
 
             # Configure sleep to break the infinite loop after one iteration
-            mock_sleep.side_effect = [None, Exception("Stop test")]
+            mock_sleep.side_effect = [Exception("Stop test")]
 
             # Add the periodic messages
             await sender.add_periodic_pub_group_member(hourly_msg, 60)  # 60 minutes
@@ -100,5 +124,15 @@ class TestPeriodicMsgSender:
 
             # Check publish was called
             mock_hourly_publish.assert_called_once()
-            mock_sleep.assert_called_once_with(60)
-            mock_sleep.assert_called_once_with(60)
+            mock_sleep.assert_any_call(3600)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_awaits_cancelled_tasks(self, slack_channel):
+        sender = PeriodicMsgSender()
+        periodic_msg = PeriodicMsgs(send_to=slack_channel)
+
+        await sender.add_periodic_pub_group_member(periodic_msg, 60)
+
+        await sender.shutdown()
+
+        assert sender._periodic_tasks == {}
