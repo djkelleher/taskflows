@@ -8,6 +8,8 @@ from taskflows.alerts import ContentType, FontSize, Text
 from taskflows.alerts.slack import (
     AttachmentFile,
     SlackChannel,
+    _SlackChannelQueue,
+    _SlackSendRequest,
     _channel_queues,
     send_slack_message,
 )
@@ -360,3 +362,56 @@ class TestSendSlackMessage:
         assert failed_result is False
         assert success_result is True
         assert mock_client.chat_postMessage.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_channel_worker_restarts_if_request_arrives_during_cleanup(self):
+        channel_name = "#cleanup-race"
+        channel_queue = _SlackChannelQueue()
+        request_queue: asyncio.Queue[_SlackSendRequest] = asyncio.Queue()
+        channel_queue._queues[channel_name] = request_queue
+
+        loop = asyncio.get_running_loop()
+        processed: list[str] = []
+        first_result = loop.create_future()
+        second_result = loop.create_future()
+
+        async def first_operation() -> bool:
+            processed.append("first")
+            return True
+
+        async def second_operation() -> bool:
+            processed.append("second")
+            return True
+
+        class WorkerMap(dict):
+            injected = False
+
+            def pop(self, key, default=None):
+                if key == channel_name and not self.injected:
+                    self.injected = True
+                    request_queue.put_nowait(
+                        _SlackSendRequest(
+                            operation=second_operation,
+                            result=second_result,
+                        )
+                    )
+                return super().pop(key, default)
+
+        channel_queue._workers = WorkerMap({channel_name: object()})  # type: ignore[assignment]
+        await request_queue.put(
+            _SlackSendRequest(
+                operation=first_operation,
+                result=first_result,
+            )
+        )
+
+        await channel_queue._run_channel(channel_name)
+        assert await first_result is True
+
+        restarted_worker = channel_queue._workers[channel_name]
+        await restarted_worker
+
+        assert await second_result is True
+        assert processed == ["first", "second"]
+        assert channel_name not in channel_queue._queues
+        assert channel_name not in channel_queue._workers

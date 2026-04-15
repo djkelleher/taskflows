@@ -93,6 +93,8 @@ class _SlackChannelQueue:
             self._workers.pop(channel_name, None)
             if queue.empty():
                 self._queues.pop(channel_name, None)
+            else:
+                self._workers[channel_name] = asyncio.create_task(self._run_channel(channel_name))
 
 
 _channel_queues: "WeakKeyDictionary[asyncio.AbstractEventLoop, _SlackChannelQueue]" = (
