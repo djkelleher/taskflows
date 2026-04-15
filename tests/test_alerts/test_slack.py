@@ -1,10 +1,16 @@
+import asyncio
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from taskflows.alerts import ContentType, FontSize, Text
-from taskflows.alerts.slack import AttachmentFile, SlackChannel, send_slack_message
+from taskflows.alerts.slack import (
+    AttachmentFile,
+    SlackChannel,
+    _channel_queues,
+    send_slack_message,
+)
 
 
 class TestSlackChannel:
@@ -21,6 +27,12 @@ class TestSlackChannel:
 
 
 class TestSendSlackMessage:
+    @pytest.fixture(autouse=True)
+    def clear_channel_queues(self):
+        _channel_queues.clear()
+        yield
+        _channel_queues.clear()
+
     @pytest.fixture
     def mock_client(self):
         """Mock AsyncWebClient."""
@@ -289,3 +301,62 @@ class TestSendSlackMessage:
         call_args = mock_client.chat_postMessage.call_args
         assert call_args[1]["channel"] == "#test-string"
         assert call_args[1]["channel"] == "#test-string"
+
+    @patch("taskflows.alerts.slack.get_async_client")
+    @pytest.mark.asyncio
+    async def test_send_message_serializes_requests_per_channel(
+        self, mock_get_client, mock_client, test_components
+    ):
+        mock_get_client.return_value = mock_client
+        started = []
+        release_first = asyncio.Event()
+
+        async def post_message_side_effect(**kwargs):
+            started.append(kwargs["text"])
+            if kwargs["text"] == "first":
+                await release_first.wait()
+            return MagicMock(status_code=200)
+
+        mock_client.chat_postMessage.side_effect = post_message_side_effect
+        channel = SlackChannel("#serialized")
+
+        first_task = asyncio.create_task(
+            send_slack_message(content=test_components, channel=channel, subject="first")
+        )
+        await asyncio.sleep(0)
+        second_task = asyncio.create_task(
+            send_slack_message(content=test_components, channel=channel, subject="second")
+        )
+        await asyncio.sleep(0)
+
+        assert started == ["first"]
+
+        release_first.set()
+        results = await asyncio.gather(first_task, second_task)
+
+        assert results == [True, True]
+        assert started == ["first", "second"]
+        assert mock_client.chat_postMessage.await_count == 2
+
+    @patch("taskflows.alerts.slack.get_async_client")
+    @pytest.mark.asyncio
+    async def test_send_message_failure_does_not_block_later_queued_request(
+        self, mock_get_client, mock_client, test_components
+    ):
+        mock_get_client.return_value = mock_client
+        status_codes = [500, 200]
+
+        async def post_message_side_effect(**_kwargs):
+            return MagicMock(status_code=status_codes.pop(0))
+
+        mock_client.chat_postMessage.side_effect = post_message_side_effect
+        channel = SlackChannel("#serialized")
+
+        failed_result, success_result = await asyncio.gather(
+            send_slack_message(content=test_components, channel=channel, retries=0),
+            send_slack_message(content=test_components, channel=channel, retries=0),
+        )
+
+        assert failed_result is False
+        assert success_result is True
+        assert mock_client.chat_postMessage.await_count == 2

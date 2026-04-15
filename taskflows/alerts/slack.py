@@ -1,7 +1,9 @@
+import asyncio
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Awaitable, Callable, Dict, Optional, Sequence
+from weakref import WeakKeyDictionary
 
 from pydantic import PositiveInt, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,6 +37,76 @@ class SlackSettings(BaseSettings):
 
 
 slack_settings = SlackSettings()
+
+
+@dataclass
+class _SlackSendRequest:
+    operation: Callable[[], Awaitable[bool]]
+    result: asyncio.Future[bool]
+
+
+class _SlackChannelQueue:
+    """Serialize Slack API requests per channel while preserving async call sites."""
+
+    def __init__(self) -> None:
+        self._queues: Dict[str, asyncio.Queue[_SlackSendRequest]] = {}
+        self._workers: Dict[str, asyncio.Task[None]] = {}
+
+    async def enqueue(
+        self,
+        channel: str | SlackChannel,
+        operation: Callable[[], Awaitable[bool]],
+    ) -> bool:
+        channel_name = str(channel)
+        queue = self._queues.get(channel_name)
+        if queue is None:
+            queue = asyncio.Queue()
+            self._queues[channel_name] = queue
+
+        worker = self._workers.get(channel_name)
+        if worker is None or worker.done():
+            self._workers[channel_name] = asyncio.create_task(self._run_channel(channel_name))
+
+        result = asyncio.get_running_loop().create_future()
+        await queue.put(_SlackSendRequest(operation=operation, result=result))
+        return await result
+
+    async def _run_channel(self, channel_name: str) -> None:
+        queue = self._queues[channel_name]
+        try:
+            while True:
+                request = await queue.get()
+                try:
+                    sent_ok = await request.operation()
+                except Exception as exc:
+                    if not request.result.done():
+                        request.result.set_exception(exc)
+                else:
+                    if not request.result.done():
+                        request.result.set_result(sent_ok)
+                finally:
+                    queue.task_done()
+
+                if queue.empty():
+                    break
+        finally:
+            self._workers.pop(channel_name, None)
+            if queue.empty():
+                self._queues.pop(channel_name, None)
+
+
+_channel_queues: "WeakKeyDictionary[asyncio.AbstractEventLoop, _SlackChannelQueue]" = (
+    WeakKeyDictionary()
+)
+
+
+def _get_channel_queue() -> _SlackChannelQueue:
+    loop = asyncio.get_running_loop()
+    queue = _channel_queues.get(loop)
+    if queue is None:
+        queue = _SlackChannelQueue()
+        _channel_queues[loop] = queue
+    return queue
 
 
 @lru_cache
@@ -82,6 +154,27 @@ async def send_slack_message(
     zip_attachment_files: bool = False,
     **_,
 ) -> bool:
+    return await _get_channel_queue().enqueue(
+        channel=channel,
+        operation=lambda: _send_slack_message_immediately(
+            channel=channel,
+            content=content,
+            retries=retries,
+            subject=subject,
+            attachment_files=attachment_files,
+            zip_attachment_files=zip_attachment_files,
+        ),
+    )
+
+
+async def _send_slack_message_immediately(
+    channel: str | SlackChannel,
+    content: Optional[Sequence[Component] | Sequence[Sequence[Component]]] = None,
+    retries: int = 1,
+    subject: Optional[str] = None,
+    attachment_files: Optional[Sequence[str | Path | AttachmentFile]] = None,
+    zip_attachment_files: bool = False,
+) -> bool:
     """Send a message to a Slack channel.
 
     Args:
@@ -95,9 +188,8 @@ async def send_slack_message(
     Returns:
         bool: Whether the message was sent successfully or not.
     """
-    # Only wrap content if not None and not already a list/tuple
     if content is not None and not isinstance(content, (list, tuple)):
-        content = [content]  # type: ignore
+        content = [content]  # type: ignore[list-item]
     client = get_async_client()
     file_ids = []
     kwargs = {}
@@ -152,14 +244,14 @@ async def send_slack_message(
     if content is not None and not isinstance(content[0], (list, tuple)):
         if not subject:
             text = render_components_md(
-                components=content,  # type: ignore
+                components=content,  # type: ignore[arg-type]
                 slack_format=True,
             )
             return await try_post_message(
                 client, channel, text, retries=retries, **kwargs
             )
-        content = [content]  # type: ignore
-    messages = [render_components_md(msg, slack_format=True) for msg in content]  # type: ignore
+        content = [content]  # type: ignore[list-item]
+    messages = [render_components_md(msg, slack_format=True) for msg in content]  # type: ignore[arg-type]
     blocks = [{"type": "divider"}]
     if subject:
         blocks.append(
