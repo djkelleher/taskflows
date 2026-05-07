@@ -4,10 +4,21 @@ from datetime import datetime
 from typing import Literal
 
 
+def _validate_systemd_timer_value(value: str, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    if not value:
+        raise ValueError(f"{field_name} cannot be empty")
+    if any(char in value for char in ("\x00", "\n", "\r")):
+        raise ValueError(f"{field_name} cannot contain NUL or newline characters")
+    return value
+
+
 class Schedule:
     """Base class for schedules."""
 
     def __init__(self, accuracy: str):
+        accuracy = _validate_systemd_timer_value(accuracy, "accuracy")
         # AccuracySec controls the maximum delay systemd may add to timer events.
         # By default, systemd batches timer activations within a 1-minute window
         # for power efficiency (reduces CPU wake-ups). Setting a low accuracy like
@@ -33,6 +44,7 @@ class Calendar(Schedule):
     accuracy: str = "1ms"
 
     def __post_init__(self):
+        self.schedule = _validate_systemd_timer_value(self.schedule, "schedule")
         super().__init__(self.accuracy)
         self.unit_entries.add(f"OnCalendar={self.schedule}")
         if self.persistent:
@@ -40,7 +52,7 @@ class Calendar(Schedule):
 
     @classmethod
     def from_datetime(cls, dt: datetime):
-        return cls(schedule=dt.strftime("%a %y-%m-%d %H:%M:%S %Z").strip())
+        return cls(schedule=dt.strftime("%a %Y-%m-%d %H:%M:%S %Z").strip())
 
 
 @dataclass
@@ -60,6 +72,12 @@ class Periodic(Schedule):
     accuracy: str = "1ms"
 
     def __post_init__(self):
+        if self.start_on not in ("boot", "login", "command"):
+            raise ValueError("start_on must be one of: boot, login, command")
+        if self.relative_to not in ("finish", "start"):
+            raise ValueError("relative_to must be one of: finish, start")
+        if self.period <= 0:
+            raise ValueError("period must be greater than 0 seconds")
         super().__init__(self.accuracy)
         # start on
         if self.start_on == "boot":

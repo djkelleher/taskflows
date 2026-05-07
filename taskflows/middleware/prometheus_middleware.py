@@ -5,7 +5,11 @@ import time
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from taskflows.metrics import api_active_requests, api_request_count, api_request_duration
+from taskflows.metrics import (
+    api_active_requests,
+    api_request_count,
+    api_request_duration,
+)
 
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
@@ -24,7 +28,7 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
         api_active_requests.labels(method=method, endpoint=endpoint).inc()
 
         # Track duration
-        start_time = time.time()
+        start_time = time.perf_counter()
         status_code = 500  # Default if error
 
         try:
@@ -32,7 +36,7 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
             status_code = response.status_code
             return response
         finally:
-            duration = time.time() - start_time
+            duration = time.perf_counter() - start_time
 
             # Record metrics
             api_request_duration.labels(

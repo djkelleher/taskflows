@@ -1,4 +1,5 @@
 """Tests for the taskflows.serialization module."""
+
 import json
 import tempfile
 from datetime import datetime, timezone
@@ -10,14 +11,12 @@ from taskflows.serialization import (
     serialize,
     deserialize,
     to_dict,
-    from_dict,
     serialize_to_file,
     deserialize_from_file,
-    register_type,
     get_registered_type,
 )
 from taskflows.service import Venv, Service, RestartPolicy
-from taskflows.docker import DockerContainer, Volume, Ulimit
+from taskflows.docker import DockerContainer, Volume
 from taskflows.schedule import Calendar, Periodic
 from taskflows.constraints import CgroupConfig, Memory, CPUPressure
 
@@ -112,7 +111,9 @@ class TestDockerContainerSerialization:
             name="web-server",
             volumes=[
                 Volume(host_path="/data", container_path="/usr/share/nginx/html"),
-                Volume(host_path="/config", container_path="/etc/nginx", read_only=True),
+                Volume(
+                    host_path="/config", container_path="/etc/nginx", read_only=True
+                ),
             ],
         )
         data = to_dict(container)
@@ -396,6 +397,7 @@ class TestEdgeCases:
         data = {"timestamp": now}
 
         from taskflows.serialization import _serialize_value, _deserialize_value
+
         serialized = _serialize_value(data)
         assert serialized["timestamp"]["type"] == "datetime"
 
@@ -430,13 +432,19 @@ class TestEdgeCases:
         with pytest.raises(ValueError, match="Unknown format"):
             serialize(venv, format="xml")
 
+    @pytest.mark.parametrize("payload", ["", "[]", "null"])
+    def test_deserialize_requires_mapping_payload(self, payload):
+        """Test deserialization rejects non-object payloads with a clear error."""
+        with pytest.raises(ValueError, match="must be a mapping"):
+            deserialize(payload, Venv, format="yaml")
+
 
 class TestLoadServicesFromYAML:
     """Tests for load_services_from_yaml function."""
 
     def test_load_multiple_services(self):
         """Test loading multiple services from YAML."""
-        from taskflows.serialization import load_services_from_yaml, save_services_to_yaml
+        from taskflows.serialization import load_services_from_yaml
 
         yaml_content = """
 services:
@@ -491,7 +499,10 @@ services:
 
     def test_save_and_load_roundtrip(self):
         """Test saving and loading services."""
-        from taskflows.serialization import load_services_from_yaml, save_services_to_yaml
+        from taskflows.serialization import (
+            load_services_from_yaml,
+            save_services_to_yaml,
+        )
 
         services = [
             Service(name="svc-a", start_command="echo a"),
@@ -737,6 +748,7 @@ services:
             # Schedules
             assert svc.start_schedule is not None
             from taskflows.schedule import Calendar, Periodic
+
             assert isinstance(svc.start_schedule, Calendar)
             assert svc.start_schedule.schedule == "Mon-Fri 09:00"
             assert svc.start_schedule.persistent is True
@@ -952,7 +964,9 @@ services:
             services = load_services_from_yaml(path)
             assert len(services) == 1
             assert isinstance(services[0].start_schedule, Calendar)
-            assert services[0].start_schedule.schedule == "Mon-Sun 02:00 America/New_York"
+            assert (
+                services[0].start_schedule.schedule == "Mon-Sun 02:00 America/New_York"
+            )
         finally:
             path.unlink()
 
@@ -1047,7 +1061,6 @@ services:
     def test_volume_string_format(self):
         """Test that volumes can be specified as strings like '/host:/container'."""
         from taskflows.serialization import load_services_from_yaml
-        from taskflows.docker import Volume
 
         yaml_content = """
 services:
@@ -1140,7 +1153,6 @@ services:
     def test_restart_policy_as_dict(self):
         """Test that RestartPolicy is inferred from dict with condition."""
         from taskflows.serialization import load_services_from_yaml
-        from taskflows.service import RestartPolicy
 
         yaml_content = """
 services:
@@ -1242,7 +1254,9 @@ class TestServiceRegistrySerialization:
         from taskflows.service import ServiceRegistry
 
         original = ServiceRegistry(
-            Service(name="web", start_command="python web.py", description="Web server"),
+            Service(
+                name="web", start_command="python web.py", description="Web server"
+            ),
             Service(name="worker", start_command="python worker.py", enabled=True),
         )
 
@@ -1365,37 +1379,40 @@ class TestHumanReadableParsing:
         """Test parsing megabyte values."""
         from taskflows.serialization import parse_memory_size
 
-        assert parse_memory_size("1M") == 1024 ** 2
-        assert parse_memory_size("1MB") == 1024 ** 2
-        assert parse_memory_size("512MB") == 512 * 1024 ** 2
-        assert parse_memory_size("512 MB") == 512 * 1024 ** 2
+        assert parse_memory_size("1M") == 1024**2
+        assert parse_memory_size("1MB") == 1024**2
+        assert parse_memory_size("512MB") == 512 * 1024**2
+        assert parse_memory_size("512 MB") == 512 * 1024**2
 
     def test_parse_memory_size_gigabytes(self):
         """Test parsing gigabyte values."""
         from taskflows.serialization import parse_memory_size
 
-        assert parse_memory_size("1G") == 1024 ** 3
-        assert parse_memory_size("1GB") == 1024 ** 3
-        assert parse_memory_size("2gb") == 2 * 1024 ** 3
-        assert parse_memory_size("1.5G") == int(1.5 * 1024 ** 3)
+        assert parse_memory_size("1G") == 1024**3
+        assert parse_memory_size("1GB") == 1024**3
+        assert parse_memory_size("2gb") == 2 * 1024**3
+        assert parse_memory_size("1.5G") == int(1.5 * 1024**3)
 
     def test_parse_memory_size_terabytes(self):
         """Test parsing terabyte values."""
         from taskflows.serialization import parse_memory_size
 
-        assert parse_memory_size("1T") == 1024 ** 4
-        assert parse_memory_size("1TB") == 1024 ** 4
+        assert parse_memory_size("1T") == 1024**4
+        assert parse_memory_size("1TB") == 1024**4
 
     def test_parse_memory_size_with_spaces(self):
         """Test parsing with whitespace."""
         from taskflows.serialization import parse_memory_size
 
-        assert parse_memory_size("  1GB  ") == 1024 ** 3
-        assert parse_memory_size("512 MB") == 512 * 1024 ** 2
+        assert parse_memory_size("  1GB  ") == 1024**3
+        assert parse_memory_size("512 MB") == 512 * 1024**2
 
     def test_parse_memory_size_invalid(self):
         """Test that invalid formats raise ValueError."""
         from taskflows.serialization import parse_memory_size
+
+        with pytest.raises(ValueError, match="non-negative"):
+            parse_memory_size(-1)
 
         with pytest.raises(ValueError, match="Unknown memory unit"):
             parse_memory_size("1XB")
@@ -1471,6 +1488,9 @@ class TestHumanReadableParsing:
         """Test that invalid formats raise ValueError."""
         from taskflows.serialization import parse_time_duration
 
+        with pytest.raises(ValueError, match="non-negative"):
+            parse_time_duration(-1)
+
         with pytest.raises(ValueError, match="Unknown time unit"):
             parse_time_duration("5x")
 
@@ -1502,9 +1522,9 @@ services:
             assert len(services) == 1
             cg = services[0].cgroup_config
             assert cg is not None
-            assert cg.memory_limit == 2 * 1024 ** 3  # 2GB in bytes
-            assert cg.memory_high == int(1.5 * 1024 ** 3)  # 1.5GB in bytes
-            assert cg.memory_low == 512 * 1024 ** 2  # 512MB in bytes
+            assert cg.memory_limit == 2 * 1024**3  # 2GB in bytes
+            assert cg.memory_high == int(1.5 * 1024**3)  # 1.5GB in bytes
+            assert cg.memory_low == 512 * 1024**2  # 512MB in bytes
         finally:
             path.unlink()
 
@@ -1540,7 +1560,6 @@ services:
     def test_yaml_with_restart_policy_delay_and_window(self):
         """Test loading YAML with human-readable delay and window in RestartPolicy."""
         from taskflows.serialization import load_services_from_yaml
-        from taskflows.service import RestartPolicy
 
         yaml_content = """
 services:
@@ -1591,7 +1610,7 @@ services:
             svc = services[0]
             assert svc.timeout == 300  # Already numeric
             cg = svc.cgroup_config
-            assert cg.memory_limit == 1024 ** 3  # 1GB
+            assert cg.memory_limit == 1024**3  # 1GB
             assert cg.cpu_quota == 50000  # Numeric, not a memory/time field
             assert cg.timeout_start == 30  # 30s parsed
             assert cg.timeout_stop == 10  # Already numeric
@@ -1621,6 +1640,6 @@ services:
             reqs = services[0].startup_requirements
             assert len(reqs) == 1
             assert isinstance(reqs[0], Memory)
-            assert reqs[0].amount == 8 * 1024 ** 3  # 8GB in bytes
+            assert reqs[0].amount == 8 * 1024**3  # 8GB in bytes
         finally:
             path.unlink()

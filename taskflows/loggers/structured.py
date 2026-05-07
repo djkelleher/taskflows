@@ -10,7 +10,6 @@ import xxhash
 from structlog.contextvars import (
     bind_contextvars,
     clear_contextvars,
-    unbind_contextvars,
 )
 
 # Context variable for request tracking
@@ -30,10 +29,15 @@ _loki_config: Dict[str, Any] = {
 # Custom processor to add static labels for Loki
 def add_loki_labels(logger, method_name, event_dict):
     """Add static labels that Loki can use for indexing"""
-    # Use configured values if set, otherwise fall back to environment variables
-    event_dict["app"] = _loki_config["app_name"] or os.getenv("APP_NAME", "taskflows")
-    event_dict["environment"] = _loki_config["environment"] or os.getenv("ENVIRONMENT", "production")
-    event_dict["hostname"] = _loki_config["hostname"] or os.getenv("HOSTNAME", "unknown")
+    # Direct use should reflect the active process environment; configured
+    # structlog pipelines install a scoped processor with explicit labels.
+    event_dict["app"] = os.getenv("APP_NAME") or _loki_config["app_name"] or "taskflows"
+    event_dict["environment"] = (
+        os.getenv("ENVIRONMENT") or _loki_config["environment"] or "production"
+    )
+    event_dict["hostname"] = (
+        os.getenv("HOSTNAME") or _loki_config["hostname"] or "unknown"
+    )
 
     # Add request/trace IDs if available
     request_id = request_id_var.get()
@@ -83,8 +87,52 @@ def add_event_fingerprint(logger, method_name, event_dict):
         event_dict.get("lineno", ""),
     ]
     fingerprint_str = "|".join(str(f) for f in fingerprint_fields)
-    event_dict["event_fingerprint"] = xxhash.xxh64(fingerprint_str.encode()).hexdigest()[:8]
+    event_dict["event_fingerprint"] = xxhash.xxh64(
+        fingerprint_str.encode()
+    ).hexdigest()[:8]
     return event_dict
+
+
+_LOKI_TOP_LEVEL_FIELDS = {
+    "app",
+    "environment",
+    "hostname",
+    "severity",
+    "level",
+    "level_name",
+    "logger",
+    "timestamp",
+    "timestamp_ns",
+    "event",
+    "message",
+    "event_fingerprint",
+    "request_id",
+    "trace_id",
+}
+
+
+def organize_fields_for_loki(logger, method_name, event_dict):
+    """Move high-cardinality fields into a nested context object.
+
+    Loki labels should stay low-cardinality. This processor keeps stable fields
+    at the top level and groups request-specific or custom fields under
+    ``context`` for JSON querying without turning them into labels.
+    """
+    context = dict(event_dict.get("context") or {})
+    organized = {}
+
+    for key, value in event_dict.items():
+        if key == "context":
+            continue
+        if key in _LOKI_TOP_LEVEL_FIELDS:
+            organized[key] = value
+        else:
+            context[key] = value
+
+    if context:
+        organized["context"] = context
+
+    return organized
 
 
 # Default structlog configuration (can be overridden by configure_loki_logging)
@@ -116,6 +164,8 @@ _default_processors = [
     structlog.processors.format_exc_info,
     # Ensure unicode
     structlog.processors.UnicodeDecoder(),
+    # Group high-cardinality fields for Loki
+    organize_fields_for_loki,
     # Filter by level before rendering
     structlog.stdlib.filter_by_level,
     # Render as JSON for Fluent Bit parsing
@@ -139,7 +189,7 @@ def get_struct_logger(
     name: Optional[str] = None,
     request_id: Optional[str] = None,
     trace_id: Optional[str] = None,
-    **context: Any
+    **context: Any,
 ) -> structlog.BoundLogger:
     """Get a structured logger with optional context.
 
@@ -226,7 +276,9 @@ def configure_loki_logging(
     # Store configuration in module-level dict (avoids mutating os.environ)
     _loki_config["app_name"] = app_name
     _loki_config["environment"] = environment
-    _loki_config["hostname"] = os.getenv("HOSTNAME", "unknown") if include_hostname else None
+    _loki_config["hostname"] = (
+        os.getenv("HOSTNAME", "unknown") if include_hostname else None
+    )
     _loki_config["extra_labels"] = extra_labels or {}
 
     labels = extra_labels or {}
@@ -262,9 +314,9 @@ def configure_loki_logging(
         def truncate(obj, max_len=max_string_length):
             if isinstance(obj, str) and len(obj) > max_len:
                 return obj[:max_len] + "... (truncated)"
-            elif isinstance(obj, dict):
+            if isinstance(obj, dict):
                 return {k: truncate(v, max_len) for k, v in obj.items()}
-            elif isinstance(obj, list):
+            if isinstance(obj, list):
                 return [truncate(item, max_len) for item in obj]
             return obj
 
@@ -316,6 +368,8 @@ def configure_loki_logging(
             structlog.processors.format_exc_info,
             # Ensure unicode
             structlog.processors.UnicodeDecoder(),
+            # Group high-cardinality fields for Loki
+            organize_fields_for_loki,
             # Truncate long strings
             truncate_strings,
             # Filter by level before rendering

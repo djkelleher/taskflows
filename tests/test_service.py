@@ -2,13 +2,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from shutil import rmtree
 from time import sleep, time
+from unittest.mock import MagicMock, patch
 
 import pytest
 from taskflows import constraints
 from taskflows.common import _SYSTEMD_FILE_PREFIX
 from taskflows.constraints import CgroupConfig
 from taskflows.schedule import Calendar, Periodic
-from taskflows.service import Service, ServiceRegistry, systemd_dir
+from taskflows.service import Service, ServiceRegistry, Venv, service_logs, systemd_dir
 
 
 @pytest.fixture
@@ -53,6 +54,119 @@ def test_config():
 
     v = constraints.IOPressure(max_percent=80, timespan="10sec", silent=True)
     assert isinstance(v.unit_entries, set)
+
+
+def test_constraints_reject_invalid_numeric_ranges():
+    with pytest.raises(ValueError):
+        constraints.Memory(amount=-1)
+
+    with pytest.raises(ValueError):
+        constraints.CPUPressure(max_percent=-1)
+
+    with pytest.raises(ValueError):
+        constraints.CPUPressure(max_percent=101)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"cpu_period": 0},
+        {"cpu_shares": 0},
+        {"cpu_weight": 10001},
+        {"memory_limit": -1},
+        {"memory_swappiness": 101},
+        {"blkio_weight": 9},
+        {"io_weight": 0},
+        {"pids_limit": 0},
+        {"nofile_limit": 0},
+        {"oom_score_adj": -1001},
+        {"timeout_start": -1},
+        {"device_read_bps": {"/dev/sda": 0}},
+        {"device_write_iops": {"/dev/sda": -1}},
+    ],
+)
+def test_cgroup_config_rejects_invalid_resource_ranges(kwargs):
+    with pytest.raises(ValueError):
+        CgroupConfig(**kwargs)
+
+
+def test_calendar_from_datetime_uses_four_digit_year():
+    run_time = datetime(2026, 5, 5, 16, 50, 8, tzinfo=timezone.utc)
+
+    calendar = Calendar.from_datetime(run_time)
+
+    assert calendar.schedule == "Tue 2026-05-05 16:50:08 UTC"
+    assert "OnCalendar=Tue 2026-05-05 16:50:08 UTC" in calendar.unit_entries
+
+
+@pytest.mark.parametrize("period", [0, -1])
+def test_periodic_rejects_nonpositive_period(period):
+    with pytest.raises(ValueError, match="period"):
+        Periodic(start_on="boot", period=period, relative_to="start")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"start_on": "shutdown", "period": 1, "relative_to": "start"},
+        {"start_on": "boot", "period": 1, "relative_to": "middle"},
+    ],
+)
+def test_periodic_rejects_invalid_options(kwargs):
+    with pytest.raises(ValueError):
+        Periodic(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "schedule_kwargs",
+    [
+        {"schedule": "", "accuracy": "1ms"},
+        {"schedule": "Mon 12:00", "accuracy": ""},
+        {"schedule": "Mon 12:00\nOnBootSec=1", "accuracy": "1ms"},
+    ],
+)
+def test_calendar_rejects_invalid_systemd_values(schedule_kwargs):
+    with pytest.raises(ValueError):
+        Calendar(**schedule_kwargs)
+
+
+def test_service_logs_sets_journalctl_timeout(monkeypatch):
+    monkeypatch.setenv("TASKFLOWS_JOURNALCTL_TIMEOUT_SECONDS", "7")
+    completed = MagicMock(stdout="logs", stderr="")
+
+    with patch(
+        "taskflows.service.get_docker_client", side_effect=RuntimeError("no docker")
+    ):
+        with patch("taskflows.service.subprocess.run", return_value=completed) as run:
+            assert service_logs("test-service") == "logs"
+
+    assert run.call_args.kwargs["timeout"] == 7
+
+
+def test_service_copies_env_before_adding_runtime_defaults():
+    env = {"APP_ENV": "test"}
+
+    service = Service(name="env-copy", start_command="python -V", env=env)
+
+    assert env == {"APP_ENV": "test"}
+    assert service.env == {"APP_ENV": "test", "PYTHONUNBUFFERED": "1"}
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_service_rejects_nonpositive_timeout(timeout):
+    with pytest.raises(ValueError, match="timeout"):
+        Service(name="bad-timeout", start_command="python -V", timeout=timeout)
+
+
+def test_venv_command_quotes_runner_and_environment_name(tmp_path):
+    runner = tmp_path / "conda runner"
+    runner.touch()
+
+    command = Venv(env_name="prod env", custom_path=runner).create_env_command(
+        "python -V"
+    )
+
+    assert command == f"'{runner}' run -n 'prod env' --no-capture-output python -V"
 
 
 @pytest.mark.integration
@@ -108,7 +222,9 @@ async def test_service_enable_without_arguments(log_dir):
     srv = Service(
         name=test_name,
         start_command=f"bash -c 'echo {test_name} >> {log_file}'",
-        start_schedule=Calendar.from_datetime(datetime.now(timezone.utc) + timedelta(seconds=10)),
+        start_schedule=Calendar.from_datetime(
+            datetime.now(timezone.utc) + timedelta(seconds=10)
+        ),
     )
     await srv.create()
 
@@ -134,7 +250,9 @@ async def test_service_enable_timers_only(log_dir):
     srv = Service(
         name=test_name,
         start_command=f"bash -c 'echo {test_name} >> {log_file}'",
-        start_schedule=Calendar.from_datetime(datetime.now(timezone.utc) + timedelta(seconds=10)),
+        start_schedule=Calendar.from_datetime(
+            datetime.now(timezone.utc) + timedelta(seconds=10)
+        ),
     )
     await srv.create()
 
@@ -205,13 +323,72 @@ def test_cgroup_multiple_device_limits():
     assert "IOWriteBandwidthMax_1" in directives
 
     # Verify values are correct
-    read_values = {directives["IOReadBandwidthMax_0"], directives["IOReadBandwidthMax_1"]}
+    read_values = {
+        directives["IOReadBandwidthMax_0"],
+        directives["IOReadBandwidthMax_1"],
+    }
     assert "/dev/sda 1048576" in read_values
     assert "/dev/sdb 2097152" in read_values
 
-    write_values = {directives["IOWriteBandwidthMax_0"], directives["IOWriteBandwidthMax_1"]}
+    write_values = {
+        directives["IOWriteBandwidthMax_0"],
+        directives["IOWriteBandwidthMax_1"],
+    }
     assert "/dev/sda 524288" in write_values
     assert "/dev/sdb 1048576" in write_values
+
+
+def test_cgroup_environment_directives_are_escaped():
+    cgroup = CgroupConfig(environment={"SAFE_VALUE": 'quoted "value" with spaces'})
+    srv = Service(
+        name="cgroup-env",
+        start_command="echo ok",
+        cgroup_config=cgroup,
+    )
+
+    assert (
+        'Environment="SAFE_VALUE=quoted \\"value\\" with spaces"' in srv.service_entries
+    )
+
+
+def test_cgroup_repeated_device_allow_entries_are_preserved():
+    cgroup = CgroupConfig(devices=["/dev/fuse", "/dev/null:r"])
+    srv = Service(
+        name="cgroup-devices",
+        start_command="echo ok",
+        cgroup_config=cgroup,
+    )
+
+    device_allow_entries = {
+        entry for entry in srv.service_entries if entry.startswith("DeviceAllow=")
+    }
+    assert device_allow_entries == {
+        "DeviceAllow=/dev/fuse rwm",
+        "DeviceAllow=/dev/null r",
+    }
+
+
+def test_service_relationship_accepts_service_object():
+    dependency = Service(name="dependency", start_command="echo dependency")
+    srv = Service(
+        name="dependent",
+        start_command="echo dependent",
+        start_after=dependency,
+    )
+
+    assert "After=taskflows-dependency.service" in srv.unit_entries
+
+
+def test_service_env_file_parse_errors_are_fatal(tmp_path):
+    env_file = tmp_path / "bad.env"
+    env_file.write_text("not-an-env-line")
+
+    with pytest.raises(ValueError, match="Invalid environment line"):
+        Service(
+            name="bad-env-file",
+            start_command="echo bad",
+            env_file=str(env_file),
+        )
 
 
 @pytest.mark.integration

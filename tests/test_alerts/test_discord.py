@@ -34,7 +34,7 @@ class TestDiscordChannel:
 class TestDiscordMarkdown:
     def test_text_discord_markdown(self):
         """Test text component Discord markdown rendering."""
-        
+
         text_component = Text("Test message", ContentType.INFO, FontSize.MEDIUM)
         result = render_components_md([text_component], discord_format=True)
 
@@ -55,7 +55,7 @@ class TestDiscordMarkdown:
 
     def test_map_discord_markdown_inline(self):
         """Test map component Discord markdown rendering with inline format."""
-        
+
         map_data = {"key1": "value1"}
         map_component = Map(map_data, inline=True)
         result = render_components_md([map_component], discord_format=True)
@@ -131,6 +131,16 @@ class TestDiscordMessageSending:
 
         assert len(chunks) > 1
         assert all(len(chunk) <= 50 for chunk in chunks)
+
+    def test_split_message_preserves_long_words_in_multiline_message(self):
+        """Long words in multiline content should be split, not truncated."""
+        long_word = "A" * 120
+        message = f"prefix\n{long_word}\nsuffix"
+
+        chunks = _split_message(message, 50)
+
+        assert all(len(chunk) <= 50 for chunk in chunks)
+        assert "".join(chunks).replace("\n", "") == f"prefix{long_word}suffix"
 
     @patch("taskflows.alerts.discord.aiohttp.ClientSession")
     @pytest.mark.asyncio
@@ -304,6 +314,21 @@ class TestDiscordMessageSending:
             mock_send_single.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_send_discord_message_rejects_negative_retries(self):
+        with patch(
+            "taskflows.alerts.discord._send_single_discord_message"
+        ) as mock_send_single:
+            components = [Text("Short message")]
+            channel = DiscordChannel(
+                webhook_url="https://discord.com/api/webhooks/123/test"
+            )
+
+            with pytest.raises(ValueError, match="retries"):
+                await send_discord_message(components, channel, retries=-1)
+
+            mock_send_single.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_send_discord_message_long_content(self):
         """Test send_discord_message with long content that needs splitting"""
         with patch(
@@ -339,7 +364,9 @@ class TestDiscordIntegration:
     @pytest.mark.asyncio
     async def test_send_alert_with_discord(self):
         """Test send_alert function with Discord destination"""
-        with patch("taskflows.alerts.discord._send_single_discord_message") as mock_send:
+        with patch(
+            "taskflows.alerts.discord._send_single_discord_message"
+        ) as mock_send:
             mock_send.return_value = True
 
             components = [Text("Test alert")]
@@ -356,11 +383,12 @@ class TestDiscordIntegration:
     async def test_send_alert_mixed_destinations(self):
         """Test send_alert with mixed destinations including Discord"""
         with (
-            patch("taskflows.alerts.discord._send_single_discord_message") as mock_discord,
+            patch(
+                "taskflows.alerts.discord._send_single_discord_message"
+            ) as mock_discord,
             patch("taskflows.alerts.slack.get_async_client") as mock_get_client,
             patch("taskflows.alerts.slack.try_post_message") as mock_post,
         ):
-
             # Mock Slack client and posting
             mock_client = AsyncMock()
             mock_get_client.return_value = mock_client

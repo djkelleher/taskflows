@@ -67,6 +67,8 @@ async def send_email(
     Returns:
         bool: Whether the message was sent successfully or not.
     """
+    if retries < 0:
+        raise ValueError("retries must be greater than or equal to 0")
     # Collect attachment files including table attachments
     attachments_to_process = list(attachment_files) if attachment_files else []
 
@@ -106,7 +108,6 @@ async def send_email(
         msg = deepcopy(message)
         if attachments:
             for attachment in attachments:
-
                 file_content = attachment.read_content()
                 filename = attachment.filename
 

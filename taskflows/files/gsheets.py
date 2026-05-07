@@ -49,6 +49,7 @@ class RetryGetattributeMixin:
 
         # Only wrap functions/methods; skip classes/other callables
         import inspect
+
         if not (inspect.ismethod(attr) or inspect.isfunction(attr)):
             return attr
 
@@ -227,7 +228,7 @@ class SheetBot(RetryGetattributeMixin):
             notes = {
                 f"{self._column_label(col_idx)}1": header_notes[column]
                 for col_idx, column in enumerate(columns)
-                if column in header_notes and header_notes[column]
+                if header_notes.get(column)
             }
             if notes:
                 worksheet.insert_notes(notes)
@@ -260,7 +261,7 @@ class SheetBot(RetryGetattributeMixin):
                     worksheet.update(
                         (
                             f"{self._column_label(start)}2:"
-                            f"{self._column_label(end - 1)}{len(df_cols)+1}"
+                            f"{self._column_label(end - 1)}{len(df_cols) + 1}"
                         ),
                         values,
                         **kwargs,
@@ -297,7 +298,10 @@ class SheetBot(RetryGetattributeMixin):
                     "endColumnIndex": col_idx + 1,
                 }
             else:
-                assert isinstance(col_name_or_row_idx, int)
+                if not isinstance(col_name_or_row_idx, int):
+                    raise TypeError(
+                        "col_name_or_row_idx must be a column name or row index"
+                    )
                 rng = {
                     "startRowIndex": col_name_or_row_idx,
                     "endRowIndex": col_name_or_row_idx + 1,
@@ -338,8 +342,12 @@ class SheetBot(RetryGetattributeMixin):
             bold=True,
         )
         ## FORMAT COLUMNS VALUES
-        pct_columns = [c for c, cf in zip(columns, columns_fmt) if "(%)" in cf]
-        dollar_columns = [c for c, cf in zip(columns, columns_fmt) if "($)" in cf]
+        pct_columns = [
+            c for c, cf in zip(columns, columns_fmt, strict=True) if "(%)" in cf
+        ]
+        dollar_columns = [
+            c for c, cf in zip(columns, columns_fmt, strict=True) if "($)" in cf
+        ]
         numeric_cols = data.select_dtypes(include="number").columns.tolist()
         numeric_cols_no_unit = [
             c for c in numeric_cols if c not in dollar_columns and c not in pct_columns
@@ -452,7 +460,8 @@ class SheetBot(RetryGetattributeMixin):
         sheet_id = worksheet.id
         end_row_idx = len(df)
         domain = {c.x for c in chart_lines}
-        assert len(domain) == 1
+        if len(domain) != 1:
+            raise ValueError("All chart lines must use the same x-axis column")
         domain_sources = [
             {
                 "startRowIndex": 1,
@@ -578,7 +587,6 @@ class SheetBot(RetryGetattributeMixin):
         self.spreadsheets[spreadsheet] = sheet
         return sheet
 
-
     def get_worksheets(self, spreadsheet: str) -> Dict[str, Worksheet]:
         spreadsheet = self.get_spreadsheet(spreadsheet)
         return {ws.title: ws for ws in spreadsheet.worksheets()}
@@ -635,14 +643,14 @@ class SheetBot(RetryGetattributeMixin):
             [chart["chartId"] for chart in s.get("charts", [])] for s in data["sheets"]
         ]
         ws_ids = [ws.id for ws in sheet.worksheets()]
-        return dict(zip(ws_ids, chart_ids))
+        return dict(zip(ws_ids, chart_ids, strict=False))
 
     def _format_column_name(self, column: str):
         for unit, symbol in (("pct", "%"), ("dollars", "$")):
             column = re.sub(f"_{unit}$", f"({symbol})", column)
             column = re.sub(
                 r"(^|[^a-zA-Z])" + unit + r"($|[^a-zA-Z])",
-                lambda m: m.group(1) + symbol + m.group(2),
+                lambda m, replacement=symbol: m.group(1) + replacement + m.group(2),
                 column,
             )
         for unit in ("hours", "mins"):

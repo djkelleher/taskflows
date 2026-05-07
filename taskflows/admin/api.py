@@ -1,19 +1,30 @@
 import asyncio
-import logging
 import os
+import threading
+import time
 import traceback
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import click
 import uvicorn
 
-# from trading.databases.timescale import pgconn
-from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile, status
+from fastapi import (
+    Body,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from taskflows.admin.core import (
+    call_api,
     create,
     disable,
     enable,
@@ -40,6 +51,7 @@ from taskflows.admin.security import (
     validate_csrf_token,
 )
 from taskflows.common import Config, logger
+from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
 from taskflows.service import RestartPolicy, Service, Venv
 
 from taskflows.admin.grafana_proxy import router as grafana_router
@@ -72,6 +84,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 # Check if UI is enabled via env var OR config file
 def _is_ui_enabled() -> bool:
     """Check if UI is enabled via environment variable or config file."""
@@ -79,12 +92,135 @@ def _is_ui_enabled() -> bool:
         return True
     try:
         from taskflows.admin.auth import load_ui_config
+
         ui_config = load_ui_config()
         return bool(ui_config.enabled and ui_config.jwt_secret)
     except Exception:
         return False
 
+
 UI_ENABLED = _is_ui_enabled()
+MAX_CREATE_YAML_BYTES = int(
+    os.getenv("TASKFLOWS_MAX_CREATE_YAML_BYTES", str(2 * 1024 * 1024))
+)
+MAX_CREATE_MULTIPART_OVERHEAD_BYTES = int(
+    os.getenv("TASKFLOWS_MAX_CREATE_MULTIPART_OVERHEAD_BYTES", str(64 * 1024))
+)
+CREATE_REQUEST_PATHS = {"/create", "/api/create"}
+LOGIN_RATE_LIMIT_ATTEMPTS = int(os.getenv("TASKFLOWS_LOGIN_RATE_LIMIT_ATTEMPTS", "5"))
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.getenv("TASKFLOWS_LOGIN_RATE_LIMIT_WINDOW_SECONDS", "300")
+)
+LOGIN_RATE_LIMIT_LOCKOUT_SECONDS = int(
+    os.getenv("TASKFLOWS_LOGIN_RATE_LIMIT_LOCKOUT_SECONDS", "300")
+)
+_login_attempts: Dict[str, List[float]] = {}
+_login_attempts_lock = threading.Lock()
+
+PUBLIC_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
+PUBLIC_PREFIXES = ("/assets/",)
+AUTH_PREFIXES = ("/auth/",)
+PUBLIC_AUTH_PATHS = {"/auth/login", "/auth/refresh"}
+TOP_LEVEL_API_PATHS = {
+    "/list-servers",
+    "/history",
+    "/list",
+    "/status",
+    "/create",
+    "/start",
+    "/stop",
+    "/restart",
+    "/enable",
+    "/disable",
+    "/remove",
+}
+
+
+def _is_public_path(path: str) -> bool:
+    return path in PUBLIC_PATHS or any(
+        path.startswith(prefix) for prefix in PUBLIC_PREFIXES
+    )
+
+
+def _is_ui_route(path: str) -> bool:
+    """Return True for React SPA routes that are not service-management APIs."""
+    if path.startswith(("/api/", "/grafana/")):
+        return False
+    if path == "/metrics":
+        return False
+    if path.startswith(AUTH_PREFIXES):
+        return path in PUBLIC_AUTH_PATHS
+    if _is_public_path(path):
+        return True
+    return UI_ENABLED and not (
+        path in TOP_LEVEL_API_PATHS or path.startswith(("/logs/", "/show/"))
+    )
+
+
+def _requires_api_auth(path: str) -> bool:
+    if path in PUBLIC_AUTH_PATHS or _is_public_path(path):
+        return False
+    return not _is_ui_route(path)
+
+
+def _validate_yaml_size(yaml_content: str) -> None:
+    size = len(yaml_content.encode("utf-8"))
+    if size > MAX_CREATE_YAML_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=(
+                "Service definition is too large. "
+                f"Limit is {MAX_CREATE_YAML_BYTES} bytes."
+            ),
+        )
+
+
+def _create_request_limit(path: str) -> int:
+    if path == "/api/create":
+        return MAX_CREATE_YAML_BYTES + MAX_CREATE_MULTIPART_OVERHEAD_BYTES
+    return MAX_CREATE_YAML_BYTES
+
+
+def _validate_declared_create_request_size(request: Request) -> Optional[JSONResponse]:
+    """Reject create requests before any middleware reads the body into memory."""
+    if request.url.path not in CREATE_REQUEST_PATHS:
+        return None
+
+    content_length = request.headers.get("content-length")
+    if not content_length:
+        return JSONResponse(
+            status_code=status.HTTP_411_LENGTH_REQUIRED,
+            content={
+                "detail": "Content-Length header is required for service-definition uploads"
+            },
+        )
+
+    try:
+        size = int(content_length)
+    except ValueError:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": "Invalid Content-Length header"},
+        )
+
+    if size < 0:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"detail": "Invalid Content-Length header"},
+        )
+
+    if size > _create_request_limit(request.url.path):
+        return JSONResponse(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            content={
+                "detail": (
+                    "Service definition is too large. "
+                    f"Limit is {MAX_CREATE_YAML_BYTES} bytes."
+                )
+            },
+        )
+    return None
+
 
 # Add CORS middleware if UI is enabled
 if UI_ENABLED:
@@ -97,9 +233,6 @@ if UI_ENABLED:
         allow_headers=security_config.allowed_headers,
     )
 
-# Add Prometheus middleware for metrics collection
-from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
-
 app.add_middleware(PrometheusMiddleware)
 
 # Register Grafana reverse proxy
@@ -109,22 +242,21 @@ app.include_router(grafana_router)
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    logger.error(
-        "Unhandled exception %s %s: %s%s",
-        request.method,
-        request.url.path,
-        exc,
-        f"\n{tb}" if tb else "",
+    logger.opt(exception=exc).error(
+        f"Unhandled exception {request.method} {request.url.path}"
     )
-    payload = {
-        "detail": str(exc),
-        "error_type": type(exc).__name__,
-        "path": request.url.path,
-    }
-    # Only include traceback in development mode (DEBUG=true)
-    # This prevents information disclosure in production
-    if tb and os.getenv("DEBUG", "").lower() in ("true", "1", "yes"):
-        payload["traceback"] = tb
+
+    debug_enabled = os.getenv("DEBUG", "").lower() in ("true", "1", "yes")
+    payload = {"detail": "Internal server error", "path": request.url.path}
+    if debug_enabled:
+        payload.update(
+            {
+                "detail": str(exc),
+                "error_type": type(exc).__name__,
+            }
+        )
+        if tb:
+            payload["traceback"] = tb
     # Reuse hostname wrapper for consistency
     return JSONResponse(status_code=500, content=with_hostname(payload))
 
@@ -152,20 +284,8 @@ async def add_security_headers(request: Request, call_next):
 # HMAC validation middleware
 @app.middleware("http")
 async def hmac_validation(request: Request, call_next):
-    """Validate HMAC headers for API endpoints only."""
-    # Skip HMAC for:
-    # 1. When HMAC is disabled
-    # 2. Health check
-    # 3. UI routes (all non-API routes) - only API endpoints need HMAC
-    # 4. Auth endpoints (they have their own authentication)
-    # 5. Assets
-    if (
-        not security_config.enable_hmac
-        or request.url.path == "/health"
-        or not request.url.path.startswith("/api/")
-        or request.url.path.startswith("/auth/")
-        or request.url.path.startswith("/assets/")
-    ):
+    """Validate HMAC/JWT headers for service-management endpoints."""
+    if not security_config.enable_hmac or not _requires_api_auth(request.url.path):
         logger.debug(f"HMAC skipped for {request.url.path}")
         return await call_next(request)
 
@@ -174,12 +294,13 @@ async def hmac_validation(request: Request, call_next):
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
-            from taskflows.admin.auth import load_ui_config, verify_token
             ui_config = load_ui_config()
             if ui_config.jwt_secret:
                 username = verify_token(token, ui_config.jwt_secret, "access")
                 if username:
-                    logger.debug(f"JWT auth accepted for {request.url.path} (user: {username})")
+                    logger.debug(
+                        f"JWT auth accepted for {request.url.path} (user: {username})"
+                    )
                     request.state.user = username
                     return await call_next(request)
             # Invalid JWT
@@ -187,6 +308,11 @@ async def hmac_validation(request: Request, call_next):
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "Invalid or expired token"},
+            )
+        if request.url.path.startswith(AUTH_PREFIXES):
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "JWT authentication required"},
             )
         # No Bearer token - if HMAC is not configured, require JWT
         if not security_config.hmac_secret:
@@ -206,17 +332,22 @@ async def hmac_validation(request: Request, call_next):
 
     signature = request.headers.get(security_config.hmac_header)
     timestamp = request.headers.get(security_config.hmac_timestamp_header)
-    if not signature or not timestamp:
+    nonce = request.headers.get(security_config.hmac_nonce_header)
+    if not signature or not timestamp or not nonce:
         logger.warning(
             f"Missing HMAC headers for {request.url.path} from {request.client.host}"
         )
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"detail": "HMAC signature and timestamp required"},
+            content={"detail": "HMAC signature, timestamp, and nonce required"},
         )
 
     body_str = ""
-    if request.method in {"POST", "PUT", "DELETE"}:
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        size_response = _validate_declared_create_request_size(request)
+        if size_response is not None:
+            return size_response
+
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8") if body_bytes else ""
 
@@ -231,6 +362,10 @@ async def hmac_validation(request: Request, call_next):
         secret,
         body_str,
         security_config.hmac_window_seconds,
+        method=request.method,
+        path=request.url.path,
+        query_string=str(request.url.query),
+        nonce=nonce,
     )
     if not is_valid:
         logger.warning(
@@ -242,6 +377,15 @@ async def hmac_validation(request: Request, call_next):
         )
 
     logger.debug(f"HMAC validated for {request.url.path} from {request.client.host}")
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def request_size_validation(request: Request, call_next):
+    """Reject oversized service-definition uploads before reading bodies."""
+    size_response = _validate_declared_create_request_size(request)
+    if size_response is not None:
+        return size_response
     return await call_next(request)
 
 
@@ -261,10 +405,10 @@ async def jwt_validation(request: Request, call_next):
     #
     # For React SPA: All non-API routes serve index.html, React handles authentication
     if (
-        request.url.path.startswith("/api/")
-        or request.url.path.startswith("/auth/")
+        request.url.path in PUBLIC_AUTH_PATHS
         or request.url.path.startswith("/assets/")
         or request.url.path == "/health"
+        or _requires_api_auth(request.url.path)
     ):
         logger.debug(f"JWT skipped for {request.url.path}")
         return await call_next(request)
@@ -286,6 +430,19 @@ async def csrf_validation(request: Request, call_next):
     if not UI_ENABLED or not security_config.enable_csrf:
         return await call_next(request)
 
+    if (
+        request.headers.get(security_config.hmac_header)
+        and request.headers.get(security_config.hmac_timestamp_header)
+        and request.headers.get(security_config.hmac_nonce_header)
+    ):
+        logger.debug(f"CSRF skipped for HMAC-authenticated request {request.url.path}")
+        return await call_next(request)
+
+    auth_header = request.headers.get("Authorization", "")
+    if _requires_api_auth(request.url.path) and not auth_header.startswith("Bearer "):
+        logger.debug(f"CSRF deferred to HMAC auth for {request.url.path}")
+        return await call_next(request)
+
     # Skip CSRF for:
     # 1. Safe methods (GET, HEAD, OPTIONS)
     # 2. Auth endpoints (login, refresh - they're establishing the token)
@@ -294,15 +451,23 @@ async def csrf_validation(request: Request, call_next):
     # 5. Health check
     if (
         request.method in ["GET", "HEAD", "OPTIONS"]
-        or request.url.path in ["/health", "/auth/login", "/auth/refresh"]
-        or request.url.path.startswith("/api/")  # HMAC-protected
+        or request.url.path in ["/health", *PUBLIC_AUTH_PATHS]
         or request.url.path.startswith("/assets/")
+        or _is_ui_route(request.url.path)
     ):
         logger.debug(f"CSRF skipped for {request.method} {request.url.path}")
         return await call_next(request)
 
-    # Get username from request state (set by JWT middleware)
+    # Get username from request state, or validate Bearer token directly because
+    # middleware order can run CSRF before the auth middleware.
     username = getattr(request.state, "user", None)
+    if not username:
+        if auth_header.startswith("Bearer "):
+            ui_config = load_ui_config()
+            if ui_config.jwt_secret:
+                username = verify_token(auth_header[7:], ui_config.jwt_secret, "access")
+                if username:
+                    request.state.user = username
     if not username:
         logger.warning(f"CSRF check: No user in request state for {request.url.path}")
         return JSONResponse(
@@ -313,16 +478,15 @@ async def csrf_validation(request: Request, call_next):
     # Check for CSRF token in header
     csrf_token = request.headers.get(security_config.csrf_header)
     if not csrf_token:
-        logger.warning(f"CSRF check failed: Missing token for user {username} on {request.url.path}")
+        logger.warning(
+            f"CSRF check failed: Missing token for user {username} on {request.url.path}"
+        )
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"detail": "CSRF token required"},
         )
 
-    # Get stored CSRF token data
-    from taskflows.admin.auth import load_ui_config
-
-    token_data = get_csrf_token_data(username)
+    token_data = get_csrf_token_data(username, csrf_token)
     if not token_data:
         logger.warning(f"CSRF check failed: No stored token for user {username}")
         return JSONResponse(
@@ -330,7 +494,6 @@ async def csrf_validation(request: Request, call_next):
             content={"detail": "CSRF token expired or invalid"},
         )
 
-    # Validate the token
     ui_config = load_ui_config()
     is_valid, error_msg = validate_csrf_token(
         csrf_token,
@@ -341,7 +504,9 @@ async def csrf_validation(request: Request, call_next):
     )
 
     if not is_valid:
-        logger.warning(f"CSRF check failed for user {username} on {request.url.path}: {error_msg}")
+        logger.warning(
+            f"CSRF check failed for user {username} on {request.url.path}: {error_msg}"
+        )
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"detail": error_msg or "Invalid CSRF token"},
@@ -421,7 +586,17 @@ async def create_endpoint(
     exclude: Optional[str] = Body(None, embed=True),
 ):
     import tempfile
+
+    if search_in:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Remote Python service discovery is disabled. "
+                "Submit yaml_content instead."
+            ),
+        )
     if yaml_content:
+        _validate_yaml_size(yaml_content)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(yaml_content)
             temp_path = f.name
@@ -497,38 +672,57 @@ if UI_ENABLED:
     @app.post("/api/batch")
     async def batch_operation(batch: BatchOperation):
         """Execute operation on multiple services."""
-        results = {}
+        from taskflows.security_validation import validate_service_name
 
-        for service_name in batch.service_names:
+        max_batch_size = 50
+        if len(batch.service_names) > max_batch_size:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Batch operations are limited to {max_batch_size} services",
+            )
+        valid_operations = {"start", "stop", "restart", "enable", "disable", "remove"}
+        if batch.operation not in valid_operations:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown operation: {batch.operation}",
+            )
+
+        try:
+            service_names = [
+                validate_service_name(name) for name in batch.service_names
+            ]
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+        operation_funcs = {
+            "start": start,
+            "stop": stop,
+            "restart": restart,
+            "enable": enable,
+            "disable": disable,
+            "remove": remove,
+        }
+        op_func = operation_funcs[batch.operation]
+
+        async def _run_one(service_name: str):
             try:
-                if batch.operation == "start":
-                    result = await start(match=service_name, as_json=True)
-                elif batch.operation == "stop":
-                    result = await stop(match=service_name, as_json=True)
-                elif batch.operation == "restart":
-                    result = await restart(match=service_name, as_json=True)
-                elif batch.operation == "enable":
-                    result = await enable(match=service_name, as_json=True)
-                elif batch.operation == "disable":
-                    result = await disable(match=service_name, as_json=True)
-                elif batch.operation == "remove":
-                    result = await remove(match=service_name, as_json=True)
-                else:
-                    results[service_name] = {
-                        "status": "error",
-                        "error": f"Unknown operation: {batch.operation}",
-                    }
-                    continue
-
-                results[service_name] = {"status": "success", "result": result}
+                result = await op_func(match=service_name, as_json=True)
+                return service_name, {"status": "success", "result": result}
             except Exception as e:
-                logger.error(f"Batch operation {batch.operation} failed for {service_name}: {e}")
-                results[service_name] = {"status": "error", "error": str(e)}
+                logger.error(
+                    f"Batch operation {batch.operation} failed for {service_name}: {e}"
+                )
+                return service_name, {"status": "error", "error": str(e)}
 
-        return with_hostname({"batch_results": results})
+        all_results = await asyncio.gather(*[_run_one(n) for n in service_names])
+        return with_hostname({"batch_results": dict(all_results)})
 
     # UI-specific API endpoints with /api/ prefix
     import re as _re
+
     _EMOJI_PREFIX_RE = _re.compile(r"^[\U0001f300-\U0001faff\u2600-\u27bf]\s*")
 
     def _strip_emoji(value: str) -> str:
@@ -558,27 +752,41 @@ if UI_ENABLED:
         all: bool = Query(False),
     ):
         """Get services for UI dashboard."""
-        result = await service_status(match=match, running=running, all=all, as_json=True)
+        result = await service_status(
+            match=match, running=running, all=all, as_json=True
+        )
         # Transform to frontend expected format
         services = []
         for svc in result.get("status", []):
-            services.append({
-                # Original fields (backward compatible)
-                "name": svc.get("Service", ""),
-                "status": _parse_status(svc.get("sub_state", "")),
-                "schedule": svc.get("Timers", "-") if svc.get("Timers") and svc.get("Timers") != "-" else "-",
-                "last_run": svc.get("Last Start", "-") if svc.get("Last Start") and svc.get("Last Start") != "-" else "-",
-                # Extended fields
-                "description": _strip_emoji(svc.get("description", "-")),
-                "service_enabled": _strip_emoji(svc.get("Service\nEnabled", "-")),
-                "timer_enabled": _strip_emoji(svc.get("Timer\nEnabled", "-")),
-                "load_state": _strip_emoji(svc.get("load_state", "-")),
-                "active_state": _strip_emoji(svc.get("active_state", "-")),
-                "sub_state": _strip_emoji(svc.get("sub_state", "-")),
-                "uptime": svc.get("Uptime", "-") if svc.get("Uptime") and svc.get("Uptime") != "-" else "-",
-                "last_finish": svc.get("Last Finish", "-") if svc.get("Last Finish") and svc.get("Last Finish") != "-" else "-",
-                "next_start": svc.get("Next Start", "-") if svc.get("Next Start") and svc.get("Next Start") != "-" else "-",
-            })
+            services.append(
+                {
+                    # Original fields (backward compatible)
+                    "name": svc.get("Service", ""),
+                    "status": _parse_status(svc.get("sub_state", "")),
+                    "schedule": svc.get("Timers", "-")
+                    if svc.get("Timers") and svc.get("Timers") != "-"
+                    else "-",
+                    "last_run": svc.get("Last Start", "-")
+                    if svc.get("Last Start") and svc.get("Last Start") != "-"
+                    else "-",
+                    # Extended fields
+                    "description": _strip_emoji(svc.get("description", "-")),
+                    "service_enabled": _strip_emoji(svc.get("Service\nEnabled", "-")),
+                    "timer_enabled": _strip_emoji(svc.get("Timer\nEnabled", "-")),
+                    "load_state": _strip_emoji(svc.get("load_state", "-")),
+                    "active_state": _strip_emoji(svc.get("active_state", "-")),
+                    "sub_state": _strip_emoji(svc.get("sub_state", "-")),
+                    "uptime": svc.get("Uptime", "-")
+                    if svc.get("Uptime") and svc.get("Uptime") != "-"
+                    else "-",
+                    "last_finish": svc.get("Last Finish", "-")
+                    if svc.get("Last Finish") and svc.get("Last Finish") != "-"
+                    else "-",
+                    "next_start": svc.get("Next Start", "-")
+                    if svc.get("Next Start") and svc.get("Next Start") != "-"
+                    else "-",
+                }
+            )
         return {"services": services}
 
     @app.get("/api/logs")
@@ -638,7 +846,16 @@ if UI_ENABLED:
     ):
         """Create services from uploaded YAML file."""
         import tempfile
-        content = await file.read()
+
+        content = await file.read(MAX_CREATE_YAML_BYTES + 1)
+        if len(content) > MAX_CREATE_YAML_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=(
+                    "Service definition is too large. "
+                    f"Limit is {MAX_CREATE_YAML_BYTES} bytes."
+                ),
+            )
         yaml_content = content.decode("utf-8")
 
         if host:
@@ -648,7 +865,14 @@ if UI_ENABLED:
                 json_data["include"] = include
             if exclude:
                 json_data["exclude"] = exclude
-            return call_api(host, "/create", method="POST", json_data=json_data, timeout=30)
+            return await asyncio.to_thread(
+                call_api,
+                host,
+                "/create",
+                method="POST",
+                json_data=json_data,
+                timeout=30,
+            )
 
         # Local creation: save to temp file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -664,31 +888,76 @@ if UI_ENABLED:
 
 # Authentication endpoints (only when UI is enabled)
 if UI_ENABLED:
-    from fastapi import HTTPException
     from taskflows.admin.auth import (
         authenticate_user,
         create_access_token,
         create_refresh_token,
         load_ui_config,
-        update_user_last_login,
+        revoke_refresh_token,
         verify_token,
-        JWTToken,
         LoginRequest,
     )
 
+    def _login_rate_key(request: Request, username: str) -> str:
+        client_host = request.client.host if request.client else "unknown"
+        return f"{client_host}:{username.casefold()}"
+
+    def _login_retry_after_seconds(key: str) -> Optional[int]:
+        now = time.time()
+        with _login_attempts_lock:
+            attempts = [
+                ts
+                for ts in _login_attempts.get(key, [])
+                if now - ts <= LOGIN_RATE_LIMIT_WINDOW_SECONDS
+            ]
+            _login_attempts[key] = attempts
+            if len(attempts) < LOGIN_RATE_LIMIT_ATTEMPTS:
+                return None
+            retry_after = LOGIN_RATE_LIMIT_LOCKOUT_SECONDS - int(now - attempts[-1])
+            return max(1, retry_after) if retry_after > 0 else None
+
+    def _record_login_failure(key: str) -> None:
+        now = time.time()
+        with _login_attempts_lock:
+            attempts = [
+                ts
+                for ts in _login_attempts.get(key, [])
+                if now - ts <= LOGIN_RATE_LIMIT_WINDOW_SECONDS
+            ]
+            attempts.append(now)
+            _login_attempts[key] = attempts
+
+    def _clear_login_failures(key: str) -> None:
+        with _login_attempts_lock:
+            _login_attempts.pop(key, None)
+
     @app.post("/auth/login")
-    async def login(credentials: LoginRequest):
+    async def login(credentials: LoginRequest, request: Request):
         """Login with username and password.
 
         Returns JWT access/refresh tokens and CSRF token for defense-in-depth.
         """
+        rate_key = _login_rate_key(request, credentials.username)
+        retry_after = _login_retry_after_seconds(rate_key)
+        if retry_after is not None:
+            logger.warning(
+                f"Rate-limited login attempt for user {credentials.username}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed login attempts. Try again later.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
         user = authenticate_user(credentials.username, credentials.password)
         if not user:
+            _record_login_failure(rate_key)
             logger.warning(f"Failed login attempt for user {credentials.username}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials",
             )
+        _clear_login_failures(rate_key)
 
         ui_config = load_ui_config()
         if not ui_config.jwt_secret:
@@ -705,9 +974,9 @@ if UI_ENABLED:
         csrf_data = create_csrf_token_data(credentials.username, ui_config.jwt_secret)
         store_csrf_token(credentials.username, csrf_data)
 
-        update_user_last_login(credentials.username)
-
-        logger.info(f"User {credentials.username} logged in successfully with CSRF protection")
+        logger.info(
+            f"User {credentials.username} logged in successfully with CSRF protection"
+        )
         return {
             "access_token": access_token,
             "refresh_token": refresh_token,
@@ -750,12 +1019,20 @@ if UI_ENABLED:
         }
 
     @app.post("/auth/logout")
-    async def logout(request: Request):
-        """Logout and remove CSRF token."""
+    async def logout(
+        request: Request,
+        refresh_token: Optional[str] = Body(None, embed=True),
+    ):
+        """Logout, remove CSRF token, and revoke the current refresh token."""
         username = getattr(request.state, "user", None)
         if username:
             # Remove CSRF token from server
-            remove_csrf_token(username)
+            csrf_token = request.headers.get(security_config.csrf_header)
+            remove_csrf_token(username, csrf_token)
+            if refresh_token:
+                ui_config = load_ui_config()
+                if ui_config.jwt_secret:
+                    revoke_refresh_token(refresh_token, ui_config.jwt_secret)
             logger.info(f"User {username} logged out, CSRF token removed")
         return {"message": "Logged out successfully"}
 
@@ -822,30 +1099,33 @@ if UI_ENABLED:
     # Static file serving for React SPA
     from pathlib import Path
     from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, PlainTextResponse
+    from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
     frontend_dist_dir = Path(__file__).parent.parent.parent / "frontend" / "dist"
 
-    # Mount React assets (JS/CSS bundles with hashes)
-    app.mount("/assets", StaticFiles(directory=frontend_dist_dir / "assets"), name="assets")
+    # Mount React assets (JS/CSS bundles with hashes) when the frontend is built.
+    assets_dir = frontend_dist_dir / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
     # Serve index.html for all UI routes (React Router handles client-side routing)
     @app.exception_handler(404)
     async def spa_404_handler(request, exc):
         """Serve index.html for UI routes, return JSON 404 for API routes."""
         # API and Grafana routes should return JSON 404
-        if request.url.path.startswith("/api/") or request.url.path.startswith("/auth/") or request.url.path.startswith("/grafana/"):
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Not found"}
-            )
+        if (
+            request.url.path.startswith("/api/")
+            or request.url.path.startswith("/auth/")
+            or request.url.path.startswith("/grafana/")
+        ):
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
 
         # For all other routes, serve React SPA index.html
         index_file = frontend_dist_dir / "index.html"
         if not index_file.exists():
             return PlainTextResponse(
                 "Frontend not built. Run 'cd frontend && npm run build'",
-                status_code=503
+                status_code=503,
             )
         return FileResponse(index_file)
 
@@ -857,7 +1137,9 @@ if UI_ENABLED:
     "--reload/--no-reload", default=True, help="Enable auto-reload on code changes"
 )
 @click.option(
-    "--enable-ui/--no-enable-ui", default=False, help="Enable web UI with authentication"
+    "--enable-ui/--no-enable-ui",
+    default=False,
+    help="Enable web UI with authentication",
 )
 def _start_api_cmd(host: str, port: int, reload: bool, enable_ui: bool):
     """Start the Services API server. This installs as _start_srv_api command."""
@@ -869,9 +1151,28 @@ def _start_api_cmd(host: str, port: int, reload: bool, enable_ui: bool):
     if enable_ui:
         click.echo(click.style("Web UI enabled", fg="cyan"))
         import os
+
         os.environ["TASKFLOWS_ENABLE_UI"] = "1"
+        if not UI_ENABLED:
+            import sys
+
+            args = [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "taskflows.admin.api:app",
+                "--host",
+                host,
+                "--port",
+                str(port),
+            ]
+            if reload:
+                args.append("--reload")
+            os.execv(sys.executable, args)
     # Also log to file so we can see something even if import path is wrong
-    logger.info(f"Launching uvicorn on {host}:{port} reload={reload} enable_ui={enable_ui}")
+    logger.info(
+        f"Launching uvicorn on {host}:{port} reload={reload} enable_ui={enable_ui}"
+    )
     uvicorn.run("taskflows.admin.api:app", host=host, port=port, reload=reload)
 
 

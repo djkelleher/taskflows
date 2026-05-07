@@ -1,10 +1,8 @@
 import gzip
 import os
-import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pandas as pd
 import pytest
 from taskflows.files.extensions import file_extensions_re
 from taskflows.files.utils import (
@@ -12,6 +10,7 @@ from taskflows.files.utils import (
     csvs_to_parquet,
     gzip_file,
     gzip_files,
+    pprint_bytes,
     with_parquet_extension,
 )
 
@@ -60,7 +59,7 @@ def test_gzip_files(temp_dir):
     for i in range(3):
         file_path = temp_dir / f"test{i}.csv"
         with open(file_path, "w") as f:
-            f.write(f"a,b,c\n{i},{i+1},{i+2}\n")
+            f.write(f"a,b,c\n{i},{i + 1},{i + 2}\n")
         files.append(file_path)
 
     # Mock the Pool to avoid actual multiprocessing
@@ -89,7 +88,7 @@ def test_gzip_files(temp_dir):
         # Check content
         with gzip.open(gzipped_file, "rt") as f:
             content = f.read()
-            assert content == f"a,b,c\n{i},{i+1},{i+2}\n"
+            assert content == f"a,b,c\n{i},{i + 1},{i + 2}\n"
 
 
 def test_with_parquet_extension():
@@ -109,6 +108,11 @@ def test_with_parquet_extension():
     result = with_parquet_extension(path)
     assert result == Path("dir/test.parquet")
 
+    # Preserve meaningful dotted stems while removing CSV/compression suffixes
+    path = Path("dir/orders.2024-01.csv.gz")
+    result = with_parquet_extension(path)
+    assert result == Path("dir/orders.2024-01.parquet")
+
 
 def test_csv_to_parquet(temp_dir, sample_csv_file):
     """Test csv_to_parquet function."""
@@ -126,13 +130,28 @@ def test_csv_to_parquet(temp_dir, sample_csv_file):
         def custom_save_path_generator(file_path):
             return file_path.with_name(f"{file_path.stem}_custom.parquet")
 
-        csv_to_parquet(
-            sample_csv_file, save_path_generator=custom_save_path_generator
-        )
+        csv_to_parquet(sample_csv_file, save_path_generator=custom_save_path_generator)
 
         expected_save_path = custom_save_path_generator(sample_csv_file)
         stmt = f"COPY (SELECT * FROM '{sample_csv_file}') TO '{expected_save_path}' (FORMAT PARQUET);"
         mock_duckdb.execute.assert_called_once_with(stmt)
+
+
+def test_csv_to_parquet_escapes_paths_with_quotes(temp_dir):
+    """Test generated DuckDB SQL remains valid for paths containing apostrophes."""
+    csv_file = temp_dir / "owner's-data.csv"
+    csv_file.write_text("a\n1\n")
+
+    with patch("taskflows.files.utils.duckdb") as mock_duckdb:
+        csv_to_parquet(csv_file)
+
+    expected_save_path = with_parquet_extension(csv_file)
+    escaped_csv = str(csv_file).replace("'", "''")
+    escaped_parquet = str(expected_save_path).replace("'", "''")
+    expected_stmt = (
+        f"COPY (SELECT * FROM '{escaped_csv}') TO '{escaped_parquet}' (FORMAT PARQUET);"
+    )
+    mock_duckdb.execute.assert_called_once_with(expected_stmt)
 
 
 def test_csvs_to_parquet(temp_dir):
@@ -142,12 +161,13 @@ def test_csvs_to_parquet(temp_dir):
     for i in range(3):
         file_path = temp_dir / f"test{i}.csv.gz"
         with gzip.open(file_path, "wt") as f:
-            f.write(f"a,b,c\n{i},{i+1},{i+2}\n")
+            f.write(f"a,b,c\n{i},{i + 1},{i + 2}\n")
         csv_files.append(file_path)
 
-    with patch("taskflows.files.utils.csv_to_parquet") as mock_csv_to_parquet, patch(
-        "taskflows.files.utils.os.remove"
-    ) as mock_remove:
+    with (
+        patch("taskflows.files.utils.csv_to_parquet") as mock_csv_to_parquet,
+        patch("taskflows.files.utils.os.remove") as mock_remove,
+    ):
         # Test with single file
         csvs_to_parquet([csv_files[0]])
         mock_csv_to_parquet.assert_called_once()
@@ -168,11 +188,12 @@ def test_csvs_to_parquet(temp_dir):
             assert mock_remove.call_count == 3
 
     # Test with directory input
-    with patch("taskflows.files.utils.csv_to_parquet") as mock_csv_to_parquet, patch(
-        "taskflows.files.utils.os.remove"
-    ) as mock_remove, patch("pathlib.Path.glob", return_value=csv_files), patch(
-        "taskflows.files.utils.ProcessPoolExecutor"
-    ) as mock_executor:
+    with (
+        patch("taskflows.files.utils.csv_to_parquet") as mock_csv_to_parquet,
+        patch("taskflows.files.utils.os.remove") as mock_remove,
+        patch("pathlib.Path.glob", return_value=csv_files),
+        patch("taskflows.files.utils.ProcessPoolExecutor") as mock_executor,
+    ):
         mock_executor_instance = MagicMock()
         mock_executor.return_value.__enter__.return_value = mock_executor_instance
         mock_executor_instance.map.return_value = ["result1", "result2", "result3"]
@@ -180,6 +201,95 @@ def test_csvs_to_parquet(temp_dir):
         csvs_to_parquet(temp_dir)
         # Should call csv_to_parquet via ProcessPoolExecutor
         mock_executor_instance.map.assert_called_once()
+
+
+def test_csvs_to_parquet_accepts_single_file_path(sample_csv_file):
+    """Test csvs_to_parquet accepts one Path, not only sequences or directories."""
+    with (
+        patch("taskflows.files.utils.csv_to_parquet") as mock_csv_to_parquet,
+        patch("taskflows.files.utils.os.remove") as mock_remove,
+    ):
+        csvs_to_parquet(sample_csv_file)
+
+    mock_csv_to_parquet.assert_called_once_with(
+        file=sample_csv_file,
+        save_path_generator=with_parquet_extension,
+    )
+    mock_remove.assert_called_once_with(sample_csv_file)
+
+
+def test_csvs_to_parquet_accepts_single_file_string(sample_csv_file):
+    """Test csvs_to_parquet accepts one string path, not a sequence of characters."""
+    with (
+        patch("taskflows.files.utils.csv_to_parquet") as mock_csv_to_parquet,
+        patch("taskflows.files.utils.os.remove") as mock_remove,
+    ):
+        csvs_to_parquet(str(sample_csv_file))
+
+    mock_csv_to_parquet.assert_called_once_with(
+        file=sample_csv_file,
+        save_path_generator=with_parquet_extension,
+    )
+    mock_remove.assert_called_once_with(sample_csv_file)
+
+
+def test_csvs_to_parquet_accepts_directory_string(temp_dir):
+    csv_file = temp_dir / "directory-input.csv.gz"
+    csv_file.touch()
+
+    with (
+        patch("taskflows.files.utils.csv_to_parquet") as mock_csv_to_parquet,
+        patch("taskflows.files.utils.os.remove") as mock_remove,
+    ):
+        csvs_to_parquet(str(temp_dir))
+
+    mock_csv_to_parquet.assert_called_once_with(
+        file=csv_file,
+        save_path_generator=with_parquet_extension,
+    )
+    mock_remove.assert_called_once_with(csv_file)
+
+
+def test_csvs_to_parquet_handles_unknown_cpu_count(temp_dir, monkeypatch):
+    """Test worker sizing does not fail when os.cpu_count() returns None."""
+    csv_files = []
+    for i in range(2):
+        file_path = temp_dir / f"unknown-cpu-{i}.csv.gz"
+        file_path.touch()
+        csv_files.append(file_path)
+
+    monkeypatch.setattr(os, "cpu_count", lambda: None)
+    with (
+        patch("taskflows.files.utils.csv_to_parquet"),
+        patch("taskflows.files.utils.os.remove"),
+        patch("taskflows.files.utils.ProcessPoolExecutor") as mock_executor,
+    ):
+        mock_executor_instance = MagicMock()
+        mock_executor.return_value.__enter__.return_value = mock_executor_instance
+        mock_executor_instance.map.return_value = []
+
+        csvs_to_parquet(csv_files)
+
+    assert mock_executor.call_args.kwargs["max_workers"] == 1
+
+
+def test_csvs_to_parquet_skips_cleanup_for_missing_files(temp_dir):
+    missing_file = temp_dir / "missing.csv"
+
+    with patch("taskflows.files.utils.os.remove") as mock_remove:
+        csvs_to_parquet(missing_file)
+
+    mock_remove.assert_not_called()
+
+
+def test_pprint_bytes_uses_binary_units_and_rejects_negative_values():
+    assert pprint_bytes(0) == "0 B"
+    assert pprint_bytes(1023) == "1023 B"
+    assert pprint_bytes(1024) == "1.000 KB"
+    assert pprint_bytes(1024**2) == "1.000 MB"
+
+    with pytest.raises(ValueError, match="non-negative"):
+        pprint_bytes(-1)
 
 
 def test_file_extensions_re():
@@ -190,9 +300,11 @@ def test_file_extensions_re():
     assert file_extensions_re.search("test.json")
     assert file_extensions_re.search("test.parquet")
     assert file_extensions_re.search("path/to/test.pdf")
+    assert file_extensions_re.search("path/to/source.c++")
 
     # Test with unknown extension
     assert not file_extensions_re.search("test.unknown")
+    assert not file_extensions_re.search("path/to/source.c+")
 
     # Test with no extension
     assert not file_extensions_re.search("test")

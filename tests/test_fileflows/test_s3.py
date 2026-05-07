@@ -1,9 +1,6 @@
-from io import BytesIO
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import boto3
-import pandas as pd
 import pytest
 from botocore.exceptions import ClientError
 from taskflows.files.s3 import S3, S3Cfg, create_duckdb_secret, is_s3_path
@@ -43,8 +40,18 @@ def test_s3_bucket_and_partition():
     assert bucket == "bucket"
     assert partition is None
 
+    bucket, partition = s3.bucket_and_partition("s3://bucket/", require_partition=False)
+    assert bucket == "bucket"
+    assert partition == ""
+
     # Test with invalid S3 path (should return None, None)
     bucket, partition = s3.bucket_and_partition("invalid-path", require_partition=False)
+    assert bucket is None
+    assert partition is None
+
+    bucket, partition = s3.bucket_and_partition(
+        "prefix s3://bucket/key", require_partition=False
+    )
     assert bucket is None
     assert partition is None
 
@@ -102,6 +109,22 @@ def test_upload():
     os.remove("test_file.txt")
 
 
+def test_upload_accepts_single_path_object(tmp_path):
+    """Test upload accepts a single pathlib.Path input."""
+    s3 = S3(S3Cfg(aws_access_key_id="test", aws_secret_access_key="test"))
+    file_path = tmp_path / "path-upload.txt"
+    file_path.write_text("content")
+
+    with patch.object(s3, "client") as mock_client:
+        s3.upload(file_path, "test-bucket")
+
+    mock_client.upload_file.assert_called_once_with(
+        str(file_path),
+        "test-bucket",
+        str(file_path),
+    )
+
+
 @mock_aws
 def test_read_file():
     """Test read_file method with moto."""
@@ -152,6 +175,62 @@ def test_download_file(temp_dir):
             "s3://test-bucket/test_file.txt", local_file, overwrite=False
         )
         assert result is False
+
+
+def test_download_file_does_not_sleep_after_final_failed_attempt(tmp_path):
+    s3 = S3(S3Cfg(aws_access_key_id="test", aws_secret_access_key="test"))
+
+    with patch.object(s3, "client") as mock_client:
+        mock_client.download_file.side_effect = RuntimeError("boom")
+        with patch("taskflows.files.s3.sleep") as mock_sleep:
+            result = s3.download_file(
+                "s3://test-bucket/test_file.txt",
+                tmp_path / "downloaded.txt",
+                max_retries=0,
+            )
+
+    assert result is False
+    mock_sleep.assert_not_called()
+
+
+def test_move_file_to_explicit_s3_file_uses_destination_key():
+    s3 = S3(S3Cfg(aws_access_key_id="test", aws_secret_access_key="test"))
+
+    with patch.object(s3, "list_files", return_value=["folder/source.txt"]):
+        with patch.object(s3, "exists", return_value=True):
+            with patch.object(s3, "client") as mock_client:
+                s3.move(
+                    "s3://source-bucket/folder/source.txt",
+                    "s3://dest-bucket/archive/renamed.txt",
+                    delete_src=False,
+                )
+
+    mock_client.copy_object.assert_called_once_with(
+        CopySource={"Bucket": "source-bucket", "Key": "folder/source.txt"},
+        Bucket="dest-bucket",
+        Key="archive/renamed.txt",
+    )
+    mock_client.delete_objects.assert_not_called()
+
+
+def test_move_file_to_bare_s3_bucket_uses_source_filename():
+    s3 = S3(S3Cfg(aws_access_key_id="test", aws_secret_access_key="test"))
+
+    with patch.object(s3, "list_files", return_value=["folder/source.txt"]):
+        with patch.object(s3, "exists", return_value=True):
+            with patch.object(s3, "client") as mock_client:
+                s3.move(
+                    "s3://source-bucket/folder/source.txt",
+                    "s3://dest-bucket",
+                    delete_src=False,
+                )
+
+    mock_client.copy_object.assert_called_once_with(
+        CopySource={"Bucket": "source-bucket", "Key": "folder/source.txt"},
+        Bucket="dest-bucket",
+        Key="source.txt",
+    )
+    mock_client.delete_objects.assert_not_called()
 
 
 def test_delete_file():
@@ -304,3 +383,17 @@ def test_list_files():
         # Test return_as='names'
         files = s3.list_files("s3://test-bucket/folder/", return_as="names")
         assert sorted(files) == ["file2.txt", "file3.csv"]
+
+
+def test_list_files_rejects_invalid_return_format():
+    s3 = S3(S3Cfg(aws_access_key_id="test", aws_secret_access_key="test"))
+
+    with pytest.raises(ValueError, match="return_as"):
+        s3.list_files("s3://test-bucket/folder/", return_as="invalid")
+
+
+def test_list_file_pages_rejects_invalid_return_format():
+    s3 = S3(S3Cfg(aws_access_key_id="test", aws_secret_access_key="test"))
+
+    with pytest.raises(ValueError, match="return_as"):
+        list(s3.list_file_pages("s3://test-bucket/folder/", return_as="invalid"))

@@ -1,5 +1,6 @@
 import importlib
 import importlib.util
+import inspect
 import pkgutil
 import pyclbr
 from functools import lru_cache
@@ -23,6 +24,8 @@ def import_module(name_or_path: Union[Path, str]) -> ModuleType:
         module_spec = importlib.util.spec_from_file_location(
             path.stem, str(name_or_path)
         )
+        if module_spec is None or module_spec.loader is None:
+            raise ImportError(f"Could not import module from path: {path}")
         module = importlib.util.module_from_spec(module_spec)
         module_spec.loader.exec_module(module)
         return module
@@ -49,7 +52,7 @@ def import_module_attr(module_name_or_path: Union[Path, str], attr_name: str) ->
 
 
 def find_modules(
-    package: Union[ModuleType, str],
+    package: Union[ModuleType, Path, str],
     search_subpackages: bool = True,
     names_only: bool = False,
 ) -> Union[List[str], List[ModuleType]]:
@@ -63,12 +66,14 @@ def find_modules(
     Returns:
         Union[List[str], List[ModuleType]]: The discovered modules or module names.
     """
-    if isinstance(package, str):
+    if not isinstance(package, ModuleType):
         # import the package.
         package = import_module(package)
     if package.__package__ != package.__name__:
         # `package` is a module, not a package.
-        return [package] if not names_only else [package.__name__]
+        if names_only:
+            return [package.__name__]
+        return [package]
     # search for module names.
     searcher = pkgutil.walk_packages if search_subpackages else pkgutil.iter_modules
     module_names = [
@@ -83,8 +88,8 @@ def find_modules(
 
 
 def find_subclasses(
-    base_class: Union[ModuleType, str],
-    search_in: Union[ModuleType, str],
+    base_class: Union[Type, str],
+    search_in: Union[ModuleType, Path, str],
     search_subpackages: bool = True,
     names_only: bool = False,
 ) -> Union[List[str], List[Type]]:
@@ -99,32 +104,33 @@ def find_subclasses(
     Returns:
         Union[List[str], List[Type]]: The discovered subclasses or class names.
     """
-    subclasses = []
-    for module in find_modules(search_in, search_subpackages, names_only):
+    subclasses: list[Any] = []
+    base_class_name = base_class if isinstance(base_class, str) else base_class.__name__
+    if (
+        names_only
+        and not isinstance(search_in, ModuleType)
+        and (module_path := Path(search_in)).suffix == ".py"
+    ):
+        module_classes = pyclbr.readmodule(
+            module_path.stem,
+            path=[str(module_path.parent)],
+        )
+        return _extract_static_subclass_names(module_classes, base_class_name)
+
+    static_names = names_only and not isinstance(search_in, ModuleType)
+    for module in find_modules(search_in, search_subpackages, static_names):
         if isinstance(module, str):
             if names_only:
-                # check if module_name is a path to a Python file.
-                if (module_path := Path(module)).is_file():
-                    # read python file path
-                    module_classes = pyclbr.readmodule(
-                        module_path.stem, path=module_path.parent
-                    )
-                else:
-                    # read installed module path.
-                    module_classes = pyclbr.readmodule(module)
-                base_class = (
-                    base_class if isinstance(base_class, str) else base_class.__name__
+                module_classes = pyclbr.readmodule(module)
+                subclasses += _extract_static_subclass_names(
+                    module_classes,
+                    base_class_name,
                 )
-                subclasses += [
-                    cls_name
-                    for cls_name, cls_obj in module_classes.items()
-                    if any(getattr(s, "name", s) == base_class for s in cls_obj.super)
-                ]
                 continue
             module = import_module(module)
         # parse the imported module.
         subclasses += _extract_subclasses_from_module(module, base_class, names_only)
-    return subclasses
+    return _dedupe_discovered(subclasses, names_only=names_only)
 
 
 def find_instances(
@@ -153,7 +159,20 @@ def find_instances(
     return list({id(i): i for i in instances}.values())
 
 
-def _extract_subclasses_from_module(module: ModuleType, base_class: Union[Type, str], names_only: bool) -> List[Union[str, Type]]:
+def _is_subclass_of(obj: Any, base_class: Union[Type, str]) -> bool:
+    """Return True when obj is a non-base subclass of base_class."""
+    if not inspect.isclass(obj):
+        return False
+    if isinstance(base_class, str):
+        return obj.__name__ != base_class and base_class in [
+            cls.__name__ for cls in obj.__mro__[1:]
+        ]
+    return obj is not base_class and issubclass(obj, base_class)
+
+
+def _extract_subclasses_from_module(
+    module: ModuleType, base_class: Union[Type, str], names_only: bool
+) -> List[Union[str, Type]]:
     """Extract subclasses of base_class from a module.
 
     Args:
@@ -164,10 +183,51 @@ def _extract_subclasses_from_module(module: ModuleType, base_class: Union[Type, 
     Returns:
         List of subclass names or objects
     """
-    base_class_name = base_class if isinstance(base_class, str) else base_class.__name__
     subclass_objects = [
-        obj
-        for obj in module.__dict__.values()
-        if base_class_name in [c.__name__ for c in getattr(obj, "__bases__", [])]
+        obj for obj in module.__dict__.values() if _is_subclass_of(obj, base_class)
     ]
     return [c.__name__ for c in subclass_objects] if names_only else subclass_objects
+
+
+def _extract_static_subclass_names(
+    module_classes: dict[str, pyclbr.Class],
+    base_class_name: str,
+) -> list[str]:
+    """Extract subclass names from pyclbr metadata, including indirect subclasses."""
+
+    def inherits_from(class_name: str, seen: set[str] | None = None) -> bool:
+        seen = seen or set()
+        if class_name in seen:
+            return False
+        seen.add(class_name)
+
+        class_info = module_classes.get(class_name)
+        if class_info is None:
+            return False
+
+        for parent in class_info.super or []:
+            parent_name = getattr(parent, "name", parent)
+            if parent_name == base_class_name:
+                return True
+            if isinstance(parent_name, str) and inherits_from(parent_name, seen):
+                return True
+        return False
+
+    return [
+        class_name
+        for class_name in module_classes
+        if class_name != base_class_name and inherits_from(class_name)
+    ]
+
+
+def _dedupe_discovered(discovered: list[Any], names_only: bool) -> list[Any]:
+    """Deduplicate discovered classes or names while preserving discovery order."""
+    seen = set()
+    deduped = []
+    for item in discovered:
+        key = item if names_only else id(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped

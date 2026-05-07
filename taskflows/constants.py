@@ -64,4 +64,14 @@ class Metrics:
     API_REQUEST_DURATION: Final[str] = "api_request_duration_seconds"
 
     # Histogram buckets (seconds)
-    DURATION_BUCKETS: Final[tuple] = (0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0)
+    DURATION_BUCKETS: Final[tuple] = (
+        0.1,
+        0.5,
+        1.0,
+        5.0,
+        10.0,
+        30.0,
+        60.0,
+        300.0,
+        600.0,
+    )

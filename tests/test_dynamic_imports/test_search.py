@@ -1,3 +1,6 @@
+from pathlib import Path
+from types import ModuleType
+
 import pytest
 
 from taskflows import dynamic_imports as search
@@ -8,7 +11,16 @@ from tests.test_dynamic_imports.pkg1.pkg2 import mod2
 
 @pytest.mark.parametrize(
     "search_subpackages,result",
-    [(True, ["tests.test_dynamic_imports.pkg1.mod1", "tests.test_dynamic_imports.pkg1.pkg2.mod2"]), (False, ["tests.test_dynamic_imports.pkg1.mod1"])],
+    [
+        (
+            True,
+            [
+                "tests.test_dynamic_imports.pkg1.mod1",
+                "tests.test_dynamic_imports.pkg1.pkg2.mod2",
+            ],
+        ),
+        (False, ["tests.test_dynamic_imports.pkg1.mod1"]),
+    ],
 )
 def test_module_search(search_subpackages, result):
     module_names = [
@@ -58,3 +70,62 @@ def test_pkg_find_instances(package, search_subpackages):
         search_subpackages=search_subpackages,
     )
     assert find_instances == [find_instances1]
+
+
+def test_find_subclasses_includes_indirect_runtime_subclasses():
+    module = ModuleType("runtime_module")
+
+    class RuntimeBase: ...
+
+    class RuntimeChild(RuntimeBase): ...
+
+    class RuntimeGrandchild(RuntimeChild): ...
+
+    module.RuntimeBase = RuntimeBase
+    module.RuntimeChild = RuntimeChild
+    module.RuntimeGrandchild = RuntimeGrandchild
+
+    assert search.find_subclasses(RuntimeBase, module, names_only=True) == [
+        "RuntimeChild",
+        "RuntimeGrandchild",
+    ]
+
+
+@pytest.mark.parametrize("names_only", [False, True])
+def test_find_subclasses_deduplicates_aliases(names_only):
+    module = ModuleType("runtime_module")
+
+    class RuntimeBase: ...
+
+    class RuntimeChild(RuntimeBase): ...
+
+    module.RuntimeBase = RuntimeBase
+    module.RuntimeChild = RuntimeChild
+    module.RuntimeChildAlias = RuntimeChild
+
+    result = search.find_subclasses(RuntimeBase, module, names_only=names_only)
+
+    if names_only:
+        assert result == ["RuntimeChild"]
+    else:
+        assert result == [RuntimeChild]
+
+
+def test_find_subclasses_from_file_path_names_only():
+    module_path = Path(__file__).parent / "pkg1" / "mod1.py"
+
+    assert search.find_subclasses("Base", module_path, names_only=True) == [
+        "ClassImpl1"
+    ]
+
+
+def test_find_subclasses_static_includes_indirect_subclasses(tmp_path):
+    module_path = tmp_path / "static_inheritance.py"
+    module_path.write_text(
+        "class Base: ...\nclass Child(Base): ...\nclass Grandchild(Child): ...\n"
+    )
+
+    assert search.find_subclasses("Base", module_path, names_only=True) == [
+        "Child",
+        "Grandchild",
+    ]

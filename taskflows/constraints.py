@@ -1,12 +1,22 @@
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Set
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+_NUMBERED_DIRECTIVE_RE = re.compile(r"^(?P<name>.+)_\d+$")
+
+
+def systemd_directive_name(key: str) -> str:
+    """Return the systemd directive name for internally numbered keys."""
+    match = _NUMBERED_DIRECTIVE_RE.match(key)
+    return match.group("name") if match else key
 
 
 # TODO handle: Failing conditions or asserts will not result in the unit being moved into the "failed" state.
 class HardwareConstraint(BaseModel):
-    amount: int
+    amount: int = Field(ge=0)
     constraint: Literal["<", "<=", "=", "!=", ">=", ">"] = ">="
     # abort without an error message
     silent: bool = False
@@ -35,7 +45,7 @@ class SystemLoadConstraint(BaseModel):
     The pressure will be measured as an average over the last `timespan` minutes before the attempt to start the unit is performed.
     """
 
-    max_percent: int
+    max_percent: int = Field(ge=0, le=100)
     timespan: Literal["10sec", "1min", "5min"] = "5min"
     # abort without an error message
     silent: bool = False
@@ -55,7 +65,6 @@ class CPUPressure(SystemLoadConstraint): ...
 
 
 class IOPressure(SystemLoadConstraint): ...
-
 
 
 @dataclass
@@ -109,6 +118,62 @@ class CgroupConfig:
     group: Optional[str] = None  # run as group
     working_dir: Optional[str] = None  # working directory
 
+    def __post_init__(self) -> None:
+        self._validate_positive(
+            "cpu_period",
+            "cpu_shares",
+            "cpu_weight",
+            "memory_limit",
+            "memory_high",
+            "memory_reservation",
+            "memory_low",
+            "memory_min",
+            "memory_swap_limit",
+            "memory_swap_max",
+            "pids_limit",
+            "nofile_limit",
+            "timeout_start",
+            "timeout_stop",
+        )
+        self._validate_non_negative("cpu_quota")
+        self._validate_range("cpu_weight", 1, 10000)
+        self._validate_range("memory_swappiness", 0, 100)
+        self._validate_range("blkio_weight", 10, 1000)
+        self._validate_range("io_weight", 1, 10000)
+        self._validate_range("oom_score_adj", -1000, 1000)
+        self._validate_positive_mapping(
+            "device_read_bps",
+            "device_write_bps",
+            "device_read_iops",
+            "device_write_iops",
+        )
+
+    def _validate_positive(self, *names: str) -> None:
+        for name in names:
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive")
+
+    def _validate_non_negative(self, *names: str) -> None:
+        for name in names:
+            value = getattr(self, name)
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must be non-negative")
+
+    def _validate_range(self, name: str, minimum: int, maximum: int) -> None:
+        value = getattr(self, name)
+        if value is not None and not minimum <= value <= maximum:
+            raise ValueError(f"{name} must be between {minimum} and {maximum}")
+
+    def _validate_positive_mapping(self, *names: str) -> None:
+        for name in names:
+            values = getattr(self, name)
+            if not values:
+                continue
+            for key, value in values.items():
+                if value <= 0:
+                    raise ValueError(f"{name}[{key!r}] must be positive")
+
     def to_docker_cli_args(self) -> List[str]:
         """Convert to Docker CLI arguments."""
         args = []
@@ -118,7 +183,7 @@ class CgroupConfig:
             args.extend(["--cpu-quota", str(self.cpu_quota)])
         if self.cpu_period:
             args.extend(["--cpu-period", str(self.cpu_period)])
-            
+
         # CPU weight: prefer cpu_shares, fallback to converted cpu_weight
         if self.cpu_shares:
             args.extend(["--cpu-shares", str(self.cpu_shares)])
@@ -126,7 +191,7 @@ class CgroupConfig:
             # Convert systemd weight (1-10000) to Docker shares (~1024 default)
             docker_shares = int((self.cpu_weight / 100) * 1024)
             args.extend(["--cpu-shares", str(docker_shares)])
-            
+
         if self.cpuset_cpus:
             args.extend(["--cpuset-cpus", self.cpuset_cpus])
 
@@ -134,15 +199,15 @@ class CgroupConfig:
         effective_memory = self._calculate_effective_memory_limit()
         if effective_memory:
             args.extend(["--memory", str(effective_memory)])
-            
+
         effective_swap = self._calculate_effective_swap_limit()
         if effective_swap:
             args.extend(["--memory-swap", str(effective_swap)])
-            
+
         effective_reservation = self._calculate_effective_memory_reservation()
         if effective_reservation:
             args.extend(["--memory-reservation", str(effective_reservation)])
-            
+
         if self.memory_swappiness is not None:
             args.extend(["--memory-swappiness", str(self.memory_swappiness)])
 
@@ -154,7 +219,7 @@ class CgroupConfig:
             # Convert systemd IOWeight (1-10000) to Docker blkio-weight (10-1000)
             docker_blkio = max(10, min(1000, int(self.io_weight / 10)))
             args.extend(["--blkio-weight", str(docker_blkio)])
-            
+
         # Device bandwidth limits (direct mapping)
         if self.device_read_bps:
             for dev, bps in self.device_read_bps.items():
@@ -209,13 +274,13 @@ class CgroupConfig:
             args.extend(["--stop-timeout", str(self.timeout_stop)])
 
         return args
-    
+
     def _calculate_effective_memory_limit(self) -> Optional[int]:
         """Calculate the most appropriate memory limit for Docker from systemd memory parameters."""
         # Priority: memory_limit > memory_max > memory_high > memory_min
         if self.memory_limit:
             return self.memory_limit
-        
+
         # For systemd-only configs, use the highest available limit
         candidates = []
         if self.memory_high:
@@ -223,9 +288,9 @@ class CgroupConfig:
         if self.memory_min:
             # Use min as a baseline, but prefer higher limits
             candidates.append(self.memory_min)
-            
+
         return max(candidates) if candidates else None
-    
+
     def _calculate_effective_memory_reservation(self) -> Optional[int]:
         """Calculate the most appropriate memory reservation for Docker from systemd parameters."""
         # Priority: memory_reservation > memory_high > memory_low
@@ -236,34 +301,34 @@ class CgroupConfig:
         if self.memory_low:
             return self.memory_low
         return None
-    
+
     def _calculate_effective_swap_limit(self) -> Optional[int]:
         """Calculate Docker memory_swap_limit from systemd parameters."""
         if self.memory_swap_limit:
             return self.memory_swap_limit
-            
+
         # systemd: memory_swap_max is swap allowance only
         # Docker: memory_swap_limit is total memory + swap
         if self.memory_swap_max:
             base_memory = self._calculate_effective_memory_limit()
             if base_memory:
                 return base_memory + self.memory_swap_max
-                
+
         return None
-    
+
     def _parse_device_bandwidth_limits(self) -> Dict[str, Dict[str, int]]:
         """Parse systemd IOReadBandwidthMax/IOWriteBandwidthMax format."""
         # This would be used if we had systemd directives to parse
         # For now, return empty dict as we're generating, not parsing
         return {}
-    
+
     def _calculate_capability_lists(self) -> tuple[List[str], List[str]]:
         """Calculate cap_add/cap_drop lists from current capabilities."""
         cap_add = list(self.cap_add) if self.cap_add else []
         cap_drop = list(self.cap_drop) if self.cap_drop else []
-        
+
         return cap_add, cap_drop
-    
+
     def to_systemd_directives(self) -> Dict[str, str]:
         """Convert to systemd service directives."""
         directives = {}
@@ -278,7 +343,7 @@ class CgroupConfig:
         if self.cpu_quota and self.cpu_period:
             # Convert to percentage (systemd uses percentage, Docker uses microseconds)
             cpu_percent = (self.cpu_quota / self.cpu_period) * 100
-            directives["CPUQuota"] = f"{cpu_percent:.0f}%"
+            directives["CPUQuota"] = f"{cpu_percent:.3f}%"
         if self.cpu_weight:
             directives["CPUWeight"] = str(self.cpu_weight)
         elif self.cpu_shares:
@@ -291,13 +356,13 @@ class CgroupConfig:
         # Memory configuration - intelligent mapping
         if self.memory_limit:
             directives["MemoryMax"] = str(self.memory_limit)
-            
+
         # Memory high: prefer memory_high, fallback to reservation
         if self.memory_high:
             directives["MemoryHigh"] = str(self.memory_high)
         elif self.memory_reservation:
             directives["MemoryHigh"] = str(self.memory_reservation)
-            
+
         # systemd-specific memory controls
         if self.memory_low:
             directives["MemoryLow"] = str(self.memory_low)
@@ -305,10 +370,10 @@ class CgroupConfig:
             # Derive MemoryLow as 75% of reservation for better memory management
             derived_low = int(self.memory_reservation * 0.75)
             directives["MemoryLow"] = str(derived_low)
-            
+
         if self.memory_min:
             directives["MemoryMin"] = str(self.memory_min)
-            
+
         # Swap handling: prefer memory_swap_max, fallback to calculated from Docker limits
         if self.memory_swap_max:
             directives["MemorySwapMax"] = str(self.memory_swap_max)
@@ -317,13 +382,15 @@ class CgroupConfig:
             swap_allowance = self.memory_swap_limit - self.memory_limit
             if swap_allowance > 0:
                 directives["MemorySwapMax"] = str(swap_allowance)
+        elif self.memory_swappiness:
+            directives["MemorySwapMax"] = "infinity"
 
         # I/O configuration (cgroup v2 preferred)
         if self.io_weight:
             directives["IOWeight"] = str(self.io_weight)
         elif self.blkio_weight:
             # Convert Docker blkio-weight (10-1000) to systemd IOWeight (1-10000)
-            io_weight = max(1, min(10000, int((self.blkio_weight / 1000) * 10000)))
+            io_weight = max(1, min(10000, self.blkio_weight * 10))
             directives["IOWeight"] = str(io_weight)
 
         # Device bandwidth limits - enhanced mapping
@@ -396,20 +463,24 @@ class CgroupConfig:
         # Device restrictions
         if self.devices:
             # Convert Docker device format to systemd DeviceAllow
-            for device in self.devices:
+            for index, device in enumerate(self.devices):
+                dev_path = device
+                permissions = "rwm"
                 if ":" in device:
                     # Format: /dev/device:rwm or /dev/device:/container/path:rwm
                     parts = device.split(":")
                     dev_path = parts[0]
                     permissions = parts[-1] if len(parts) >= 2 else "rwm"
-                    directives["DeviceAllow"] = f"{dev_path} {permissions}"
+                directives[f"DeviceAllow_{index}"] = f"{dev_path} {permissions}"
 
         # Environment and execution
         if self.environment:
-            env_vars = []
-            for key, value in self.environment.items():
-                env_vars.append(f"{key}={value}")
-            directives["Environment"] = " ".join(env_vars)
+            from taskflows.security_validation import format_systemd_environment
+
+            for index, (key, value) in enumerate(self.environment.items()):
+                directives[f"Environment_{index}"] = format_systemd_environment(
+                    key, value
+                )
         if self.user:
             directives["User"] = self.user
         if self.group:

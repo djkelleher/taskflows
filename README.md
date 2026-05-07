@@ -1401,6 +1401,12 @@ await send_slack_message(
 
 ## Development
 
+Install the development environment:
+
+```bash
+uv sync --dev
+```
+
 ### DBus Documentation
 
 - [systemd DBus API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html)
@@ -1409,7 +1415,7 @@ await send_slack_message(
 ### Testing
 
 ```bash
-pytest tests/
+uv run pytest tests/
 ```
 
 ## License

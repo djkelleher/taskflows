@@ -1,6 +1,7 @@
 import json
 import uuid
 from typing import List, Literal, Optional
+from urllib.parse import urljoin
 
 import requests
 from grafanalib._gen import DashboardEncoder
@@ -9,8 +10,15 @@ from grafanalib.core import Dashboard as GLDashboard
 from grafanalib.core import Graph, GridPos, Logs, Templating, Time, TimePicker
 from pydantic import BaseModel
 
-from .common import config, logger, sort_service_names
+from .common import config, logger, logql_string as _logql_string, sort_service_names
 from .service import Service
+
+
+def _grafana_base_url() -> str:
+    base = config.grafana.rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        base = f"http://{base}"
+    return base + "/"
 
 
 class LogsPanelConfig(BaseModel):
@@ -26,15 +34,7 @@ class LogsPanelConfig(BaseModel):
 
     @property
     def height_no(self) -> int:
-        if self.height == "sm":
-            return 5
-        if self.height == "md":
-            return 10
-        if self.height == "lg":
-            return 15
-        if self.height == "xl":
-            return 20
-        raise ValueError(f"Invalid height: {self.height}")
+        return {"sm": 5, "md": 10, "lg": 15, "xl": 20}[self.height]
 
 
 class LogsTextSearch(LogsPanelConfig):
@@ -102,9 +102,10 @@ class Dashboard:
 
         # Check if dashboard already exists and get its version
         search_resp = requests.get(
-            f"http://{config.grafana}/api/search",
+            urljoin(_grafana_base_url(), "api/search"),
             params={"query": self.title},
             headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=10,
         )
 
         existing_version = None
@@ -114,8 +115,9 @@ class Dashboard:
                 if db.get("title") == self.title:
                     # Get the existing dashboard to find its version
                     existing_resp = requests.get(
-                        f"http://{config.grafana}/api/dashboards/uid/{db['uid']}",
+                        urljoin(_grafana_base_url(), f"api/dashboards/uid/{db['uid']}"),
                         headers={"Authorization": f"Bearer {self._api_key}"},
+                        timeout=10,
                     )
                     if existing_resp.status_code == 200:
                         existing_version = existing_resp.json()["dashboard"]["version"]
@@ -133,7 +135,7 @@ class Dashboard:
             dashboard_data["overwrite"] = True
 
         resp = requests.post(
-            f"http://{config.grafana}/api/dashboards/db",
+            urljoin(_grafana_base_url(), "api/dashboards/db"),
             data=json.dumps(dashboard_data, cls=DashboardEncoder, indent=2).encode(
                 "utf-8"
             ),
@@ -141,6 +143,7 @@ class Dashboard:
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
             },
+            timeout=10,
         )
         if resp.status_code == 200:
             logger.info(f"{self.title} dashboard created/updated successfully")
@@ -158,8 +161,9 @@ class Dashboard:
     def _get_loki_datasource_uid(self):
         """Get the UID of the Loki datasource from Grafana"""
         resp = requests.get(
-            f"http://{config.grafana}/api/datasources",
+            urljoin(_grafana_base_url(), "api/datasources"),
             headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=10,
         )
         if resp.status_code == 401:
             logger.error(
@@ -167,7 +171,7 @@ class Dashboard:
                 "Please create a new API key and update TASKFLOWS_GRAFANA_API_KEY"
             )
             return None
-        elif resp.status_code != 200:
+        if resp.status_code != 200:
             logger.error(
                 f"Failed to get datasources from Grafana: {resp.status_code} - {resp.text}"
             )
@@ -183,9 +187,9 @@ class Dashboard:
             "Loki datasource not found in Grafana. "
             "Make sure the datasource is provisioned or create it manually in Grafana."
         )
+        return None
 
     def _create_gl_dashboard(self, loki_uid: str) -> GLDashboard:
-
         gl_panels = []
         y_pos = 0
 
@@ -198,25 +202,20 @@ class Dashboard:
             max_height = 0
 
             for panel in panels_row:
-                if panel.width_fr is None:
-                    panel.width_fr = default_width_fr
+                width_fr = (
+                    default_width_fr if panel.width_fr is None else panel.width_fr
+                )
 
                 # Build the base query for simplified log setup
-                expr = '{service_name="' + panel.service.name + '"}'
+                expr = f"{{service_name={_logql_string(panel.service.name)}}}"
 
                 title = panel.service.name
 
                 if isinstance(panel, (LogsCountPlot, LogsTextSearch)):
                     title = panel.title
-                    expr += f' |= "{panel.text}"'
+                    expr += f" |= {_logql_string(panel.text)}"
 
-                # All logs now use the same simplified format with proper Unicode characters
-                # With Drop_Single_Key On, the log line is just the MESSAGE content
-                # Add service name as prefix (timestamps are shown by Grafana UI)
-                # expr += ' | line_format "[{{.service_name}}] {{__line__}}"'
-                # expr += ' | line_format "[{{.service_name}}] {{.MESSAGE}}"'
-
-                width = int(panel.width_fr * 24)
+                width = int(width_fr * 24)
 
                 if isinstance(panel, LogsCountPlot):
                     # Create a proper grafanalib Graph panel

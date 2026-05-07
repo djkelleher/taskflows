@@ -7,6 +7,8 @@ export interface LoginResponse {
   access_token: string;
   refresh_token: string;
   expires_in: number;
+  csrf_token?: string;
+  csrf_expires_in?: number;
 }
 
 export interface RefreshRequest {
@@ -15,4 +17,6 @@ export interface RefreshRequest {
 
 export interface RefreshResponse {
   access_token: string;
+  csrf_token?: string;
+  csrf_expires_in?: number;
 }

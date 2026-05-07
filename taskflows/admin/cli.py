@@ -1,21 +1,27 @@
 import asyncio
 import os
 
+# ruff: noqa: E402
 # Configure CLI logging: disable by default, enable only in DEBUG mode
 # This MUST be set before any taskflows imports that use the logger
-_log_level = (os.environ.get('TASKFLOWS_LOG_LEVEL') or
-              os.environ.get('taskflows_log_level') or
-              os.environ.get('LOGGERS_LOG_LEVEL') or
-              os.environ.get('loggers_log_level') or '').upper()
+_log_level = (
+    os.environ.get("TASKFLOWS_LOG_LEVEL")
+    or os.environ.get("taskflows_log_level")
+    or os.environ.get("LOGGERS_LOG_LEVEL")
+    or os.environ.get("loggers_log_level")
+    or ""
+).upper()
 
-if _log_level == 'DEBUG':
+if _log_level == "DEBUG":
     # In DEBUG mode, enable terminal and file logging for troubleshooting
-    os.environ['TASKFLOWS_NO_TERMINAL'] = '0'
-    os.environ['TASKFLOWS_FILE_DIR'] = '/opt/taskflows/data/logs'
+    os.environ["TASKFLOWS_NO_TERMINAL"] = "0"
+    os.environ["TASKFLOWS_FILE_DIR"] = "/opt/taskflows/data/logs"
 else:
     # In non-DEBUG mode, disable all logging to keep CLI output clean
-    os.environ['TASKFLOWS_NO_TERMINAL'] = '1'
-    os.environ['TASKFLOWS_FILE_DIR'] = ''  # Empty string prevents default and disables file logging
+    os.environ["TASKFLOWS_NO_TERMINAL"] = "1"
+    os.environ["TASKFLOWS_FILE_DIR"] = (
+        ""  # Empty string prevents default and disables file logging
+    )
 
 from functools import lru_cache
 from itertools import cycle
@@ -47,31 +53,46 @@ def get_console_with_wrap() -> Console:
     return Console(soft_wrap=True)
 
 
+def _print_results(results: dict, console: Optional[Console] = None) -> None:
+    """Print command results to the console.
+
+    Tables render with their built-in layout; other components are prefixed
+    with the hostname so multi-server output stays readable.
+    """
+    for hostname, result in results.items():
+        if isinstance(result, Table):
+            result.console(console)
+        else:
+            if console:
+                console.print(f"[bold]{hostname}:[/bold]")
+            else:
+                click.echo(f"{hostname}:")
+            result.console(console)
+
+
 @cli.group
 def api():
     """Manage API service."""
-    pass
 
 
 @api.command
-def start():
+def api_start():
     start_api_srv()
 
 
 @api.command
-def restart():
+def api_restart():
     asyncio.run(srv_api.restart())
 
 
 @api.command
-def stop():
+def api_stop():
     asyncio.run(srv_api.stop())
 
 
 @api.group("security")
 def security():
     """Manage API security settings."""
-    pass
 
 
 @security.command("setup")
@@ -81,14 +102,15 @@ def setup_security(regenerate_secret):
     security_config.enable_hmac = True
     if regenerate_secret or not security_config.hmac_secret:
         security_config.hmac_secret = generate_hmac_secret()
-        click.echo(f"✅ HMAC authentication enabled")
-        click.echo(f"🔐 Generated HMAC secret: {security_config.hmac_secret}")
+        click.echo("✅ HMAC authentication enabled")
+        click.echo("🔐 Generated HMAC secret and saved it to the security config")
         click.echo(
-            f"   Use headers: {security_config.hmac_header} and {security_config.hmac_timestamp_header}"
+            f"   Use headers: {security_config.hmac_header}, "
+            f"{security_config.hmac_timestamp_header}, and {security_config.hmac_nonce_header}"
         )
     else:
-        click.echo(f"✅ HMAC authentication already enabled")
-        click.echo(f"🔐 Current HMAC secret: {security_config.hmac_secret}")
+        click.echo("✅ HMAC authentication already enabled")
+        click.echo(f"🔐 Current HMAC secret: {security_config.hmac_secret[:8]}...")
 
     save_security_config(security_config)
     click.echo(f"💾 Security configuration saved to {config_file}")
@@ -108,7 +130,7 @@ def set_secret(secret: str):
     """Set a specific HMAC secret (for distributing to multiple machines)."""
     security_config.hmac_secret = secret
     save_security_config(security_config)
-    click.echo(f"🔐 HMAC secret set")
+    click.echo("🔐 HMAC secret set")
 
 
 @security.command("status")
@@ -119,7 +141,7 @@ def security_status():
         f"  HMAC: {'✅ Enabled' if security_config.enable_hmac else '❌ Disabled'}"
     )
     if security_config.enable_hmac and security_config.hmac_secret:
-        click.echo(f"    Secret configured: ✅")
+        click.echo("    Secret configured: ✅")
         click.echo(
             f"    Secret: {security_config.hmac_secret[:8]}..."
             if security_config.hmac_secret
@@ -128,6 +150,7 @@ def security_status():
         click.echo(f"    Window: {security_config.hmac_window_seconds} seconds")
         click.echo(f"    Header: {security_config.hmac_header}")
         click.echo(f"    Timestamp Header: {security_config.hmac_timestamp_header}")
+        click.echo(f"    Nonce Header: {security_config.hmac_nonce_header}")
     click.echo(
         f"  CORS: {'✅ Enabled' if security_config.enable_cors else '❌ Disabled'}"
     )
@@ -141,7 +164,13 @@ def security_status():
 
 @api.command("setup-ui")
 @click.option("--username", default="admin", help="Admin username")
-@click.option("--password", prompt=True, hide_input=True, confirmation_prompt=True, help="Admin password")
+@click.option(
+    "--password",
+    prompt=True,
+    hide_input=True,
+    confirmation_prompt=True,
+    help="Admin password",
+)
 def setup_ui(username: str, password: str):
     """Setup web UI with admin credentials.
 
@@ -160,7 +189,7 @@ def setup_ui(username: str, password: str):
     ui_config = load_ui_config()
     if not ui_config.jwt_secret:
         ui_config.jwt_secret = generate_jwt_secret()
-        click.echo(f"Generated JWT secret")
+        click.echo("Generated JWT secret")
 
     ui_config.enabled = True
 
@@ -170,10 +199,10 @@ def setup_ui(username: str, password: str):
     # Create admin user
     create_admin_user(username, password)
 
-    click.echo(f"Web UI configured successfully!")
+    click.echo("Web UI configured successfully!")
     click.echo(f"   Username: {username}")
-    click.echo(f"Restart the API server to enable the UI:")
-    click.echo(f"   tf api restart")
+    click.echo("Restart the API server to enable the UI:")
+    click.echo("   tf api restart")
 
 
 @api.command("generate-secret")
@@ -220,13 +249,7 @@ async def history(limit: int, match: Optional[str] = None, server: tuple = ()):
         kwargs["match"] = match
 
     results = await execute_command_on_servers("history", servers=server, **kwargs)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command(name="list")
@@ -245,13 +268,7 @@ async def list_services(match: Optional[str] = None, server: tuple = ()):
         kwargs["match"] = match
 
     results = await execute_command_on_servers("list", servers=server, **kwargs)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command
@@ -281,7 +298,10 @@ async def list_services(match: Optional[str] = None, server: tuple = ()):
 )
 @async_entrypoint(blocking=True)
 async def status(
-    match: Optional[str] = None, running: bool = False, show_all: bool = False, server: tuple = ()
+    match: Optional[str] = None,
+    running: bool = False,
+    show_all: bool = False,
+    server: tuple = (),
 ):
     """Show status of services from specified servers."""
     kwargs = {}
@@ -293,14 +313,7 @@ async def status(
         kwargs["all"] = show_all
 
     results = await execute_command_on_servers("status", servers=server, **kwargs)
-    console = get_console_with_wrap()
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console(console)
-        else:
-            console.print(f"[bold]{hostname}:[/bold]")
-            result.console(console)
+    _print_results(results, console=get_console_with_wrap())
 
 
 @cli.command
@@ -322,13 +335,7 @@ async def logs(service_name: str, n_lines: int, server: Optional[str] = None):
     results = await execute_command_on_servers(
         "logs", servers=server, service_name=service_name, n_lines=n_lines
     )
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command(name="create")
@@ -380,13 +387,7 @@ async def cli_create(search_in, include, exclude, server: tuple = ()):
         kwargs["exclude"] = exclude
 
     results = await execute_command_on_servers("create", servers=server, **kwargs)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command
@@ -417,13 +418,7 @@ async def start(
         kwargs["services"] = services
 
     results = await execute_command_on_servers("start", servers=server, **kwargs)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command
@@ -454,13 +449,7 @@ async def stop(
         kwargs["services"] = services
 
     results = await execute_command_on_servers("stop", servers=server, **kwargs)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command
@@ -474,13 +463,7 @@ async def stop(
 async def restart(match: str, server: Optional[str] = None):
     """Restart services on specified server."""
     results = await execute_command_on_servers("restart", servers=server, match=match)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command
@@ -511,13 +494,7 @@ async def enable(
         kwargs["services"] = services
 
     results = await execute_command_on_servers("enable", servers=server, **kwargs)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command
@@ -548,13 +525,7 @@ async def disable(
         kwargs["services"] = services
 
     results = await execute_command_on_servers("disable", servers=server, **kwargs)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command
@@ -568,13 +539,7 @@ async def disable(
 async def remove(match: str, server: Optional[str] = None):
     """Remove services/timers on specified server."""
     results = await execute_command_on_servers("remove", servers=server, match=match)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command
@@ -589,13 +554,7 @@ async def remove(match: str, server: Optional[str] = None):
 async def show(match: str, server: tuple = ()):
     """Show service file contents from specified servers."""
     results = await execute_command_on_servers("show", servers=server, match=match)
-    for hostname, result in results.items():
-        # Tables already have Host column, Text results need hostname prefix
-        if isinstance(result, Table):
-            result.console()
-        else:
-            click.echo(f"{hostname}:")
-            result.console()
+    _print_results(results)
 
 
 @cli.command(name="discover")
@@ -618,7 +577,9 @@ def discover(path: str, count: bool, verbose: bool):
     found_files = []
 
     # Collect all YAML files
-    yaml_files = list(search_path.glob("**/*.yaml")) + list(search_path.glob("**/*.yml"))
+    yaml_files = list(search_path.glob("**/*.yaml")) + list(
+        search_path.glob("**/*.yml")
+    )
 
     for yaml_file in sorted(yaml_files):
         try:
@@ -632,7 +593,9 @@ def discover(path: str, count: bool, verbose: bool):
             # Check for taskflows_services key
             if "taskflows_services" in content:
                 services = content["taskflows_services"]
-                service_count = len(services) if isinstance(services, (list, dict)) else 0
+                service_count = (
+                    len(services) if isinstance(services, (list, dict)) else 0
+                )
                 found_files.append((yaml_file, service_count))
 
         except yaml.YAMLError as e:
@@ -677,8 +640,7 @@ def table_column_colors():
     )
 
     @lru_cache
-    def column_color(col_name: str) -> str:
-        _ = col_name  # Parameter required for LRU cache key
+    def column_color(_col_name: str) -> str:
         return next(colors_gen)
 
     return column_color

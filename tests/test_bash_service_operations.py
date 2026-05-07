@@ -99,7 +99,7 @@ async def test_restart_re_executes_command(output_dir):
 
     srv = Service(
         name=name,
-        start_command=f"bash -c 'echo $(($(cat {counter_file}) + 1)) > {counter_file} && sleep 60'"
+        start_command=f"bash -c 'echo $(($(cat {counter_file}) + 1)) > {counter_file} && sleep 60'",
     )
 
     try:
@@ -153,8 +153,7 @@ async def test_full_lifecycle(output_dir):
     name = create_test_name()
     output_file = output_dir / f"{name}_lifecycle.txt"
     srv = Service(
-        name=name,
-        start_command=f"bash -c 'date >> {output_file} && sleep 30'"
+        name=name, start_command=f"bash -c 'date >> {output_file} && sleep 30'"
     )
 
     try:
@@ -176,13 +175,17 @@ async def test_full_lifecycle(output_dir):
         # Stop
         await srv.stop()
         sleep(0.5)
-        assert get_service_state(name) in ("inactive", "failed"), "Service should be stopped"
+        assert get_service_state(name) in ("inactive", "failed"), (
+            "Service should be stopped"
+        )
 
         # Restart (will start again since it's stopped)
         await srv.restart()
         sleep(1)
         new_content = output_file.read_text()
-        assert len(new_content) > len(initial_content), "Restart should append new output"
+        assert len(new_content) > len(initial_content), (
+            "Restart should append new output"
+        )
 
     finally:
         await srv.remove()

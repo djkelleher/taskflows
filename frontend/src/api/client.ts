@@ -27,7 +27,7 @@ async function refreshAccessToken(): Promise<string | null> {
 
       if (response.ok) {
         const data = (await response.json()) as RefreshResponse;
-        useAuthStore.getState().refreshAccessToken(data.access_token);
+        useAuthStore.getState().refreshAccessToken(data.access_token, data.csrf_token);
         return data.access_token;
       }
     } catch (err) {
@@ -49,11 +49,16 @@ async function refreshAccessToken(): Promise<string | null> {
 // Automatically refreshes token and retries once on 401, or logs out if refresh fails
 async function fetchWithAuth(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const token = useAuthStore.getState().accessToken;
+  const csrfToken = useAuthStore.getState().csrfToken;
 
   // Add Authorization header to init
   const headers = new Headers(init?.headers);
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
+  }
+  const method = (init?.method || "GET").toUpperCase();
+  if (csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers.set("X-CSRF-Token", csrfToken);
   }
 
   // Make initial request
@@ -66,6 +71,10 @@ async function fetchWithAuth(input: RequestInfo | URL, init?: RequestInit): Prom
       // Retry with new token
       const retryHeaders = new Headers(init?.headers);
       retryHeaders.set("Authorization", `Bearer ${newToken}`);
+      const nextCsrfToken = useAuthStore.getState().csrfToken;
+      if (nextCsrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+        retryHeaders.set("X-CSRF-Token", nextCsrfToken);
+      }
       return fetch(input, { ...init, headers: retryHeaders });
     } else {
       // Refresh failed - logout and redirect
@@ -95,13 +104,17 @@ export async function login(username: string, password: string): Promise<LoginRe
 
 export async function logout(): Promise<void> {
   const token = useAuthStore.getState().accessToken;
+  const refreshToken = useAuthStore.getState().refreshToken;
+  const csrfToken = useAuthStore.getState().csrfToken;
   try {
     await fetch("/auth/logout", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
       },
+      body: JSON.stringify({ refresh_token: refreshToken }),
     });
   } finally {
     useAuthStore.getState().logout();

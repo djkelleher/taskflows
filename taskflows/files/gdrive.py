@@ -1,36 +1,36 @@
-import ast
 import fnmatch
 import io
-import logging
+import json
 import os
-import pathlib
-import re
-import sys
+import shutil
+import tempfile
 import time
 import uuid
+import zipfile
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from functools import cached_property
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Callable, List, Literal, Optional, Sequence, Union
 
 import googleapiclient.errors
 import pandas as pd
-import json
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from pydantic import Field
 from pydantic_settings import BaseSettings
 from pydrive.auth import GoogleAuth
 from pydrive.drive import GoogleDrive as PyDriveGoogleDrive
 
-from .extensions import file_extensions_re
+from taskflows.common import secure_write_text
+
 from .utils import logger
 
 PathT = Union[str, Path]
@@ -43,11 +43,22 @@ GDRIVE_SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut"
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
+def _gdrive_query_literal(value: str) -> str:
+    """Return a single-quoted Google Drive query string literal."""
+    escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 def get_folder_id_helper(service, folder_path: List[str]) -> str:
     """Get folder ID from a folder path list."""
     parent_id = "root"
     for folder_name in folder_path:
-        query = f"name='{folder_name}' and '{parent_id}' in parents and mimeType='{GDRIVE_FOLDER_MIME_TYPE}' and trashed=false"
+        query = (
+            f"name={_gdrive_query_literal(folder_name)} "
+            f"and {_gdrive_query_literal(parent_id)} in parents "
+            f"and mimeType={_gdrive_query_literal(GDRIVE_FOLDER_MIME_TYPE)} "
+            "and trashed=false"
+        )
         results = service.files().list(q=query, fields="files(id)").execute()
         items = results.get("files", [])
         if not items:
@@ -95,7 +106,7 @@ def get_gdrive_id_from_path(path: str) -> Optional[str]:
     if not is_gdrive_path(path):
         return None
     # Format: gdrive://file_id or gdrive://folder_id/file_id
-    path = path.replace("gdrive://", "")
+    path = str(path).removeprefix("gdrive://").strip("/")
     return path.split("/")[-1] if path else None
 
 
@@ -175,8 +186,7 @@ class GoogleDrive:
                     creds = flow.run_local_server(port=0)
 
                 # Save credentials for next run
-                with open(self.config.token_file, "w") as token:
-                    token.write(creds.to_json())
+                secure_write_text(Path(self.config.token_file), creds.to_json())
 
         self._service = build("drive", "v3", credentials=creds)
 
@@ -380,7 +390,7 @@ class GoogleDrive:
 
         done = False
         while not done:
-            status, done = downloader.next_chunk()
+            _status, done = downloader.next_chunk()
 
         fh.seek(0)
         return fh
@@ -595,9 +605,11 @@ class GoogleDrive:
             List of files based on return_type
         """
         try:
-            query = f"'{folder_id}' in parents and trashed=false"
+            query = f"{_gdrive_query_literal(folder_id)} in parents and trashed=false"
             if not include_folders:
-                query += f" and mimeType != '{GDRIVE_FOLDER_MIME_TYPE}'"
+                query += (
+                    f" and mimeType != {_gdrive_query_literal(GDRIVE_FOLDER_MIME_TYPE)}"
+                )
 
             results = (
                 self.service.files()
@@ -644,7 +656,11 @@ class GoogleDrive:
             List of folders based on return_type
         """
         try:
-            query = f"'{folder_id}' in parents and trashed=false and mimeType='{GDRIVE_FOLDER_MIME_TYPE}'"
+            query = (
+                f"{_gdrive_query_literal(folder_id)} in parents "
+                "and trashed=false "
+                f"and mimeType={_gdrive_query_literal(GDRIVE_FOLDER_MIME_TYPE)}"
+            )
 
             results = (
                 self.service.files()
@@ -736,13 +752,17 @@ class GoogleDrive:
             List of matching files
         """
         try:
-            search_query = f"name contains '{query}' and trashed=false"
+            search_query = (
+                f"name contains {_gdrive_query_literal(query)} and trashed=false"
+            )
 
             if folder_id:
-                search_query += f" and '{folder_id}' in parents"
+                search_query += f" and {_gdrive_query_literal(folder_id)} in parents"
 
             if not include_folders:
-                search_query += f" and mimeType != '{GDRIVE_FOLDER_MIME_TYPE}'"
+                search_query += (
+                    f" and mimeType != {_gdrive_query_literal(GDRIVE_FOLDER_MIME_TYPE)}"
+                )
 
             results = (
                 self.service.files()
@@ -954,7 +974,7 @@ class GoogleDrive:
 
             done = False
             while not done:
-                status, done = downloader.next_chunk()
+                _status, done = downloader.next_chunk()
 
             # Save to local file
             local_path = Path(local_path)
@@ -1018,8 +1038,7 @@ class GoogleDrive:
         """
         try:
             pydrive_file = self.pydrive_client.CreateFile({"id": file_id})
-            revisions = pydrive_file.GetRevisions()
-            return revisions
+            return pydrive_file.GetRevisions()
         except Exception as e:
             logger.error(f"Failed to get file revisions for {file_id}: {e}")
             return []
@@ -1438,12 +1457,18 @@ class GoogleDrive:
         try:
             # Get original file info for the title if not provided
             if not new_title:
-                original_file = self.service.files().get(fileId=file_id, fields="name").execute()
+                original_file = (
+                    self.service.files().get(fileId=file_id, fields="name").execute()
+                )
                 new_title = f"Copy of {original_file['name']}"
 
             # Use the copy API method to properly duplicate the file with its content
             body = {"name": new_title}
-            copied_file = self.service.files().copy(fileId=file_id, body=body, fields="id").execute()
+            copied_file = (
+                self.service.files()
+                .copy(fileId=file_id, body=body, fields="id")
+                .execute()
+            )
 
             logger.info(f"Duplicated file {file_id} to {copied_file['id']}")
             return copied_file["id"]
@@ -1664,12 +1689,12 @@ class GoogleDrive:
         if direction in ["up", "both"]:
             for rel_path, local_info in local_files.items():
                 if dry_run:
-                    print(f"Dry run: Checking local file {rel_path}")
+                    logger.debug(f"Dry run: checking local file {rel_path}")
 
                 if rel_path not in remote_files:
                     if not dry_run:
                         try:
-                            file_id = self.upload(local_info["path"], remote_folder_id)
+                            self.upload(local_info["path"], remote_folder_id)
                             sync_results["uploaded"].append(str(local_info["path"]))
                         except Exception as e:
                             sync_results["errors"].append(
@@ -1702,7 +1727,7 @@ class GoogleDrive:
         if direction in ["down", "both"]:
             for filename, remote_info in remote_files.items():
                 if dry_run:
-                    print(f"Dry run: Checking remote file {filename}")
+                    logger.debug(f"Dry run: checking remote file {filename}")
 
                 local_path = local_dir / filename
                 if filename not in local_files:
@@ -1824,16 +1849,11 @@ class GoogleDrive:
         """Find duplicate files (by name) in a folder."""
         files = self.list_files(folder_id, include_folders=False)
 
-        from collections import defaultdict
-
         file_map = defaultdict(list)
         for f in files:
             file_map[f["name"]].append(f)
 
-        duplicates = [
-            file_list for file_list in file_map.values() if len(file_list) > 1
-        ]
-        return duplicates
+        return [file_list for file_list in file_map.values() if len(file_list) > 1]
 
     def create_shortcut(
         self,
@@ -2054,40 +2074,37 @@ class GoogleDrive:
             Uploaded ZIP file ID if successful, None otherwise
         """
         try:
-            import tempfile
-            import zipfile
+            archive_name = zip_name if zip_name.endswith(".zip") else f"{zip_name}.zip"
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_zip_path = Path(temp_dir) / archive_name
 
-            # Create temporary ZIP file
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as temp_zip:
-                temp_zip_path = temp_zip.name
+                # Create ZIP file
+                with zipfile.ZipFile(
+                    temp_zip_path,
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                    compresslevel=compression_level,
+                ) as zip_file:
+                    for file_path in files:
+                        file_path = Path(file_path)
+                        if file_path.exists():
+                            zip_file.write(file_path, file_path.name)
+                            logger.debug(f"Added {file_path.name} to ZIP")
+                        else:
+                            logger.warning(f"File not found: {file_path}")
 
-            # Create ZIP file
-            with zipfile.ZipFile(
-                temp_zip_path,
-                "w",
-                compression=zipfile.ZIP_DEFLATED,
-                compresslevel=compression_level,
-            ) as zip_file:
+                # Upload ZIP file
+                zip_file_id = self.upload(temp_zip_path, folder_id=folder_id)
 
-                for file_path in files:
-                    file_path = Path(file_path)
-                    if file_path.exists():
-                        zip_file.write(file_path, file_path.name)
-                        logger.debug(f"Added {file_path.name} to ZIP")
-                    else:
-                        logger.warning(f"File not found: {file_path}")
+                if zip_file_id:
+                    logger.info(
+                        f"Uploaded compressed file {archive_name} (ID: {zip_file_id})"
+                    )
+                    return (
+                        zip_file_id[0] if isinstance(zip_file_id, list) else zip_file_id
+                    )
 
-            # Upload ZIP file
-            zip_file_id = self.upload(temp_zip_path, folder_id=folder_id)
-
-            # Clean up temporary file
-            os.unlink(temp_zip_path)
-
-            if zip_file_id:
-                logger.info(f"Uploaded compressed file {zip_name} (ID: {zip_file_id})")
-                return zip_file_id[0] if isinstance(zip_file_id, list) else zip_file_id
-
-            return None
+                return None
 
         except Exception as e:
             logger.error(f"Failed to compress and upload: {e}")
@@ -2110,49 +2127,57 @@ class GoogleDrive:
             List of extracted file paths
         """
         try:
-            import tempfile
-            import zipfile
-
             local_dir = Path(local_dir)
             local_dir.mkdir(parents=True, exist_ok=True)
 
-            # Download ZIP file to temporary location
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as temp_zip:
-                temp_zip_path = temp_zip.name
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_zip_path = Path(temp_dir) / "download.zip"
 
-            if not self.download_file(zip_file_id, temp_zip_path):
-                return []
+                if not self.download_file(zip_file_id, temp_zip_path):
+                    return []
 
-            # Extract ZIP file
-            extracted_files = []
+                # Extract ZIP file
+                extracted_files = []
 
-            with zipfile.ZipFile(temp_zip_path, "r") as zip_file:
-                if extract_here:
-                    extract_path = local_dir
-                else:
-                    # Create subfolder based on ZIP name
-                    zip_info = self.get_file_info(zip_file_id)
-                    folder_name = (
-                        zip_info["name"].replace(".zip", "")
-                        if zip_info
-                        else "extracted"
-                    )
-                    extract_path = local_dir / folder_name
-                    extract_path.mkdir(exist_ok=True)
+                with zipfile.ZipFile(temp_zip_path, "r") as zip_file:
+                    if extract_here:
+                        extract_path = local_dir
+                    else:
+                        # Create subfolder based on ZIP name
+                        zip_info = self.get_file_info(zip_file_id)
+                        folder_name = (
+                            zip_info["name"].replace(".zip", "")
+                            if zip_info
+                            else "extracted"
+                        )
+                        extract_path = local_dir / folder_name
+                        extract_path.mkdir(exist_ok=True)
 
-                zip_file.extractall(extract_path)
+                    base_path = extract_path.resolve()
+                    for member in zip_file.infolist():
+                        target_path = (extract_path / member.filename).resolve()
+                        try:
+                            target_path.relative_to(base_path)
+                        except ValueError as exc:
+                            raise ValueError(
+                                f"Refusing to extract ZIP member outside target directory: {member.filename}"
+                            ) from exc
 
-                for member in zip_file.namelist():
-                    extracted_path = extract_path / member
-                    if extracted_path.is_file():
-                        extracted_files.append(str(extracted_path))
-                        logger.debug(f"Extracted {member}")
+                        if member.is_dir():
+                            target_path.mkdir(parents=True, exist_ok=True)
+                            continue
 
-            # Clean up temporary ZIP file
-            os.unlink(temp_zip_path)
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                        with (
+                            zip_file.open(member) as src,
+                            open(target_path, "wb") as dst,
+                        ):
+                            shutil.copyfileobj(src, dst)
+                        extracted_files.append(str(target_path))
+                        logger.debug(f"Extracted {member.filename}")
 
-            logger.info(f"Extracted {len(extracted_files)} files to {extract_path}")
-            return extracted_files
+                logger.info(f"Extracted {len(extracted_files)} files to {extract_path}")
+                return extracted_files
 
         except Exception as e:
             logger.error(f"Failed to extract and download: {e}")

@@ -6,18 +6,24 @@ from typing import Literal, Optional, Union
 from loguru import logger
 
 
-def any_case_env_var(var: str, default: Optional[str] = None) -> Union[str, None]:
+def any_case_env_var(var: str, default: Optional[str] = None) -> Union[str, bool, None]:
     value = os.getenv(var) or os.getenv(var.lower()) or os.getenv(var.upper())
     if value is None:
+        wanted = var.lower()
+        for key, env_value in os.environ.items():
+            if key.lower() == wanted:
+                value = env_value
+                break
+    if value is None:
         return default
-    if (vl := value.lower()) == "true":
+    vl = value.strip().lower()
+    if vl in {"1", "true", "yes", "y", "on"}:
         return True
-    if vl == "false":
+    if vl in {"0", "false", "no", "n", "off"}:
         return False
     return value
 
 
-# Store configured loggers to prevent reconfiguration
 _configured_loggers = set()
 
 
@@ -52,55 +58,67 @@ def get_logger(
     if logger_key in _configured_loggers:
         return logger.bind(logger_name=name) if name else logger
 
-    # Mark this logger as configured
-    _configured_loggers.add(logger_key)
-
-    # Resolve configuration from environment variables
+    # Resolve configuration from environment variables, named overrides global
     if no_terminal is None:
         if name:
             no_terminal = any_case_env_var(f"{name}_NO_TERMINAL")
-        no_terminal = no_terminal or any_case_env_var("LOGGERS_NO_TERMINAL")
+        if no_terminal is None:
+            no_terminal = any_case_env_var("LOGGERS_NO_TERMINAL")
 
     if file_dir is None:
         if name:
             file_dir = any_case_env_var(f"{name}_FILE_DIR")
-        file_dir = file_dir or any_case_env_var("LOGGERS_FILE_DIR")
+        if file_dir is None:
+            file_dir = any_case_env_var("LOGGERS_FILE_DIR")
 
     if level is None:
         if name:
             level = any_case_env_var(f"{name}_LOG_LEVEL")
-        level = level or any_case_env_var("LOGGERS_LOG_LEVEL", "INFO")
+        if level is None:
+            level = any_case_env_var("LOGGERS_LOG_LEVEL", "INFO")
 
     if show_source is None:
         if name:
             show_source = any_case_env_var(f"{name}_SHOW_SOURCE")
-        show_source = show_source or any_case_env_var("LOGGERS_SHOW_SOURCE", "filename")
+        if show_source is None:
+            show_source = any_case_env_var("LOGGERS_SHOW_SOURCE", "filename")
 
     if file_max_bytes is None:
         if name:
             file_max_bytes = any_case_env_var(f"{name}_FILE_MAX_BYTES")
-        file_max_bytes = file_max_bytes or any_case_env_var("LOGGERS_FILE_MAX_BYTES")
+        if file_max_bytes is None:
+            file_max_bytes = any_case_env_var("LOGGERS_FILE_MAX_BYTES")
     if file_max_bytes:
         file_max_bytes = int(file_max_bytes)
 
     if max_rotations is None:
         if name:
             max_rotations = any_case_env_var(f"{name}_MAX_ROTATIONS")
-        max_rotations = max_rotations or any_case_env_var("LOGGERS_MAX_ROTATIONS")
+        if max_rotations is None:
+            max_rotations = any_case_env_var("LOGGERS_MAX_ROTATIONS")
     if max_rotations:
         max_rotations = int(max_rotations)
 
     # Convert numeric level to string
     if isinstance(level, int):
-        level_map = {50: "CRITICAL", 40: "ERROR", 30: "WARNING", 20: "INFO", 10: "DEBUG"}
+        level_map = {
+            50: "CRITICAL",
+            40: "ERROR",
+            30: "WARNING",
+            20: "INFO",
+            10: "DEBUG",
+        }
         level = level_map.get(level, "INFO")
 
     # Remove default handler only on first configuration
-    if logger_key == "root" and len(_configured_loggers) == 1:
+    if logger_key == "root" and not _configured_loggers:
         logger.remove()
 
     # Build format string
-    format_parts = ["<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green>", "<level>{level: <8}</level>"]
+    format_parts = [
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green>",
+        "<level>{level: <8}</level>",
+    ]
 
     if name:
         format_parts.append(f"<cyan>[{name}]</cyan>")
@@ -119,7 +137,9 @@ def get_logger(
             sys.stderr,
             format=format_string,
             level=level.upper() if isinstance(level, str) else level,
-            filter=lambda record: record["extra"].get("logger_name") == name if name else True,
+            filter=lambda record: record["extra"].get("logger_name") == name
+            if name
+            else True,
         )
 
     # Add file handler if directory specified
@@ -133,8 +153,12 @@ def get_logger(
             level=level.upper() if isinstance(level, str) else level,
             rotation=file_max_bytes,
             retention=max_rotations,
-            filter=lambda record: record["extra"].get("logger_name") == name if name else True,
+            filter=lambda record: record["extra"].get("logger_name") == name
+            if name
+            else True,
         )
+
+    _configured_loggers.add(logger_key)
 
     # Return a bound logger with the name
     return logger.bind(logger_name=name) if name else logger

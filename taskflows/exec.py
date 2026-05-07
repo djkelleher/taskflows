@@ -20,7 +20,9 @@ from .common import logger, services_data_dir
 # and audit logging to prevent tampering and track usage.
 
 
-def _set_secure_permissions(path: Path, mode: int = stat.S_IRUSR | stat.S_IWUSR) -> None:
+def _set_secure_permissions(
+    path: Path, mode: int = stat.S_IRUSR | stat.S_IWUSR
+) -> None:
     """Set secure file permissions (default: 0600)."""
     os.chmod(path, mode)
 
@@ -44,16 +46,20 @@ def _get_hmac_secret() -> bytes:
         # Verify file permissions
         file_stat = secret_file.stat()
         if file_stat.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-            logger.error(f"SECURITY: Secret file {secret_file} has insecure permissions!")
+            logger.error(
+                f"SECURITY: Secret file {secret_file} has insecure permissions!"
+            )
             _set_secure_permissions(secret_file)
 
         secret = secret_file.read_bytes()
         # Validate secret is usable (not empty or too short)
-        if len(secret) < 32:
-            logger.error("SECURITY: Secret file is invalid (too short), regenerating")
-            # Fall through to generate new secret
-        else:
+        if len(secret) >= 32:
             return secret
+        logger.error("SECURITY: Secret file is invalid (too short), regenerating")
+        try:
+            secret_file.unlink()
+        except FileNotFoundError:
+            pass
 
     # Generate new secret using atomic file creation to prevent race conditions
     logger.info("Generating new HMAC secret for pickle integrity verification")
@@ -61,7 +67,11 @@ def _get_hmac_secret() -> bytes:
 
     try:
         # O_CREAT | O_EXCL atomically creates file only if it doesn't exist
-        fd = os.open(secret_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, stat.S_IRUSR | stat.S_IWUSR)
+        fd = os.open(
+            secret_file,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
         try:
             os.write(fd, secret)
         finally:
@@ -70,7 +80,10 @@ def _get_hmac_secret() -> bytes:
     except FileExistsError:
         # Another process created the file first - read their secret
         logger.info("Secret file created by another process, reading existing secret")
-        return secret_file.read_bytes()
+        secret = secret_file.read_bytes()
+        if len(secret) < 32:
+            raise ValueError(f"Secret file is invalid: {secret_file}")
+        return secret
 
 
 def _sign_pickle(pickle_data: bytes) -> bytes:
@@ -79,8 +92,7 @@ def _sign_pickle(pickle_data: bytes) -> bytes:
     Returns: signature (32 bytes)
     """
     secret = _get_hmac_secret()
-    signature = hmac.new(secret, pickle_data, hashlib.sha256).digest()
-    return signature
+    return hmac.new(secret, pickle_data, hashlib.sha256).digest()
 
 
 def _verify_pickle(pickle_path: Path, pickle_data: bytes, signature: bytes) -> bool:
@@ -93,7 +105,7 @@ def _verify_pickle(pickle_path: Path, pickle_data: bytes, signature: bytes) -> b
 
     if not hmac.compare_digest(signature, expected_signature):
         logger.error(f"SECURITY: Pickle file integrity check FAILED for {pickle_path}")
-        logger.error(f"SECURITY: File may have been tampered with!")
+        logger.error("SECURITY: File may have been tampered with!")
         return False
 
     return True
@@ -112,7 +124,7 @@ def _check_pickle_file_security(pickle_path: Path) -> bool:
     file_stat = pickle_path.stat()
     if file_stat.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
         logger.warning(f"SECURITY: Pickle file has insecure permissions: {pickle_path}")
-        logger.warning(f"SECURITY: Attempting to fix permissions...")
+        logger.warning("SECURITY: Attempting to fix permissions...")
         try:
             os.chmod(pickle_path, stat.S_IRUSR | stat.S_IWUSR)  # 600
             logger.info(f"SECURITY: Fixed permissions for {pickle_path}")
@@ -122,7 +134,9 @@ def _check_pickle_file_security(pickle_path: Path) -> bool:
 
     # Check that file is owned by current user
     if file_stat.st_uid != os.getuid():
-        logger.error(f"SECURITY: Pickle file is not owned by current user: {pickle_path}")
+        logger.error(
+            f"SECURITY: Pickle file is not owned by current user: {pickle_path}"
+        )
         return False
 
     return True
@@ -134,14 +148,25 @@ def _write_signed_pickle(pickle_path: Path, pickle_data: bytes) -> None:
     File format: [32 bytes signature][pickle data]
     """
     signature = _sign_pickle(pickle_data)
+    pickle_path.parent.mkdir(parents=True, exist_ok=True)
+    _set_secure_permissions(pickle_path.parent, stat.S_IRWXU)
 
-    # Write signature + data
-    with open(pickle_path, "wb") as f:
-        f.write(signature)
-        f.write(pickle_data)
-
-    # Set secure permissions
-    os.chmod(pickle_path, stat.S_IRUSR | stat.S_IWUSR)  # 600
+    tmp_path = pickle_path.with_name(f".{pickle_path.name}.{secrets.token_hex(8)}")
+    fd = os.open(
+        tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, stat.S_IRUSR | stat.S_IWUSR
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(signature)
+            f.write(pickle_data)
+        os.replace(tmp_path, pickle_path)
+        os.chmod(pickle_path, stat.S_IRUSR | stat.S_IWUSR)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
     logger.info(f"AUDIT: Wrote signed pickle file: {pickle_path}")
 
@@ -149,25 +174,28 @@ def _write_signed_pickle(pickle_path: Path, pickle_data: bytes) -> None:
 def _migrate_unsigned_pickle(pickle_path: Path) -> None:
     """Migrate an unsigned pickle file to signed format.
 
-    This is a backwards compatibility helper for existing pickle files.
-    Reads unsigned pickle, validates it can be loaded, then writes signed version.
+    This helper is intentionally disabled by default because validating an
+    unsigned pickle requires deserializing it, which can execute arbitrary code.
     """
-    logger.warning(f"MIGRATION: Found unsigned pickle file: {pickle_path}")
+    if os.getenv("TASKFLOWS_ALLOW_UNSIGNED_PICKLE_MIGRATION") != "1":
+        raise ValueError(
+            "Unsigned pickle migration is disabled. Recreate the service, or set "
+            "TASKFLOWS_ALLOW_UNSIGNED_PICKLE_MIGRATION=1 only for a trusted, "
+            "one-time local migration."
+        )
 
-    # Read unsigned pickle data
+    logger.warning(f"MIGRATION: Found unsigned pickle file: {pickle_path}")
     pickle_data = pickle_path.read_bytes()
 
-    # Try to load it to ensure it's valid
     try:
-        obj = cloudpickle.loads(pickle_data)
-        logger.info(f"MIGRATION: Successfully validated unsigned pickle")
+        cloudpickle.loads(pickle_data)
+        logger.info("MIGRATION: Successfully validated unsigned pickle")
     except Exception as e:
         logger.error(f"MIGRATION: Failed to load unsigned pickle: {e}")
         raise ValueError(f"Cannot migrate invalid pickle file: {pickle_path}")
 
-    # Write signed version
     _write_signed_pickle(pickle_path, pickle_data)
-    logger.info(f"MIGRATION: Successfully migrated pickle file to signed format")
+    logger.info("MIGRATION: Successfully migrated pickle file to signed format")
 
 
 def _read_signed_pickle(pickle_path: Path) -> bytes:
@@ -195,20 +223,7 @@ def _read_signed_pickle(pickle_path: Path) -> bytes:
 
     # Verify signature
     if not _verify_pickle(pickle_path, pickle_data, signature):
-        # Signature verification failed - might be unsigned legacy file
-        # Try to migrate if it's a valid pickle
-        logger.warning(f"SECURITY: Signature verification failed, attempting migration")
-
-        # Try loading entire file as unsigned pickle
-        try:
-            cloudpickle.loads(file_data)
-            # If successful, this is likely an unsigned legacy pickle
-            _migrate_unsigned_pickle(pickle_path)
-            # Recursively call to read the newly signed file
-            return _read_signed_pickle(pickle_path)
-        except Exception:
-            # Not a valid pickle, signature was actually invalid
-            raise ValueError(f"Pickle integrity verification failed: {pickle_path}")
+        raise ValueError(f"Pickle integrity verification failed: {pickle_path}")
 
     logger.info(f"AUDIT: Verified and loading pickle file: {pickle_path}")
     return pickle_data
@@ -222,19 +237,31 @@ def _run_function(b64_pickle_func: str):
     SECURITY NOTE: This loads pickle from command line argument without signature
     verification. Only use with trusted input. Audit logging is enabled.
     """
-    logger.warning(f"AUDIT: Loading pickle from command line argument (length: {len(b64_pickle_func)})")
-    logger.warning(f"SECURITY: This operation trusts the caller - ensure input is from trusted source")
+    if os.getenv("TASKFLOWS_ALLOW_UNSIGNED_PICKLE_CLI") != "1":
+        raise click.ClickException(
+            "Unsigned pickle CLI execution is disabled. Use signed pickle "
+            "service entrypoints, or set TASKFLOWS_ALLOW_UNSIGNED_PICKLE_CLI=1 "
+            "only for trusted local migration/debugging."
+        )
+    logger.warning(
+        f"AUDIT: Loading pickle from command line argument (length: {len(b64_pickle_func)})"
+    )
+    logger.warning(
+        "SECURITY: This operation trusts the caller - ensure input is from trusted source"
+    )
 
     try:
         func = cloudpickle.loads(base64.b64decode(b64_pickle_func))
-        logger.info(f"AUDIT: Successfully loaded function: {func.__name__ if hasattr(func, '__name__') else 'unknown'}")
+        logger.info(
+            f"AUDIT: Successfully loaded function: {func.__name__ if hasattr(func, '__name__') else 'unknown'}"
+        )
 
         if inspect.iscoroutinefunction(func):
             asyncio.run(func())
         else:
             func()
 
-        logger.info(f"AUDIT: Function execution completed successfully")
+        logger.info("AUDIT: Function execution completed successfully")
     except Exception as e:
         logger.error(f"AUDIT: Function execution failed: {e}", exc_info=True)
         raise

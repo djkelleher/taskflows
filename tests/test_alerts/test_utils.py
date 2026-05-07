@@ -1,12 +1,14 @@
-from io import StringIO
+from io import BytesIO, StringIO
 
 from taskflows.alerts import Table
 from taskflows.alerts.utils import (
+    AttachmentFile,
     Emoji,
     EmojiCycle,
     as_code_block,
     attach_tables,
     logger,
+    prepare_attachments,
     price_dir_emoji,
     use_inline_tables,
 )
@@ -208,3 +210,25 @@ def test_as_code_block_multiline():
     assert "line 2" in result
     assert "line 3" in result
     assert result.count("```") == 2  # Opening and closing
+
+
+def test_prepare_attachments_force_zip_with_missing_file_returns_no_attachments(
+    tmp_path,
+):
+    missing = tmp_path / "missing.txt"
+
+    attachments, zip_attachment = prepare_attachments([missing], force_zip=True)
+
+    assert attachments == []
+    assert zip_attachment is None
+
+
+def test_prepare_attachments_single_attachmentfile_zip_uses_attachment_name():
+    attachment = AttachmentFile(BytesIO(b"payload"), "payload.txt")
+
+    attachments, zip_attachment = prepare_attachments([attachment], force_zip=True)
+
+    assert attachments == []
+    assert zip_attachment is not None
+    assert zip_attachment.filename == "payload.txt.zip"
+    assert zip_attachment.content.getbuffer().nbytes > 0

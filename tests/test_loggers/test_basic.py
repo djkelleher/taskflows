@@ -38,6 +38,14 @@ class TestEnvVarHandling:
         with patch.dict(os.environ, {test_var: "false"}):
             assert any_case_env_var(test_var) is False
 
+        for value in ("1", "yes", "on", "Y"):
+            with patch.dict(os.environ, {test_var: value}):
+                assert any_case_env_var(test_var) is True
+
+        for value in ("0", "no", "off", "N"):
+            with patch.dict(os.environ, {test_var: value}):
+                assert any_case_env_var(test_var) is False
+
 
 @pytest.mark.parametrize("use_env_vars", [False, True])
 def test_logger(use_env_vars):
@@ -125,7 +133,7 @@ def test_no_terminal_logging():
         handlers_before = len(logger._core.handlers)
 
         # Test with no_terminal=True
-        test_logger = get_logger(name=name, no_terminal=True)
+        get_logger(name=name, no_terminal=True)
 
         # With no_terminal, no new stderr handlers should be added
         # (loguru uses a global logger, so we check that no new handlers were added)
@@ -156,7 +164,9 @@ def test_show_source_variations():
 
             # Test with pathname
             logger1 = get_logger(
-                name=f"test_pathname_{uuid4()}", show_source="pathname", file_dir=file_dir
+                name=f"test_pathname_{uuid4()}",
+                show_source="pathname",
+                file_dir=file_dir,
             )
             logger1.info("test message")
 
@@ -166,7 +176,9 @@ def test_show_source_variations():
 
             # Test with filename
             logger2 = get_logger(
-                name=f"test_filename_{uuid4()}", show_source="filename", file_dir=file_dir
+                name=f"test_filename_{uuid4()}",
+                show_source="filename",
+                file_dir=file_dir,
             )
             logger2.info("test message")
 
@@ -187,11 +199,42 @@ def test_multiple_logger_instances():
     try:
         name = f"test_singleton_{uuid4()}"
 
-        logger1 = get_logger(name=name, level="INFO")
-        logger2 = get_logger(name=name, level="DEBUG")
+        get_logger(name=name, level="INFO")
+        get_logger(name=name, level="DEBUG")
 
         # Second call should not reconfigure (name should be in configured set)
         assert name in basic._configured_loggers
+    finally:
+        basic._configured_loggers = original_configured
+
+
+def test_failed_logger_configuration_is_not_cached():
+    """Test that failed configuration can be retried with valid settings."""
+    from taskflows.loggers import basic
+
+    original_configured = basic._configured_loggers.copy()
+    basic._configured_loggers.clear()
+
+    try:
+        name = f"test_failed_config_{uuid4()}"
+
+        with pytest.raises(ValueError):
+            get_logger(name=name, level="NOT_A_LEVEL")
+
+        assert name not in basic._configured_loggers
+
+        with TemporaryDirectory() as temp_dir:
+            log = get_logger(
+                name=name,
+                level="INFO",
+                no_terminal=True,
+                file_dir=temp_dir,
+            )
+            log.info("retry succeeded")
+
+            log_file = Path(temp_dir) / f"{name}.log"
+            assert log_file.is_file()
+            assert "retry succeeded" in log_file.read_text()
     finally:
         basic._configured_loggers = original_configured
 
@@ -219,7 +262,9 @@ def test_loggers_env_vars():
                     "loggers_MAX_ROTATIONS": "3",
                 },
             ):
-                test_logger = get_logger(name=name, file_max_bytes=None, max_rotations=None)
+                test_logger = get_logger(
+                    name=name, file_max_bytes=None, max_rotations=None
+                )
 
                 # Test that file was created
                 test_logger.warning("test message")

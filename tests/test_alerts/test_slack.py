@@ -1,6 +1,5 @@
 import asyncio
 from io import BytesIO
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -287,6 +286,22 @@ class TestSendSlackMessage:
 
     @patch("taskflows.alerts.slack.get_async_client")
     @pytest.mark.asyncio
+    async def test_send_message_rejects_negative_retries(
+        self, mock_get_client, mock_client, test_components
+    ):
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(ValueError, match="retries"):
+            await send_slack_message(
+                content=test_components,
+                channel=SlackChannel("#test"),
+                retries=-1,
+            )
+
+        mock_client.chat_postMessage.assert_not_called()
+
+    @patch("taskflows.alerts.slack.get_async_client")
+    @pytest.mark.asyncio
     async def test_send_message_with_string_channel(
         self, mock_get_client, mock_client, test_components
     ):
@@ -323,11 +338,15 @@ class TestSendSlackMessage:
         channel = SlackChannel("#serialized")
 
         first_task = asyncio.create_task(
-            send_slack_message(content=test_components, channel=channel, subject="first")
+            send_slack_message(
+                content=test_components, channel=channel, subject="first"
+            )
         )
         await asyncio.sleep(0)
         second_task = asyncio.create_task(
-            send_slack_message(content=test_components, channel=channel, subject="second")
+            send_slack_message(
+                content=test_components, channel=channel, subject="second"
+            )
         )
         await asyncio.sleep(0)
 

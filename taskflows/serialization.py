@@ -44,11 +44,15 @@ Human-Readable Values:
           period: 1h
           start_on: boot
 """
+
 import json
 import re
-from dataclasses import fields, is_dataclass
+from collections.abc import Mapping
+from collections.abc import Sequence as ABCSequence
+from dataclasses import MISSING, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
+from types import NoneType, UnionType
 from typing import (
     Any,
     Dict,
@@ -56,6 +60,7 @@ from typing import (
     Literal,
     Optional,
     Sequence,
+    TYPE_CHECKING,
     Type,
     TypeVar,
     Union,
@@ -64,9 +69,12 @@ from typing import (
 )
 
 import yaml
+
+if TYPE_CHECKING:
+    from .service import Service
 from pydantic import BaseModel
 
-from taskflows.common import logger
+from taskflows.common import logger, secure_write_text
 
 
 # =============================================================================
@@ -78,12 +86,12 @@ _MEMORY_UNITS = {
     "b": 1,
     "k": 1024,
     "kb": 1024,
-    "m": 1024 ** 2,
-    "mb": 1024 ** 2,
-    "g": 1024 ** 3,
-    "gb": 1024 ** 3,
-    "t": 1024 ** 4,
-    "tb": 1024 ** 4,
+    "m": 1024**2,
+    "mb": 1024**2,
+    "g": 1024**3,
+    "gb": 1024**3,
+    "t": 1024**4,
+    "tb": 1024**4,
 }
 
 # Time units in seconds
@@ -174,10 +182,14 @@ def parse_memory_size(value: Any) -> int:
         1610612736
     """
     if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value < 0:
+            raise ValueError("Memory size must be non-negative")
         return int(value)
 
     if not isinstance(value, str):
-        raise ValueError(f"Cannot parse memory size from {type(value).__name__}: {value}")
+        raise ValueError(
+            f"Cannot parse memory size from {type(value).__name__}: {value}"
+        )
 
     match = _MEMORY_PATTERN.match(value)
     if not match:
@@ -192,7 +204,9 @@ def parse_memory_size(value: Any) -> int:
 
     unit_lower = unit.lower()
     if unit_lower not in _MEMORY_UNITS:
-        raise ValueError(f"Unknown memory unit '{unit}'. Valid units: {', '.join(sorted(set(_MEMORY_UNITS.keys())))}")
+        raise ValueError(
+            f"Unknown memory unit '{unit}'. Valid units: {', '.join(sorted(set(_MEMORY_UNITS.keys())))}"
+        )
 
     return int(number * _MEMORY_UNITS[unit_lower])
 
@@ -232,10 +246,14 @@ def parse_time_duration(value: Any) -> int:
         5400
     """
     if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value < 0:
+            raise ValueError("Time duration must be non-negative")
         return int(value)
 
     if not isinstance(value, str):
-        raise ValueError(f"Cannot parse time duration from {type(value).__name__}: {value}")
+        raise ValueError(
+            f"Cannot parse time duration from {type(value).__name__}: {value}"
+        )
 
     match = _TIME_PATTERN.match(value)
     if not match:
@@ -250,7 +268,9 @@ def parse_time_duration(value: Any) -> int:
 
     unit_lower = unit.lower()
     if unit_lower not in _TIME_UNITS:
-        raise ValueError(f"Unknown time unit '{unit}'. Valid units: {', '.join(sorted(set(_TIME_UNITS.keys())))}")
+        raise ValueError(
+            f"Unknown time unit '{unit}'. Valid units: {', '.join(sorted(set(_TIME_UNITS.keys())))}"
+        )
 
     return int(number * _TIME_UNITS[unit_lower])
 
@@ -285,6 +305,7 @@ def _maybe_parse_value(value: Any, field_name: str) -> Any:
             return value
 
     return value
+
 
 T = TypeVar("T")
 
@@ -329,7 +350,9 @@ _TYPE_SIGNATURE_KEYS: Dict[frozenset, str] = {
 }
 
 
-def _infer_type_from_content(data: Dict[str, Any], field_name: Optional[str] = None) -> Optional[str]:
+def _infer_type_from_content(
+    data: Dict[str, Any], field_name: Optional[str] = None
+) -> Optional[str]:
     """Infer the type from dict content based on its keys.
 
     Args:
@@ -345,7 +368,9 @@ def _infer_type_from_content(data: Dict[str, Any], field_name: Optional[str] = N
     keys = set(data.keys()) - {"type"}  # Exclude type key itself
 
     # Check for signature keys (most specific first - larger sets)
-    for signature_keys, type_name in sorted(_TYPE_SIGNATURE_KEYS.items(), key=lambda x: -len(x[0])):
+    for signature_keys, type_name in sorted(
+        _TYPE_SIGNATURE_KEYS.items(), key=lambda x: -len(x[0])
+    ):
         if signature_keys <= keys:
             return type_name
 
@@ -412,6 +437,42 @@ def _is_pydantic_model(cls: Type) -> bool:
         return issubclass(cls, BaseModel)
     except TypeError:
         return False
+
+
+def _is_union_type(annotation: Any) -> bool:
+    """Return True for both typing.Union and PEP 604 unions."""
+    return get_origin(annotation) in (Union, UnionType)
+
+
+def _sequence_element_type(annotation: Any) -> Optional[Type]:
+    """Return the item type for list-like annotations when available."""
+    origin = get_origin(annotation)
+    if origin in (list, List, tuple, Sequence, ABCSequence):
+        args = get_args(annotation)
+        if args:
+            return args[0]
+    return None
+
+
+def _resolve_union_type(annotation: Any, value: Any) -> Any:
+    """Choose a concrete type from a union annotation when the data identifies one."""
+    if not _is_union_type(annotation):
+        return annotation
+
+    union_args = [arg for arg in get_args(annotation) if arg is not NoneType]
+    if value is None:
+        return NoneType
+    if len(union_args) == 1:
+        return union_args[0]
+
+    if isinstance(value, dict):
+        type_name = value.get("type") or _infer_type_from_content(value)
+        if type_name:
+            for arg in union_args:
+                if getattr(arg, "__name__", None) == type_name:
+                    return arg
+
+    return annotation
 
 
 def _serialize_value(value: Any, include_none: bool = False) -> Any:
@@ -508,10 +569,14 @@ def _parse_volume_string(value: str) -> Any:
         # Can't parse, return as-is
         return value
 
-    return volume_cls(host_path=host_path, container_path=container_path, read_only=read_only)
+    return volume_cls(
+        host_path=host_path, container_path=container_path, read_only=read_only
+    )
 
 
-def _deserialize_value(value: Any, target_type: Optional[Type] = None, field_name: Optional[str] = None) -> Any:
+def _deserialize_value(
+    value: Any, target_type: Optional[Type] = None, field_name: Optional[str] = None
+) -> Any:
     """Deserialize a value from JSON-compatible format.
 
     Args:
@@ -571,8 +636,10 @@ def _deserialize_value(value: Any, target_type: Optional[Type] = None, field_nam
 
             # If we have a target type hint, try to use it
             if target_type:
+                target_type = _resolve_union_type(target_type, value)
                 data = {k: v for k, v in value.items() if k != "type"}
-                return from_dict(data, target_type)
+                if not _is_union_type(target_type):
+                    return from_dict(data, target_type)
 
             # Return the dict as-is if we can't resolve the type
             logger.warning(f"Unknown type '{type_name}' during deserialization")
@@ -582,7 +649,10 @@ def _deserialize_value(value: Any, target_type: Optional[Type] = None, field_nam
         inferred_type = _infer_type_from_content(value, field_name)
 
         # Special handling for schedule fields
-        if field_name in ("start_schedule", "stop_schedule", "restart_schedule") and not inferred_type:
+        if (
+            field_name in ("start_schedule", "stop_schedule", "restart_schedule")
+            and not inferred_type
+        ):
             inferred_type = _infer_schedule_type(value)
 
         if inferred_type:
@@ -591,10 +661,10 @@ def _deserialize_value(value: Any, target_type: Optional[Type] = None, field_nam
                 return from_dict(value, registered_cls)
 
         # If we have a target type hint, use it
-        if target_type and target_type is not type(None):
-            origin = get_origin(target_type)
+        if target_type and target_type is not NoneType:
+            target_type = _resolve_union_type(target_type, value)
             # Don't try to instantiate Union types directly
-            if origin is not Union:
+            if not _is_union_type(target_type):
                 try:
                     return from_dict(value, target_type)
                 except (TypeError, ValueError):
@@ -606,16 +676,15 @@ def _deserialize_value(value: Any, target_type: Optional[Type] = None, field_nam
     # Handle lists
     if isinstance(value, list):
         # Get element type from target_type if available
-        element_type = None
-        if target_type:
-            origin = get_origin(target_type)
-            if origin in (list, List, Sequence):
-                args = get_args(target_type)
-                if args:
-                    element_type = args[0]
+        element_type = _sequence_element_type(target_type) if target_type else None
 
         # For schedule and volume lists, pass field_name for type inference
-        if field_name in ("start_schedule", "stop_schedule", "restart_schedule", "volumes"):
+        if field_name in (
+            "start_schedule",
+            "stop_schedule",
+            "restart_schedule",
+            "volumes",
+        ):
             return [_deserialize_value(v, element_type, field_name) for v in value]
 
         return [_deserialize_value(v, element_type) for v in value]
@@ -688,26 +757,14 @@ def from_dict(data: Dict[str, Any], cls: Type[T]) -> T:
                 # Apply human-readable parsing first (memory sizes, time durations)
                 value = _maybe_parse_value(value, field.name)
 
-                # Handle Union types (e.g., Optional, Union[A, B])
-                origin = get_origin(field_type)
-                if origin is Union:
-                    args = get_args(field_type)
-                    # For Optional[X], try to deserialize as X
-                    non_none_args = [a for a in args if a is not type(None)]
-                    if len(non_none_args) == 1:
-                        field_type = non_none_args[0]
-                    elif value is not None and isinstance(value, dict) and "type" in value:
-                        # Use type to determine which union member
-                        type_name = value["type"]
-                        for arg in non_none_args:
-                            if hasattr(arg, "__name__") and arg.__name__ == type_name:
-                                field_type = arg
-                                break
+                field_type = _resolve_union_type(field_type, value)
 
-                processed_data[field.name] = _deserialize_value(value, field_type, field_name=field.name)
-            elif field.default is not field.default_factory:
-                # Use default if available
-                pass  # Let the dataclass handle defaults
+                processed_data[field.name] = _deserialize_value(
+                    value, field_type, field_name=field.name
+                )
+            elif field.default is not MISSING or field.default_factory is not MISSING:
+                # Let the dataclass constructor apply defaults.
+                continue
 
         return cls(**processed_data)
 
@@ -715,7 +772,12 @@ def from_dict(data: Dict[str, Any], cls: Type[T]) -> T:
     return cls(**data)
 
 
-def serialize(obj: Any, format: Literal["json", "yaml"] = "json", indent: int = 2, include_none: bool = False) -> str:
+def serialize(
+    obj: Any,
+    format: Literal["json", "yaml"] = "json",
+    indent: int = 2,
+    include_none: bool = False,
+) -> str:
     """Serialize an object to JSON or YAML string.
 
     Args:
@@ -735,7 +797,9 @@ def serialize(obj: Any, format: Literal["json", "yaml"] = "json", indent: int = 
     if format == "json":
         return json.dumps(data, indent=indent, default=str)
     elif format == "yaml":
-        return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        return yaml.dump(
+            data, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
     else:
         raise ValueError(f"Unknown format: {format}")
 
@@ -761,10 +825,21 @@ def deserialize(data: str, cls: Type[T], format: Literal["json", "yaml"] = "json
     else:
         raise ValueError(f"Unknown format: {format}")
 
+    if not isinstance(parsed, Mapping):
+        raise ValueError(
+            f"Serialized {cls.__name__} payload must be a mapping, got {type(parsed).__name__}"
+        )
+
     return from_dict(parsed, cls)
 
 
-def serialize_to_file(obj: Any, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None, indent: int = 2, include_none: bool = False) -> None:
+def serialize_to_file(
+    obj: Any,
+    path: Union[str, Path],
+    format: Optional[Literal["json", "yaml"]] = None,
+    indent: int = 2,
+    include_none: bool = False,
+) -> None:
     """Serialize an object to a file.
 
     Args:
@@ -783,10 +858,14 @@ def serialize_to_file(obj: Any, path: Union[str, Path], format: Optional[Literal
             format = "json"
 
     content = serialize(obj, format=format, indent=indent, include_none=include_none)
-    path.write_text(content)
+    secure_write_text(path, content)
 
 
-def deserialize_from_file(path: Union[str, Path], cls: Type[T], format: Optional[Literal["json", "yaml"]] = None) -> T:
+def deserialize_from_file(
+    path: Union[str, Path],
+    cls: Type[T],
+    format: Optional[Literal["json", "yaml"]] = None,
+) -> T:
     """Deserialize an object from a file.
 
     Args:
@@ -814,7 +893,13 @@ def _register_taskflows_types():
     """Register all taskflows types in the type registry."""
     # Import here to avoid circular imports
     from taskflows.service import Venv, Service, RestartPolicy
-    from taskflows.docker import DockerContainer, DockerImage, Volume, Ulimit, ContainerLimits
+    from taskflows.docker import (
+        DockerContainer,
+        DockerImage,
+        Volume,
+        Ulimit,
+        ContainerLimits,
+    )
     from taskflows.schedule import Calendar, Periodic
     from taskflows.constraints import (
         CgroupConfig,
@@ -905,12 +990,18 @@ def load_services_from_yaml(path: Union[str, Path]) -> List["Service"]:
     if not isinstance(data, dict):
         raise ValueError(f"YAML file must contain a mapping, got {type(data).__name__}")
 
-    if "taskflows_services" not in data:
-        raise ValueError("YAML file must contain a 'taskflows_services' key with a list of service definitions")
+    services_key = "taskflows_services" if "taskflows_services" in data else "services"
+    if services_key not in data:
+        raise ValueError(
+            "YAML file must contain a 'services' key (or legacy "
+            "'taskflows_services' key) with a list of service definitions"
+        )
 
-    services_data = data["taskflows_services"]
+    services_data = data[services_key]
     if not isinstance(services_data, list):
-        raise ValueError(f"'services' must be a list, got {type(services_data).__name__}")
+        raise ValueError(
+            f"'services' must be a list, got {type(services_data).__name__}"
+        )
 
     services = []
     for service_data in services_data:
@@ -921,7 +1012,9 @@ def load_services_from_yaml(path: Union[str, Path]) -> List["Service"]:
     return services
 
 
-def save_services_to_yaml(services: List["Service"], path: Union[str, Path], include_none: bool = False) -> None:
+def save_services_to_yaml(
+    services: List["Service"], path: Union[str, Path], include_none: bool = False
+) -> None:
     """Save multiple services to a YAML file.
 
     Args:
@@ -937,7 +1030,9 @@ def save_services_to_yaml(services: List["Service"], path: Union[str, Path], inc
         s.pop("type", None)
 
     data = {"services": services_data}
-    content = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    path.write_text(content)
+    content = yaml.dump(
+        data, default_flow_style=False, allow_unicode=True, sort_keys=False
+    )
+    secure_write_text(path, content)
 
     logger.info(f"Saved {len(services)} services to {path}")

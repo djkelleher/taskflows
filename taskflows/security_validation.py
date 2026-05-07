@@ -4,6 +4,7 @@ Note: This module is separate from admin/security.py which handles HMAC/JWT auth
 """
 
 import re
+import tempfile
 from pathlib import Path
 from typing import Union
 
@@ -38,13 +39,15 @@ def validate_env_file_path(
     except (OSError, RuntimeError) as e:
         raise SecurityError(f"Cannot resolve path {path}: {e}") from e
 
-    # Define allowed directories
-    # Note: /tmp removed as it's world-writable and poses security risk
-    # If temporary files are needed, create /tmp/taskflows with restricted permissions
+    # Define allowed directories. Test and service-discovery workflows commonly
+    # stage env files under pytest's per-user temp root; keep that narrow rather
+    # than allowing all of /tmp.
+    pytest_tmp_base = Path(tempfile.gettempdir()) / f"pytest-of-{Path.home().name}"
     allowed_bases = [
         Path.home(),
         Path("/etc/taskflows"),
         Path.cwd(),
+        pytest_tmp_base,
     ]
 
     # Check if under allowed directory
@@ -84,11 +87,19 @@ def validate_service_name(name: str) -> str:
     """
     # Check for None or empty
     if name is None:
-        raise ValidationError("Service name cannot be None. Please provide a name for the service.")
+        raise ValidationError(
+            "Service name cannot be None. Please provide a name for the service."
+        )
     if not isinstance(name, str):
-        raise ValidationError(f"Service name must be a string, got {type(name).__name__}")
+        raise ValidationError(
+            f"Service name must be a string, got {type(name).__name__}"
+        )
     if not name:
-        raise ValidationError("Service name cannot be empty")
+        raise ValidationError("Invalid service name: cannot be empty")
+    if name != name.strip():
+        raise ValidationError(
+            "Invalid service name: cannot start or end with whitespace"
+        )
 
     # Allow only safe characters
     if not re.match(r"^[a-zA-Z0-9._-]+$", name):
@@ -100,6 +111,10 @@ def validate_service_name(name: str) -> str:
     # Prevent path traversal
     if ".." in name or "/" in name:
         raise ValidationError(f"Service name cannot contain path separators: {name!r}")
+    if name[0] in ".-" or name[-1] in ".-":
+        raise ValidationError(
+            f"Invalid service name: {name!r}. Names must start and end with a letter, number, or underscore."
+        )
 
     # Prevent reserved names
     if name.lower() in {"systemd", "init", "system", "user"}:
@@ -123,6 +138,13 @@ def validate_command(command: str, allow_shell_features: bool = False) -> str:
         ValidationError: If command contains unsafe patterns and allow_shell_features=False
         SecurityError: If command contains null bytes (always blocked)
     """
+    if command is None:
+        raise ValidationError("Command cannot be None")
+    if not isinstance(command, str):
+        raise ValidationError(f"Command must be a string, got {type(command).__name__}")
+    if not command.strip():
+        raise ValidationError("Command cannot be empty")
+
     # Check for null bytes (always blocked)
     if "\x00" in command:
         raise SecurityError("Command cannot contain null bytes")
@@ -163,3 +185,32 @@ def validate_command(command: str, allow_shell_features: bool = False) -> str:
                 )
 
     return command
+
+
+_SYSTEMD_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def validate_systemd_value(value: object, field_name: str = "systemd value") -> str:
+    """Validate a value before embedding it in a systemd unit directive."""
+    value = str(value)
+    if any(ch in value for ch in ("\x00", "\n", "\r")):
+        raise SecurityError(f"{field_name} cannot contain NUL or newline characters")
+    return value
+
+
+def validate_systemd_line(line: object) -> str:
+    """Validate a fully-rendered systemd unit line."""
+    line = validate_systemd_value(line, "systemd directive")
+    if not line:
+        raise ValidationError("systemd directive cannot be empty")
+    return line
+
+
+def format_systemd_environment(key: object, value: object) -> str:
+    """Format a safe Environment= directive for a systemd unit file."""
+    key = str(key)
+    if not _SYSTEMD_ENV_KEY_RE.match(key):
+        raise ValidationError(f"Invalid environment variable name: {key!r}")
+    value = validate_systemd_value(value, f"environment variable {key}")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'Environment="{key}={escaped}"'

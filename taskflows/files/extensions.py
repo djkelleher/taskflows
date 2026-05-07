@@ -360,4 +360,7 @@ file_extensions = [
     "zst",
 ]
 
-file_extensions_re = re.compile(r"\.(" + "|".join(file_extensions) + r")$", re.IGNORECASE)
+file_extensions_re = re.compile(
+    r"\.(" + "|".join(re.escape(extension) for extension in file_extensions) + r")$",
+    re.IGNORECASE,
+)

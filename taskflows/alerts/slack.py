@@ -65,7 +65,9 @@ class _SlackChannelQueue:
 
         worker = self._workers.get(channel_name)
         if worker is None or worker.done():
-            self._workers[channel_name] = asyncio.create_task(self._run_channel(channel_name))
+            self._workers[channel_name] = asyncio.create_task(
+                self._run_channel(channel_name)
+            )
 
         result = asyncio.get_running_loop().create_future()
         await queue.put(_SlackSendRequest(operation=operation, result=result))
@@ -94,7 +96,9 @@ class _SlackChannelQueue:
             if queue.empty():
                 self._queues.pop(channel_name, None)
             else:
-                self._workers[channel_name] = asyncio.create_task(self._run_channel(channel_name))
+                self._workers[channel_name] = asyncio.create_task(
+                    self._run_channel(channel_name)
+                )
 
 
 _channel_queues: "WeakKeyDictionary[asyncio.AbstractEventLoop, _SlackChannelQueue]" = (
@@ -130,6 +134,8 @@ async def try_post_message(
     **kwargs,
 ):
     """Post a message to a slack channel, with retries."""
+    if retries < 0:
+        raise ValueError("retries must be greater than or equal to 0")
     if not text:
         return False
     for _ in range(retries + 1):
@@ -156,6 +162,8 @@ async def send_slack_message(
     zip_attachment_files: bool = False,
     **_,
 ) -> bool:
+    if retries < 0:
+        raise ValueError("retries must be greater than or equal to 0")
     return await _get_channel_queue().enqueue(
         channel=channel,
         operation=lambda: _send_slack_message_immediately(

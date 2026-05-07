@@ -5,13 +5,16 @@ from dataclasses import dataclass
 from io import BytesIO, StringIO
 from itertools import cycle
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple, Union
 
 import emoji
 from loguru import logger
 
+if TYPE_CHECKING:
+    from .components import Table
 
-def get_logger(name: str = None):
+
+def get_logger(name: str | None = None):
     """Get a loguru logger instance."""
     return logger
 
@@ -71,7 +74,7 @@ class EmojiCycle:
         is less than or equal to 2. It then shuffles them randomly to ensure variety
         in emoji selection and initializes an iterator to cycle through these emojis.
         """
-        all_emojis = [e for e in emoji.EMOJI_DATA.keys() if len(e) <= 2]
+        all_emojis = [e for e in emoji.EMOJI_DATA if len(e) <= 2]
         random.shuffle(all_emojis)
         self.emoji_iter = cycle(all_emojis)
         # Cache for group names to emoji mapping
@@ -109,12 +112,10 @@ def use_inline_tables(tables: Sequence["Table"], inline_tables_max_rows: int) ->
     """
     if not tables:
         return True  # No tables to display, so inline is appropriate
-    if (
+    return (
         sum(len(t.rows) if t.rows is not None else 0 for t in tables)
         < inline_tables_max_rows
-    ):
-        return True
-    return False
+    )
 
 
 def attach_tables(tables: Sequence["Table"], attachments_max_size_mb: int) -> bool:
@@ -175,6 +176,7 @@ def prepare_attachments(
     # Normalize input to list
     if not isinstance(attachment_files, (list, tuple)):
         attachment_files = [attachment_files]
+    attachment_files = list(attachment_files)
 
     # Separate AttachmentFile objects from file paths
     attachment_contents: List[AttachmentFile] = []
@@ -195,6 +197,10 @@ def prepare_attachments(
                 total_size_bytes += file_path.stat().st_size
             else:
                 logger.warning(f"Attachment file not found: {file_path}")
+
+    valid_attachment_count = len(file_paths) + len(attachment_contents)
+    if valid_attachment_count == 0:
+        return [], None
 
     # Calculate total size in MB
     total_size_mb = total_size_bytes / (1024 * 1024)
@@ -230,7 +236,7 @@ def prepare_attachments(
         # Determine zip filename
         if zip_filename:
             final_zip_name = zip_filename
-        elif len(attachment_files) == 1:
+        elif valid_attachment_count == 1:
             # Use single file's name + .zip
             if attachment_contents:
                 final_zip_name = attachment_contents[0].filename + ".zip"

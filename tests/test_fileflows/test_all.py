@@ -3,17 +3,16 @@ import pytest
 
 def test_imports():
     """Test that all modules can be imported."""
-    from taskflows.files import S3, Files, S3Cfg
-    from taskflows.files.core import Files
-    from taskflows.files.extensions import file_extensions_re
-    from taskflows.files.s3 import S3, S3Cfg
-    from taskflows.files.utils import (
-        csv_to_parquet,
-        csvs_to_parquet,
-        gzip_file,
-        gzip_files,
-        with_parquet_extension,
-    )
+    import taskflows.files as files
+
+    assert files.Files
+    assert files.S3
+    assert files.S3Cfg
+    assert files.csv_to_parquet
+    assert files.csvs_to_parquet
+    assert files.gzip_file
+    assert files.gzip_files
+    assert files.with_parquet_extension
 
 
 def test_package_structure():

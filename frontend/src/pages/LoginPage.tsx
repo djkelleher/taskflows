@@ -27,7 +27,7 @@ export function LoginPage() {
 
     try {
       const response = await login(username, password);
-      storeLogin(response.access_token, response.refresh_token);
+      storeLogin(response.access_token, response.refresh_token, response.csrf_token);
       navigate("/");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Login failed";

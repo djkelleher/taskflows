@@ -6,7 +6,10 @@ and command injection prevention.
 
 import pytest
 from pathlib import Path
+from taskflows.admin import auth as admin_auth
+from taskflows.admin import security as admin_security
 from taskflows.security_validation import (
+    validate_command,
     validate_env_file_path,
     validate_service_name,
 )
@@ -148,6 +151,28 @@ class TestServiceNameValidation:
         with pytest.raises(ValidationError, match="Invalid service name"):
             validate_service_name("   ")
 
+    @pytest.mark.parametrize("name", [".", "-", ".hidden", "-unit", "unit.", "unit-"])
+    def test_reject_ambiguous_punctuation_boundaries(self, name):
+        """Service names should not create hidden or punctuation-only unit names."""
+        with pytest.raises(ValidationError, match="Invalid service name"):
+            validate_service_name(name)
+
+
+class TestCommandValidation:
+    """Test validate_command gives predictable errors."""
+
+    @pytest.mark.parametrize("command", [None, "", "   ", ["echo", "hello"]])
+    def test_reject_invalid_command_values(self, command):
+        with pytest.raises(ValidationError):
+            validate_command(command)
+
+    def test_reject_null_bytes(self):
+        with pytest.raises(SecurityError):
+            validate_command("echo ok\x00")
+
+    def test_allow_plain_command(self):
+        assert validate_command("python script.py") == "python script.py"
+
 
 class TestDockerContainerEnvFileValidation:
     """Integration tests for DockerContainer env_file validation."""
@@ -171,7 +196,6 @@ class TestDockerContainerEnvFileValidation:
     def test_docker_container_blocks_traversal(self, tmp_path):
         """Test that DockerContainer blocks path traversal in env_file."""
         from taskflows.docker import DockerContainer
-        from taskflows.exceptions import SecurityError, ValidationError
 
         # Should raise SecurityError for path traversal
         # Need enough ../ to escape /tmp (pytest tmp_path is deeply nested)
@@ -205,7 +229,6 @@ class TestServiceEnvFileValidation:
     def test_service_blocks_traversal(self, tmp_path):
         """Test that Service blocks path traversal in env_file."""
         from taskflows.service import Service
-        from taskflows.exceptions import SecurityError, ValidationError
 
         # Should raise SecurityError for path traversal
         # Need enough ../ to escape /tmp (pytest tmp_path is deeply nested)
@@ -219,7 +242,6 @@ class TestServiceEnvFileValidation:
     def test_service_validates_name(self):
         """Test that Service validates service name."""
         from taskflows.service import Service
-        from taskflows.exceptions import SecurityError, ValidationError
 
         # Should raise ValidationError for invalid name
         with pytest.raises(ValidationError):
@@ -227,3 +249,121 @@ class TestServiceEnvFileValidation:
                 name="../malicious",
                 start_command="python script.py",
             )
+
+
+class TestSystemdUnitValidation:
+    """Integration tests for systemd unit directive hardening."""
+
+    def test_service_blocks_description_newline_injection(self):
+        from taskflows.service import Service
+
+        with pytest.raises(SecurityError):
+            Service(
+                name="test-service",
+                start_command="python script.py",
+                description="safe\n[Service]\nExecStart=/bin/evil",
+            )
+
+    def test_service_blocks_environment_value_newline_injection(self):
+        from taskflows.service import Service
+
+        with pytest.raises(SecurityError):
+            Service(
+                name="test-service",
+                start_command="python script.py",
+                env={"SAFE": "ok\nEnvironment=EVIL=1"},
+            )
+
+    def test_service_blocks_invalid_environment_key(self):
+        from taskflows.service import Service
+
+        with pytest.raises(ValidationError):
+            Service(
+                name="test-service",
+                start_command="python script.py",
+                env={"BAD-NAME": "value"},
+            )
+
+
+class TestAdminSecurityState:
+    def test_malformed_password_hash_fails_closed(self):
+        assert admin_auth.verify_password("password", "not-a-valid-hash") is False
+
+    def test_corrupt_users_file_fails_closed(self, tmp_path, monkeypatch):
+        users_file = tmp_path / "users.json"
+        users_file.write_text("{not-json")
+        monkeypatch.setattr(admin_auth, "users_file", users_file)
+
+        with pytest.raises(RuntimeError, match="not valid JSON"):
+            admin_auth.load_users()
+
+    def test_non_object_ui_config_fails_closed(self, tmp_path, monkeypatch):
+        ui_config_file = tmp_path / "ui_config.json"
+        ui_config_file.write_text("[]")
+        monkeypatch.setattr(admin_auth, "ui_config_file", ui_config_file)
+        monkeypatch.delenv(admin_auth.ENV_JWT_SECRET, raising=False)
+
+        with pytest.raises(RuntimeError, match="must contain a JSON object"):
+            admin_auth.load_ui_config()
+
+    def test_refresh_token_revocation_blocks_reuse(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            admin_auth, "refresh_tokens_file", tmp_path / "refresh_tokens.json"
+        )
+
+        token = admin_auth.create_refresh_token("alice", "jwt-secret")
+
+        assert admin_auth.verify_token(token, "jwt-secret", "refresh") == "alice"
+        assert admin_auth.revoke_refresh_token(token, "jwt-secret") is True
+        assert admin_auth.verify_token(token, "jwt-secret", "refresh") is None
+
+    def test_csrf_tokens_are_session_scoped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(admin_security, "_csrf_tokens_file", tmp_path / "csrf.json")
+
+        token_one = {
+            "token": "token-one",
+            "expiry": 4_000_000_000,
+            "signature": "sig-one",
+            "username": "alice",
+        }
+        token_two = {
+            "token": "token-two",
+            "expiry": 4_000_000_000,
+            "signature": "sig-two",
+            "username": "alice",
+        }
+
+        admin_security.store_csrf_token("alice", token_one)
+        admin_security.store_csrf_token("alice", token_two)
+
+        assert admin_security.get_csrf_token_data("alice", "token-one") == token_one
+        assert admin_security.get_csrf_token_data("alice", "token-two") == token_two
+
+        admin_security.remove_csrf_token("alice", "token-one")
+
+        assert admin_security.get_csrf_token_data("alice", "token-one") is None
+        assert admin_security.get_csrf_token_data("alice", "token-two") == token_two
+
+    def test_corrupt_security_state_fails_closed(self, tmp_path, monkeypatch):
+        csrf_file = tmp_path / "csrf.json"
+        csrf_file.write_text("{not-json")
+        monkeypatch.setattr(admin_security, "_csrf_tokens_file", csrf_file)
+
+        with pytest.raises(RuntimeError, match="corrupt"):
+            admin_security.get_csrf_token_data("alice", "token")
+
+    def test_hmac_signature_requires_request_binding(self):
+        with pytest.raises(ValueError, match="method, path, and nonce"):
+            admin_security.calculate_hmac_signature("secret", "123", "")
+
+    def test_malformed_csrf_token_fails_closed(self):
+        valid, error = admin_security.validate_csrf_token(
+            "token",
+            "alice",
+            "not-an-int",
+            "signature",
+            "secret",
+        )
+
+        assert valid is False
+        assert error == "Invalid CSRF token expiry"

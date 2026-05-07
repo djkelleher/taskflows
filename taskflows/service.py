@@ -1,7 +1,11 @@
+import asyncio
 import os
 import re
+import shlex
 import subprocess
+import stat
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,18 +22,15 @@ from .common import (
     extract_service_name,
     load_service_files,
     logger,
+    secure_write_text,
     services_data_dir,
     systemd_dir,
 )
 from .constraints import (
     CgroupConfig,
-    CPUPressure,
-    CPUs,
     HardwareConstraint,
-    IOPressure,
-    Memory,
-    MemoryPressure,
     SystemLoadConstraint,
+    systemd_directive_name,
 )
 import docker.errors
 from .docker import (
@@ -39,7 +40,7 @@ from .docker import (
     get_docker_client,
 )
 from .exec import PickledFunction
-from .schedule import Calendar, Periodic, Schedule
+from .schedule import Schedule
 
 ServiceT = Union[str, "Service"]
 ServicesT = Union[ServiceT, Sequence[ServiceT]]
@@ -160,14 +161,18 @@ class ServiceRegistry:
     def to_dict(self, include_none: bool = False) -> Dict:
         """Convert registry to a dictionary representation."""
         from taskflows.serialization import to_dict as serialize_to_dict
+
         with self._lock:
             return {
-                "services": [serialize_to_dict(s, include_none) for s in self._services.values()]
+                "services": [
+                    serialize_to_dict(s, include_none) for s in self._services.values()
+                ]
             }
 
     def to_json(self, indent: int = 2, include_none: bool = False) -> str:
         """Serialize registry to JSON string."""
         import json
+
         data = self.to_dict(include_none)
         # Remove type field from services since we know they're services
         for s in data["services"]:
@@ -177,13 +182,21 @@ class ServiceRegistry:
     def to_yaml(self, include_none: bool = False) -> str:
         """Serialize registry to YAML string."""
         import yaml
+
         data = self.to_dict(include_none)
         # Remove type field from services since we know they're services
         for s in data["services"]:
             s.pop("type", None)
-        return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        return yaml.dump(
+            data, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
 
-    def to_file(self, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None, include_none: bool = False) -> None:
+    def to_file(
+        self,
+        path: Union[str, Path],
+        format: Optional[Literal["json", "yaml"]] = None,
+        include_none: bool = False,
+    ) -> None:
         """Save registry to a file."""
         path = Path(path)
         if format is None:
@@ -193,12 +206,13 @@ class ServiceRegistry:
             content = self.to_yaml(include_none)
         else:
             content = self.to_json(include_none=include_none)
-        path.write_text(content)
+        secure_write_text(path, content)
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ServiceRegistry":
         """Create registry from a dictionary representation."""
         from taskflows.serialization import from_dict as deserialize_from_dict
+
         services_data = data.get("services", [])
         services = [deserialize_from_dict(s, Service) for s in services_data]
         return cls(*services)
@@ -207,16 +221,20 @@ class ServiceRegistry:
     def from_json(cls, data: str) -> "ServiceRegistry":
         """Deserialize registry from JSON string."""
         import json
+
         return cls.from_dict(json.loads(data))
 
     @classmethod
     def from_yaml(cls, data: str) -> "ServiceRegistry":
         """Deserialize registry from YAML string."""
         import yaml
+
         return cls.from_dict(yaml.safe_load(data))
 
     @classmethod
-    def from_file(cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None) -> "ServiceRegistry":
+    def from_file(
+        cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None
+    ) -> "ServiceRegistry":
         """Load registry from a file."""
         path = Path(path)
         if format is None:
@@ -277,12 +295,14 @@ class Venv:
     custom_path: Optional[str | Path] = None
 
     def create_env_command(self, command: str) -> str:
+        env_name = shlex.quote(self.env_name)
         # If custom path is provided, use it directly
         if self.custom_path:
             exe = Path(self.custom_path)
             if not exe.is_file():
                 raise FileNotFoundError(f"Custom executable not found: {exe}")
-            return f"{exe} run -n {self.env_name} --no-capture-output {command}"
+            runner = shlex.quote(str(exe))
+            return f"{runner} run -n {env_name} --no-capture-output {command}"
 
         home = Path.home()
         exes = (
@@ -313,7 +333,8 @@ class Venv:
                 # Use stdbuf to force line buffering on stdout and stderr and ensure
                 # PYTHONUNBUFFERED=1 is set for the executed process (journald streaming)
                 # Note: env assignment must precede the command it applies to.
-                return f"{exe} run -n {self.env_name} --no-capture-output {command}"
+                runner = shlex.quote(str(exe))
+                return f"{runner} run -n {env_name} --no-capture-output {command}"
         raise FileNotFoundError(f"Virtualenv not found! Checked: {exes}")
 
 
@@ -398,13 +419,19 @@ class Service:
     # description of this service.
     description: Optional[str] = None
     # cgroup configuration for resource limits
-    cgroup_config: Optional['CgroupConfig'] = None
+    cgroup_config: Optional["CgroupConfig"] = None
 
     def __post_init__(self):
-        from taskflows.security_validation import validate_service_name, validate_env_file_path
+        from taskflows.security_validation import (
+            format_systemd_environment,
+            validate_env_file_path,
+            validate_service_name,
+            validate_systemd_line,
+            validate_systemd_value,
+        )
 
         self._pkl_funcs = []
-        self.env = self.env or {}
+        self.env = dict(self.env or {})
         self.env["PYTHONUNBUFFERED"] = "1"
 
         # Handle named environments (string references)
@@ -416,7 +443,10 @@ class Service:
             if not env_obj:
                 raise ValueError(f"Named environment '{env_name}' not found")
 
-            logger.info(f"Loaded named environment '{env_name}' for service {self.name}")
+            logger.info(
+                f"Loaded named environment '{env_name}' for service {self.name}"
+            )
+            self.env["TASKFLOWS_NAMED_ENV"] = env_name
             self.environment = env_obj  # Already a Venv or DockerContainer
 
         # Handle Docker container environments - sync names before validation
@@ -445,7 +475,9 @@ class Service:
         # SECURITY: Validate env_file path to prevent directory traversal
         if self.env_file:
             try:
-                self.env_file = str(validate_env_file_path(self.env_file, allow_nonexistent=True))
+                self.env_file = str(
+                    validate_env_file_path(self.env_file, allow_nonexistent=True)
+                )
             except Exception as e:
                 logger.error(f"Invalid env_file path: {e}")
                 raise
@@ -470,11 +502,11 @@ class Service:
                 container.volumes = list(container.volumes) + [services_volume]
 
             logger.info(f"Using name '{self.name}' for service and container")
-            
+
             # Apply cgroup configuration to container if not already set
             if self.cgroup_config and not container.cgroup_config:
                 container.cgroup_config = self.cgroup_config
-            
+
             # Set up slice for systemd resource management
             self.slice = f"{self.name}.slice"
 
@@ -505,7 +537,9 @@ class Service:
                         self.restart_policy = migrated_policy
                     else:
                         # Service policy takes precedence over container policy
-                        self.restart_policy = normalize_restart_policy(self.restart_policy)
+                        self.restart_policy = normalize_restart_policy(
+                            self.restart_policy
+                        )
                         logger.warning(
                             f"Both service and container have restart policies. "
                             f"Using service policy: {self.restart_policy}, "
@@ -528,6 +562,8 @@ class Service:
                 if self.restart_policy:
                     self.restart_policy = normalize_restart_policy(self.restart_policy)
 
+                if pkl_func := container.prepare_callable_command():
+                    self._pkl_funcs.append(pkl_func)
                 self.start_command = container.docker_run_cli_command()
                 self.stop_command = f"docker stop {self.name}"
                 self.restart_command = f"docker restart {self.name}"
@@ -541,6 +577,8 @@ class Service:
             raise ValueError("Service name is required")
         if not self.start_command:
             raise ValueError("Service start_command is required")
+        if self.timeout is not None and self.timeout <= 0:
+            raise ValueError("Service timeout must be greater than 0 seconds")
 
         for attr in ("start_command", "stop_command", "restart_command"):
             if cmd := getattr(self, attr):
@@ -552,10 +590,15 @@ class Service:
                     cmd = self.environment.create_env_command(cmd)
                 setattr(self, attr, cmd)
 
+        def unit_reference(arg):
+            if isinstance(arg, Service):
+                return f"{arg.base_file_stem}.service"
+            return validate_systemd_value(arg, "systemd unit reference")
+
         def join(args):
             if not isinstance(args, (list, tuple)):
                 args = [args]
-            return " ".join(args)
+            return " ".join(unit_reference(arg) for arg in args)
 
         self.unit_entries = set()
         self.service_entries = {
@@ -569,7 +612,9 @@ class Service:
             self.service_entries.add(f"ExecReload={self.restart_command}")
         # TODO ExecStopPost?
         if self.working_directory:
-            self.service_entries.add(f"WorkingDirectory={self.working_directory}")
+            self.service_entries.add(
+                f"WorkingDirectory={validate_systemd_value(self.working_directory, 'working_directory')}"
+            )
         if self.timeout:
             self.service_entries.add(f"RuntimeMaxSec={self.timeout}")
         if self.env_file:
@@ -577,15 +622,17 @@ class Service:
             # that systemd's EnvironmentFile doesn't understand
             env_file_vars = self._parse_env_file(self.env_file)
             if env_file_vars:
-                self.service_entries.add(
-                    "\n".join([f'Environment="{k}={v}"' for k, v in env_file_vars.items()])
+                self.service_entries.update(
+                    format_systemd_environment(k, v) for k, v in env_file_vars.items()
                 )
         if self.env:
-            self.service_entries.add(
-                "\n".join([f'Environment="{k}={v}"' for k, v in self.env.items()])
+            self.service_entries.update(
+                format_systemd_environment(k, v) for k, v in self.env.items()
             )
         if self.description:
-            self.unit_entries.add(f"Description={self.description}")
+            self.unit_entries.add(
+                f"Description={validate_systemd_value(self.description, 'description')}"
+            )
         if self.start_after:
             self.unit_entries.add(f"After={join(self.start_after)}")
         if self.start_before:
@@ -630,23 +677,25 @@ class Service:
             )
             self.unit_entries.update(rp.unit_entries)
             self.service_entries.update(rp.service_entries)
-            
+
         # Add cgroup configuration directives to systemd service
         if self.cgroup_config:
             cgroup_directives = self.cgroup_config.to_systemd_directives()
 
             for key, value in cgroup_directives.items():
-                # Remove numeric suffix for systemd output
-                # IOReadBandwidthMax_0 -> IOReadBandwidthMax
-                # This allows multiple device directives to work correctly
-                directive_name = key.rsplit('_', 1)[0] if key[-1].isdigit() else key
-                self.service_entries.add(f"{directive_name}={value}")
+                directive_name = systemd_directive_name(key)
+                if directive_name == "Environment":
+                    self.service_entries.add(validate_systemd_line(value))
+                else:
+                    self.service_entries.add(
+                        validate_systemd_line(f"{directive_name}={value}")
+                    )
 
         # Add Docker-specific service entries if using Docker environment
         if isinstance(self.environment, DockerContainer):
             # if self.environment.persisted:
             # Docker start service entries
-            if hasattr(self, 'slice'):
+            if hasattr(self, "slice"):
                 self.service_entries.add(f"Slice={self.slice}")
             # Let docker handle the signal
             # TODO change this?
@@ -745,8 +794,7 @@ class Service:
         # Remove old version if exists
         # For persisted Docker containers, preserve the container
         preserve_container = (
-            isinstance(self.environment, DockerContainer)
-            and self.environment.persisted
+            isinstance(self.environment, DockerContainer) and self.environment.persisted
         )
         await self.remove(preserve_container=preserve_container)
         self._write_timer_units()
@@ -765,10 +813,14 @@ class Service:
                     # For persisted containers, only create if it doesn't already exist
                     # This preserves state and avoids unnecessary recreation
                     if not container.exists:
-                        logger.info(f"Creating persisted Docker container: {container.name}")
+                        logger.info(
+                            f"Creating persisted Docker container: {container.name}"
+                        )
                         container.create(cgroup_parent=self.slice)
                     else:
-                        logger.info(f"Persisted Docker container already exists: {container.name}")
+                        logger.info(
+                            f"Persisted Docker container already exists: {container.name}"
+                        )
                 # For run services, no need to do anything here since
                 # the docker run command is directly in the systemd service file
 
@@ -781,20 +833,24 @@ class Service:
             # Clean up pickle files if service creation fails after they were written
             logger.error(f"Service creation failed, cleaning up pickle files: {e}")
             for func in self._pkl_funcs:
-                pickle_file = services_data_dir.joinpath(f"{func.name}#_{func.attr}.pickle")
+                pickle_file = services_data_dir.joinpath(
+                    f"{func.name}#_{func.attr}.pickle"
+                )
                 try:
                     if pickle_file.exists():
                         pickle_file.unlink()
                         logger.debug(f"Removed pickle file: {pickle_file}")
                 except Exception as cleanup_err:
-                    logger.warning(f"Failed to clean up pickle file {pickle_file}: {cleanup_err}")
+                    logger.warning(
+                        f"Failed to clean up pickle file {pickle_file}: {cleanup_err}"
+                    )
             raise
 
     def logs(self):
         return service_logs(self.name)
 
-    def show_files(self):
-        print(pformat(dict(load_service_files(self.unit_files))))
+    def show_files(self) -> str:
+        return pformat(dict(load_service_files(self.unit_files)))
 
     def _parse_env_file(self, path: str) -> dict:
         """Parse an env file, stripping 'export' prefixes that systemd doesn't understand.
@@ -806,33 +862,47 @@ class Service:
             Dictionary of environment variables.
         """
         from pathlib import Path
+
         env_vars = {}
+        path = Path(path)
+        if not path.exists():
+            logger.warning(f"Env file does not exist yet: {path}")
+            return env_vars
         try:
-            content = Path(path).read_text()
+            content = path.read_text()
             for line in content.splitlines():
                 line = line.strip()
                 # Skip empty lines and comments
-                if not line or line.startswith('#'):
+                if not line or line.startswith("#"):
                     continue
                 # Strip 'export ' prefix if present
-                if line.startswith('export '):
+                if line.startswith("export "):
                     line = line[7:]  # len('export ') == 7
                 # Parse KEY=value
-                if '=' in line:
-                    key, _, value = line.partition('=')
+                if "=" in line:
+                    key, _, value = line.partition("=")
                     key = key.strip()
                     value = value.strip()
                     # Remove surrounding quotes if present
-                    if (value.startswith('"') and value.endswith('"')) or \
-                       (value.startswith("'") and value.endswith("'")):
+                    if (value.startswith('"') and value.endswith('"')) or (
+                        value.startswith("'") and value.endswith("'")
+                    ):
                         value = value[1:-1]
                     if key:
                         env_vars[key] = value
+                else:
+                    raise ValueError(f"Invalid environment line without '=': {line!r}")
         except Exception as e:
-            logger.warning(f"Could not parse env file {path}: {e}")
+            logger.error(f"Could not parse env file {path}: {e}")
+            raise
         return env_vars
 
     def _write_timer_units(self):
+        from taskflows.security_validation import (
+            validate_systemd_line,
+            validate_systemd_value,
+        )
+
         for prefix, schedule in (
             (None, self.start_schedule),
             ("stop", self.stop_schedule),
@@ -848,9 +918,11 @@ class Service:
                 timer.update(schedule.unit_entries)
             content = [
                 "[Unit]",
-                f"Description={prefix + ' ' if prefix else ''}timer for {self.name}",
+                "Description="
+                f"{validate_systemd_value(prefix + ' ' if prefix else '', 'timer prefix')}"
+                f"timer for {self.name}",
                 "[Timer]",
-                *timer,
+                *(validate_systemd_line(line) for line in timer),
                 "[Install]",
                 "WantedBy=timers.target",
             ]
@@ -868,7 +940,9 @@ class Service:
                 unit=self.unit_entries, service=service, prefix="stop"
             )
         if self.restart_schedule:
-            service = [f"ExecStart=systemctl --user restart {os.path.basename(srv_file)}"]
+            service = [
+                f"ExecStart=systemctl --user restart {os.path.basename(srv_file)}"
+            ]
             # Pass unit entries to restart service as well to maintain consistency
             self._write_service_file(
                 unit=self.unit_entries, service=service, prefix="restart"
@@ -884,6 +958,11 @@ class Service:
         service: Optional[Union[List[str], Set[str]]] = None,
         prefix: Optional[str] = None,
     ):
+        from taskflows.security_validation import (
+            validate_systemd_line,
+            validate_systemd_value,
+        )
+
         # Always include [Unit] section with description
         content = ["[Unit]"]
         # Add description based on service type
@@ -891,25 +970,25 @@ class Service:
             description = f"{prefix.capitalize()} service for {self.name}"
         else:
             description = self.description or f"Service for {self.name}"
-        content.append(f"Description={description}")
+        content.append(
+            f"Description={validate_systemd_value(description, 'description')}"
+        )
 
         # Add any additional unit entries
         if unit:
             # Convert set to list if needed
             unit_list = list(unit) if isinstance(unit, set) else unit
-            content.extend(unit_list)
+            content.extend(validate_systemd_line(line) for line in unit_list)
 
         # Convert service set to list if needed
         service_list = list(service) if isinstance(service, set) else service
         content += [
             "[Service]",
-            *service_list,
+            *(validate_systemd_line(line) for line in service_list),
             "[Install]",
             "WantedBy=default.target",
         ]
-        return self._write_systemd_file(
-            "service", "\n".join(content), prefix=prefix
-        )
+        return self._write_systemd_file("service", "\n".join(content), prefix=prefix)
 
     def _write_systemd_file(
         self,
@@ -926,7 +1005,7 @@ class Service:
             logger.warning(f"Replacing existing unit: {file}")
         else:
             logger.info(f"Creating new unit: {file}")
-        file.write_text(content)
+        secure_write_text(file, content, mode=stat.S_IRUSR | stat.S_IWUSR)
         return str(file)
 
     def __repr__(self):
@@ -954,6 +1033,7 @@ class Service:
             A dictionary representation of the service.
         """
         from taskflows.serialization import to_dict
+
         return to_dict(self, include_none=include_none)
 
     def to_json(self, indent: int = 2, include_none: bool = False) -> str:
@@ -967,6 +1047,7 @@ class Service:
             A JSON string representation of the service.
         """
         from taskflows.serialization import serialize
+
         return serialize(self, format="json", indent=indent, include_none=include_none)
 
     def to_yaml(self, include_none: bool = False) -> str:
@@ -979,6 +1060,7 @@ class Service:
             A YAML string representation of the service.
         """
         from taskflows.serialization import serialize
+
         return serialize(self, format="yaml", include_none=include_none)
 
     @classmethod
@@ -992,6 +1074,7 @@ class Service:
             A Service instance.
         """
         from taskflows.serialization import from_dict
+
         return from_dict(data, cls)
 
     @classmethod
@@ -1005,6 +1088,7 @@ class Service:
             A Service instance.
         """
         from taskflows.serialization import deserialize
+
         return deserialize(data, cls, format="json")
 
     @classmethod
@@ -1018,9 +1102,16 @@ class Service:
             A Service instance.
         """
         from taskflows.serialization import deserialize
+
         return deserialize(data, cls, format="yaml")
 
-    def to_file(self, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None, indent: int = 2, include_none: bool = False) -> None:
+    def to_file(
+        self,
+        path: Union[str, Path],
+        format: Optional[Literal["json", "yaml"]] = None,
+        indent: int = 2,
+        include_none: bool = False,
+    ) -> None:
         """Serialize this service to a file.
 
         Args:
@@ -1030,10 +1121,15 @@ class Service:
             include_none: Whether to include None values.
         """
         from taskflows.serialization import serialize_to_file
-        serialize_to_file(self, path, format=format, indent=indent, include_none=include_none)
+
+        serialize_to_file(
+            self, path, format=format, indent=indent, include_none=include_none
+        )
 
     @classmethod
-    def from_file(cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None) -> "Service":
+    def from_file(
+        cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None
+    ) -> "Service":
         """Create a Service from a file.
 
         Args:
@@ -1044,6 +1140,7 @@ class Service:
             A Service instance.
         """
         from taskflows.serialization import deserialize_from_file
+
         return deserialize_from_file(path, cls, format=format)
 
 
@@ -1060,6 +1157,10 @@ def service_logs(service_name: str, n_lines: int = 1000):
     Returns:
         str: The log output.
     """
+    from taskflows.security_validation import validate_service_name
+
+    service_name = validate_service_name(service_name)
+    n_lines = max(1, min(int(n_lines), 100_000))
     container_name = f"{_SYSTEMD_FILE_PREFIX}{service_name}"
 
     # Check if this is a Docker container
@@ -1088,6 +1189,7 @@ def service_logs(service_name: str, n_lines: int = 1000):
         capture_output=True,
         text=True,
         check=True,
+        timeout=int(os.getenv("TASKFLOWS_JOURNALCTL_TIMEOUT_SECONDS", "15")),
     )
     txt = []
     if result.stderr:
@@ -1099,9 +1201,6 @@ def service_logs(service_name: str, n_lines: int = 1000):
 
 # DBus connection management with automatic reconnection (async dbus-next)
 # Uses asyncio for non-blocking D-Bus operations
-
-import asyncio
-
 # Use a dict to store locks per event loop to avoid "bound to different event loop" errors
 _dbus_connection_locks: dict = {}
 _dbus_session_bus: Optional[MessageBus] = None
@@ -1132,10 +1231,8 @@ async def _reset_dbus_connections():
     """Reset DBus connections (called when connection becomes stale)."""
     global _dbus_session_bus, _dbus_manager, _dbus_manager_introspection
     if _dbus_session_bus is not None:
-        try:
+        with suppress(Exception):
             _dbus_session_bus.disconnect()
-        except Exception:
-            pass
     _dbus_session_bus = None
     _dbus_manager = None
     _dbus_manager_introspection = None
@@ -1265,7 +1362,12 @@ async def _dbus_operation_with_retry(operation, operation_name, max_retries=2):
             # Check if this is a connection-related error
             is_connection_error = any(
                 keyword in error_str
-                for keyword in ["connection", "disconnected", "not available", "no reply"]
+                for keyword in [
+                    "connection",
+                    "disconnected",
+                    "not available",
+                    "no reply",
+                ]
             )
 
             if is_connection_error and attempt < max_retries:
@@ -1277,24 +1379,29 @@ async def _dbus_operation_with_retry(operation, operation_name, max_retries=2):
                 await _reset_dbus_connections()
                 await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
                 continue
-            else:
-                # Non-connection error or final attempt - propagate
-                if attempt == max_retries:
-                    logger.error(
-                        f"DBus operation '{operation_name}' failed after {max_retries + 1} attempts: {e}"
-                    )
-                raise
+            # Non-connection error or final attempt - propagate
+            if attempt == max_retries:
+                logger.error(
+                    f"DBus operation '{operation_name}' failed after {max_retries + 1} attempts: {e}"
+                )
+            raise
         except Exception as e:
             # Unexpected error - always propagate
-            logger.error(f"Unexpected error in DBus operation '{operation_name}': {e}", exc_info=True)
+            logger.error(
+                f"Unexpected error in DBus operation '{operation_name}': {e}",
+                exc_info=True,
+            )
             raise
+    raise RuntimeError(f"DBus operation '{operation_name}' exhausted retries")
 
 
 async def reload_unit_files():
     """Reload systemd unit files with automatic retry on connection failure."""
+
     async def _reload():
         mgr = await systemd_manager()
         await mgr.call_reload()
+
     await _dbus_operation_with_retry(_reload, "reload_unit_files")
 
 
@@ -1410,7 +1517,9 @@ async def get_unit_files(
     states: Optional[str | Sequence[str]] = None,
 ) -> List[str]:
     """Get a list of paths of taskflows unit files."""
-    file_states = await get_unit_file_states(unit_type=unit_type, match=match, states=states)
+    file_states = await get_unit_file_states(
+        unit_type=unit_type, match=match, states=states
+    )
     return list(file_states.keys())
 
 
@@ -1452,7 +1561,7 @@ async def get_units(
         "job_type",
         "job_path",
     ]
-    units = [{k: str(v) for k, v in zip(fields, f)} for f in files]
+    units = [{k: str(v) for k, v in zip(fields, f, strict=False)} for f in files]
     logger.debug(f"Found {len(units)} units matching: {pattern}")
     return units
 
@@ -1480,7 +1589,7 @@ def is_start_service(unit_file: str) -> bool:
         True if the unit is the main service (doesn't start with "stop-" or "restart-")
     """
     filename = os.path.basename(unit_file) if os.path.sep in unit_file else unit_file
-    return not (filename.startswith("stop-") or filename.startswith("restart-"))
+    return not filename.startswith(("stop-", "restart-"))
 
 
 async def _start_service(files: Sequence[str]):
@@ -1576,16 +1685,18 @@ async def _disable_service(files: Sequence[str]):
     await disable_files(files)
 
 
-async def _remove_service(service_files: Sequence[str], timer_files: Sequence[str], preserve_container: bool = False):
+async def _remove_service(
+    service_files: Sequence[str],
+    timer_files: Sequence[str],
+    preserve_container: bool = False,
+):
     def valid_file_paths(files):
         files = [Path(f) for f in files]
         return [f for f in files if f.is_file()]
 
     service_files = valid_file_paths(service_files)
     timer_files = valid_file_paths(timer_files)
-    logger.info(
-        f"Removing {len(service_files)} services and {len(timer_files)} timers"
-    )
+    logger.info(f"Removing {len(service_files)} services and {len(timer_files)} timers")
     files = service_files + timer_files
     await _stop_service(files)
     await _disable_service(files)
@@ -1612,7 +1723,7 @@ async def _remove_service(service_files: Sequence[str], timer_files: Sequence[st
         files.extend(services_data_dir.glob(f"{extract_service_name(srv)}#*.pickle"))
     for file in files:
         logger.info(f"Deleting {file}")
-        file.unlink()
+        file.unlink(missing_ok=True)
     logger.info(
         f"Finished removing {len(service_files)} services and {len(timer_files)} timers"
     )

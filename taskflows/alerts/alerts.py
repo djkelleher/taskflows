@@ -88,6 +88,8 @@ class PeriodicMsgSender:
             config: Configuration for periodic messages
             pub_freq: Publish frequency in minutes (will be converted to seconds)
         """
+        if pub_freq <= 0:
+            raise ValueError("pub_freq must be greater than 0 minutes")
         if pub_freq in self._periodic_msgs:
             self._periodic_msgs[pub_freq].append(config)
         else:
@@ -101,29 +103,25 @@ class PeriodicMsgSender:
         freq_seconds = pub_freq * 60  # Convert minutes to seconds
         logger.info(f"Started periodic message sender (every {pub_freq} minutes)")
 
-        while not self._shutting_down:
-            try:
+        try:
+            while not self._shutting_down:
                 cfgs = self._periodic_msgs.get(pub_freq, [])
                 for cfg in cfgs:
                     try:
                         await cfg.publish()
                     except Exception as e:
-                        logger.error(f"Error publishing periodic message: {e}", exc_info=True)
-                        # Continue with other configs even if one fails
-            except asyncio.CancelledError:
-                logger.info(f"Periodic message sender cancelled (freq={pub_freq} min)")
-                break
-            except Exception as e:
-                logger.error(f"Unexpected error in periodic message loop: {e}", exc_info=True)
+                        logger.error(
+                            f"Error publishing periodic message: {e}", exc_info=True
+                        )
 
-            try:
                 await asyncio.sleep(freq_seconds)
-            except asyncio.CancelledError:
-                logger.info(f"Periodic message sender cancelled (freq={pub_freq} min)")
-                break
-            except Exception as e:
-                logger.error(f"Periodic message sender sleep failed: {e}", exc_info=True)
-                raise
+        except asyncio.CancelledError:
+            logger.info(f"Periodic message sender cancelled (freq={pub_freq} min)")
+        except Exception as e:
+            logger.error(
+                f"Unexpected error in periodic message loop: {e}", exc_info=True
+            )
+            raise
 
     def cancel_periodic_tasks(self) -> List[asyncio.Task]:
         """Cancel all periodic message tasks and return them for awaiting."""
@@ -226,12 +224,9 @@ class AlertLogger:
         level: Literal["info", "warning", "error"] = "info",
         nowait: bool = False,
     ):
-        self._log_msg(
-            msg=msg,
-            level=level,
-        )
+        formatted_msg = self._log_msg(msg=msg, level=level)
         if self._periodic_msgs:
-            self._periodic_msgs.msg_buffer.append(msg)
+            self._periodic_msgs.msg_buffer.append(formatted_msg)
             if nowait:
                 asyncio.create_task(self._periodic_msgs.publish())
 
@@ -301,6 +296,7 @@ async def send_alert(
     # Create tasks for concurrent execution
     tasks = []
     for st in send_to:
+        # TODO st.send_message()?
         if isinstance(st, SlackChannel):
             tasks.append(send_slack_message(content=content, channel=str(st), **kwargs))
         elif isinstance(st, EmailAddrs):
@@ -314,6 +310,10 @@ async def send_alert(
                 st,
             )
 
+    if not tasks:
+        logger.error(f"No valid alert destinations were provided: {send_to}")
+        return False
+
     # Execute all tasks concurrently
     sent_ok = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -325,7 +325,7 @@ async def send_alert(
             # Log detailed exception information
             logger.error(
                 f"Error sending alert to {send_to[i]} (type: {type(send_to[i]).__name__}): {result}",
-                exc_info=result,
+                exc_info=(type(result), result, result.__traceback__),
             )
             results.append(False)
         elif isinstance(result, bool):

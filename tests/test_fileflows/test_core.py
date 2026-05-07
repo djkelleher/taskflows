@@ -1,5 +1,3 @@
-import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -56,7 +54,9 @@ def test_move_local_to_local_with_verify(files_instance, sample_file, temp_dir):
     assert not sample_file.exists()
 
 
-def test_move_with_verify_fails_if_destination_missing(files_instance, sample_file, temp_dir):
+def test_move_with_verify_fails_if_destination_missing(
+    files_instance, sample_file, temp_dir
+):
     """Test that move with verify raises error if destination doesn't exist."""
     destination = temp_dir / "destination.txt"
     with patch.object(files_instance, "exists", return_value=False):
@@ -73,12 +73,50 @@ def test_copy_local_to_s3(files_instance, sample_file):
         )
 
 
+def test_copy_local_to_s3_bucket_uses_source_filename(files_instance, sample_file):
+    """Test copying a local file to a bare S3 bucket uses the file name as key."""
+    with patch.object(files_instance.s3.client, "upload_file") as mock_upload_file:
+        files_instance.copy(sample_file, "s3://test-bucket")
+        mock_upload_file.assert_called_once_with(
+            str(sample_file), "test-bucket", sample_file.name
+        )
+
+
+def test_move_local_to_s3_bucket_verifies_uploaded_object(files_instance, sample_file):
+    """Moving to a bare bucket should verify the concrete object path, not only the bucket."""
+    expected_s3_path = f"s3://test-bucket/{sample_file.name}"
+
+    with patch.object(files_instance.s3.client, "upload_file") as mock_upload_file:
+        with patch.object(
+            files_instance.s3,
+            "exists",
+            side_effect=lambda path: path == expected_s3_path,
+        ) as mock_exists:
+            files_instance.move(sample_file, "s3://test-bucket")
+
+    mock_upload_file.assert_called_once_with(
+        str(sample_file), "test-bucket", sample_file.name
+    )
+    mock_exists.assert_called_once_with(expected_s3_path)
+    assert not sample_file.exists()
+
+
 def test_copy_s3_to_local(files_instance, temp_dir):
     """Test copying an S3 file to local."""
     destination = temp_dir / "destination.txt"
     with patch.object(files_instance.s3, "download_file") as mock_download_file:
         files_instance.copy("s3://test-bucket/sample.txt", destination)
         mock_download_file.assert_called_once()
+
+
+def test_copy_s3_to_local_raises_when_download_reports_failure(
+    files_instance, temp_dir
+):
+    """Test copying an S3 file fails if the S3 download helper returns False."""
+    destination = temp_dir / "destination.txt"
+    with patch.object(files_instance.s3, "download_file", return_value=False):
+        with pytest.raises(RuntimeError, match="Failed to download"):
+            files_instance.copy("s3://test-bucket/sample.txt", destination)
 
 
 def test_copy_s3_to_s3(files_instance):
@@ -142,6 +180,7 @@ def test_list_files_local(files_instance, temp_dir):
     (temp_dir / "file1.txt").touch()
     (temp_dir / "file2.txt").touch()
     (temp_dir / "file3.csv").touch()
+    (temp_dir / "nested.txt").mkdir()
 
     # List all files
     files = files_instance.list_files(temp_dir)
@@ -152,6 +191,19 @@ def test_list_files_local(files_instance, temp_dir):
     files = files_instance.list_files(temp_dir, "*.txt")
     assert len(files) == 2
     assert set(f.name for f in files) == {"file1.txt", "file2.txt"}
+
+
+def test_list_files_local_returns_sorted_paths(files_instance, temp_dir):
+    """Test local file listing order is deterministic."""
+    (temp_dir / "b.txt").touch()
+    (temp_dir / "a.txt").touch()
+    (temp_dir / "c.csv").touch()
+
+    files = files_instance.list_files(temp_dir)
+    assert [file.name for file in files] == ["a.txt", "b.txt", "c.csv"]
+
+    txt_files = files_instance.list_files(temp_dir, "*.txt")
+    assert [file.name for file in txt_files] == ["a.txt", "b.txt"]
 
 
 def test_list_files_s3(files_instance):

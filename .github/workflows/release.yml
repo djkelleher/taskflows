@@ -24,7 +24,10 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.x'
+        python-version: '3.12'
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v5
 
     - name: Detect version bump
       id: version
@@ -38,18 +41,9 @@ jobs:
         echo "bumped=$([ "$current_version" != "$previous_version" ] && echo true || echo false)" \
               >> "$GITHUB_OUTPUT"
 
-    - name: Set up Python for publishing
-      if: steps.version.outputs.bumped == 'true'
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
-
     - name: Build sdist + wheel
       if: steps.version.outputs.bumped == 'true'
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install --upgrade build
-        python -m build
+      run: uv build
 
     - name: Publish to PyPI
       if: steps.version.outputs.bumped == 'true'

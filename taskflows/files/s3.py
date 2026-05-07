@@ -6,7 +6,7 @@ from functools import cached_property
 from io import BytesIO
 from pathlib import Path
 from time import sleep
-from typing import Generator, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Generator, List, Literal, Optional, Sequence, Tuple, Union
 
 import boto3
 import duckdb
@@ -25,9 +25,32 @@ from .utils import logger
 PathT = Union[str | Path]
 
 S3Locations = Literal["local", "backblaze", "aws"]
+S3ListReturnAs = Literal["names", "paths", "urls", "obj"]
+_S3_LIST_RETURN_AS_VALUES = {"names", "paths", "urls", "obj"}
 
 
 http_re = re.compile(r"^https?://")
+duckdb_identifier_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _duckdb_string(value: object) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _validate_duckdb_identifier(value: str) -> str:
+    if not duckdb_identifier_re.match(value):
+        raise ValueError(
+            f"Invalid DuckDB identifier {value!r}. Use letters, numbers, and underscores, "
+            "and start with a letter or underscore."
+        )
+    return value
+
+
+def _validate_s3_list_return_as(return_as: str) -> S3ListReturnAs:
+    if return_as not in _S3_LIST_RETURN_AS_VALUES:
+        valid = ", ".join(sorted(_S3_LIST_RETURN_AS_VALUES))
+        raise ValueError(f"return_as must be one of: {valid}")
+    return return_as  # type: ignore[return-value]
 
 
 class S3Cfg(BaseSettings):
@@ -99,29 +122,30 @@ def create_duckdb_secret(
     conn = conn or duckdb
     secret = [
         "TYPE S3",
-        f"KEY_ID '{s3_cfg.aws_access_key_id}'",
-        f"SECRET '{s3_cfg.aws_secret_access_key.get_secret_value()}'",
+        f"KEY_ID {_duckdb_string(s3_cfg.aws_access_key_id)}",
+        f"SECRET {_duckdb_string(s3_cfg.aws_secret_access_key.get_secret_value())}",
     ]
     if s3_cfg.s3_endpoint_url is not None:
         secret += [
-            f"ENDPOINT '{http_re.sub('', s3_cfg.s3_endpoint_url).rstrip('/')}'",
+            f"ENDPOINT {_duckdb_string(http_re.sub('', s3_cfg.s3_endpoint_url).rstrip('/'))}",
             f"USE_SSL {not s3_cfg.s3_endpoint_url.startswith('http://')}",
         ]
         if http_re.match(s3_cfg.s3_endpoint_url):
             secret.append("URL_STYLE path")
     if s3_cfg.s3_region:
-        secret.append(f"REGION '{s3_cfg.s3_region}'")
+        secret.append(f"REGION {_duckdb_string(s3_cfg.s3_region)}")
     secret = ",".join(secret)
     if secret_name is None:
         secret_id = xxh32(secret.encode()).hexdigest()
         secret_name = f"files_s3_{secret_id}"
+    secret_name = _validate_duckdb_identifier(secret_name)
     conn.execute(f"CREATE SECRET IF NOT EXISTS {secret_name} ({secret});")
 
 
 class S3:
     """File operations for s3 protocol object stores."""
 
-    _bucket_and_partition_re = re.compile(r"s3:\/\/([a-zA-Z0-9.\-_]{1,255})(?:\/(.+))?")
+    _bucket_and_partition_re = re.compile(r"s3:\/\/([a-zA-Z0-9.\-_]{1,255})(?:\/(.*))?")
 
     def __init__(self, s3_cfg: Optional[S3Cfg] = None) -> None:
         self.cfg = s3_cfg or S3Cfg()
@@ -139,12 +163,12 @@ class S3:
             bucket_name (str): Bucket to upload to.
             partition_relative_to (Optional[str], optional): Use part of `file` path relative to `partition_relative_to` as s3 partition. If literal "bucket_name", path relative to `bucket_name` arg will be used. Defaults to None.
         """
-        files = [files] if isinstance(files, str) else files
+        files = [files] if isinstance(files, (str, Path)) else files
         for file in files:
             partition = (
                 str(file).split(partition_relative_to)[-1].lstrip("/")
                 if partition_relative_to
-                else file
+                else str(file)
             )
             logger.info(f"Uploading {file} to s3://{bucket_name}/{partition}")
             self.client.upload_file(str(file), bucket_name, partition)
@@ -213,8 +237,9 @@ class S3:
                 # Remove potentially corrupted file
                 if local_path.exists():
                     local_path.unlink()
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                sleep(retry_delay)
+                if attempt < max_retries:
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    sleep(retry_delay)
         logger.error(
             f"Failed to download {local_path} after {max_retries + 1} attempts"
         )
@@ -257,9 +282,8 @@ class S3:
                 s3=self.cfg,
                 conn=con,
             )
-            files = ",".join([f"'{f}'" for f in files])
-            df = con.execute(f"""SELECT * FROM read_parquet({files})""").df()
-        return df
+            file_list = ",".join(_duckdb_string(file) for file in files)
+            return con.execute(f"SELECT * FROM read_parquet({file_list})").df()
 
     def delete_file(self, file: str, if_exists: bool = False):
         """Delete a file from s3.
@@ -277,13 +301,11 @@ class S3:
         except ClientError as err:
             if err.response["Error"]["Code"] == "404":
                 if not if_exists:
-                    raise err
+                    raise
             else:
-                raise err
+                raise
 
-    def delete_files(
-        self, s3_path: str, if_exists: bool = False
-    ):
+    def delete_files(self, s3_path: str, if_exists: bool = False):
         """Delete files matching an S3 path with optional glob pattern.
 
         Args:
@@ -294,7 +316,7 @@ class S3:
         files = self.list_files(s3_path, return_as="paths")
 
         for i in range(0, len(files), 1000):
-            batch = files[i:i + 1000]
+            batch = files[i : i + 1000]
             try:
                 self.client.delete_objects(
                     Bucket=bucket_name,
@@ -303,9 +325,9 @@ class S3:
             except ClientError as err:
                 if err.response["Error"]["Code"] == "404":
                     if not if_exists:
-                        raise err
+                        raise
                 else:
-                    raise err
+                    raise
 
     def move(self, src_path: str, dst_path: str, delete_src: bool):
         """Move files in s3 to another location in s3.
@@ -330,16 +352,25 @@ class S3:
         dst_partition_is_file = self.is_file_path(dst_path)
 
         if src_partition_is_file:
-            assert len(src_files) == 1
-            
+            if len(src_files) != 1:
+                raise ValueError(
+                    f"Expected exactly one file at {src_path!r}, found {len(src_files)}"
+                )
+
         elif dst_partition_is_file:
             raise ValueError(
                 f"Cannot move a partition to a file. Partition: {src_path}, File: {dst_path}"
             )
-        
+
         copied_files = []
         for src_file in src_files:
-            dst_key = f"{dst_partition}/{src_file.split('/')[-1]}"
+            src_name = src_file.rsplit("/", 1)[-1]
+            if src_partition_is_file and dst_partition_is_file:
+                dst_key = dst_partition
+            elif dst_partition:
+                dst_key = f"{dst_partition.rstrip('/')}/{src_name}"
+            else:
+                dst_key = src_name
             logger.info(f"Moving {src_file} to {dst_key}")
             self.client.copy_object(
                 CopySource={"Bucket": src_bucket_name, "Key": src_file},
@@ -353,11 +384,15 @@ class S3:
             if src_partition_is_file:
                 dst_file_path = f"s3://{dst_bucket_name}/{dst_key}"
                 if not self.exists(dst_file_path):
-                    raise FileNotFoundError(f"Destination file does not exist: {dst_file_path}")
+                    raise FileNotFoundError(
+                        f"Destination file does not exist: {dst_file_path}"
+                    )
 
-            logger.info(f"Deleting {len(copied_files)} source files from {src_bucket_name}")
+            logger.info(
+                f"Deleting {len(copied_files)} source files from {src_bucket_name}"
+            )
             for i in range(0, len(copied_files), 1000):
-                batch = copied_files[i:i + 1000]
+                batch = copied_files[i : i + 1000]
                 self.client.delete_objects(
                     Bucket=src_bucket_name,
                     Delete={"Objects": [{"Key": key} for key in batch]},
@@ -390,13 +425,13 @@ class S3:
         bucket, partition = self.bucket_and_partition(file)
         return self.resource.Object(bucket, partition).content_length
 
-    def get_bucket(self, bucket_name: str) -> "Bucket":
+    def get_bucket(self, bucket_name: str) -> Any:
         """Get a bucket object for `bucket_name`. If bucket does not exist, create it."""
         if self.cfg.s3_endpoint_url and "s3express-" in self.cfg.s3_endpoint_url:
             logger.warning(
                 f"AWS One Zone buckets are not supported. Can not get bucket. If bucket '{bucket_name}' needs to be created, please create it manually via the AWS console or CLI."
             )
-            return
+            return None
         bucket_name = re.sub(r"^s3:\/\/", "", bucket_name)
         bucket = self.resource.Bucket(bucket_name)
         if not bucket.creation_date:
@@ -406,26 +441,13 @@ class S3:
                 # us-east-1 is the default region and doesn't accept LocationConstraint
                 if self.cfg.s3_region and self.cfg.s3_region != "us-east-1":
                     CreateBucketConfiguration["LocationConstraint"] = self.cfg.s3_region
-                """
-                if self.cfg.aws_zone_bucket_suffix.endswith('--x-s3'):
-                    CreateBucketConfiguration['Location'] = {
-                        'Type': 'AvailabilityZone',
-                        'Name': 'use1-az6'
-                    }
-                    CreateBucketConfiguration['Bucket'] = {
-                        'DataRedundancy': 'SingleAvailabilityZone',
-                        'Type': 'Directory'
-                    }
-                """
                 if CreateBucketConfiguration:
-                    bucket.create(
-                        CreateBucketConfiguration=CreateBucketConfiguration
-                    )
+                    bucket.create(CreateBucketConfiguration=CreateBucketConfiguration)
                 else:
                     bucket.create()
             except ClientError as err:
                 if err.response["Error"]["Code"] != "BucketAlreadyOwnedByYou":
-                    raise err
+                    raise
         return bucket
 
     def list_buckets(self, pattern: Optional[str] = None) -> List[str]:
@@ -438,7 +460,7 @@ class S3:
     def list_files(
         self,
         s3_path: str,
-        return_as: Literal["names", "paths", "urls", "obj"] = "urls",
+        return_as: S3ListReturnAs = "urls",
     ) -> List[str]:
         """List files matching an S3 path with optional glob pattern.
 
@@ -451,6 +473,7 @@ class S3:
             s3.list_files("s3://my-bucket/data/2024-*/file_*.json")
             s3.list_files("s3://my-bucket/data/")
         """
+        return_as = _validate_s3_list_return_as(return_as)
         bucket_name, prefix, pattern = self.parse_s3_path(s3_path)
 
         paginator = self.client.get_paginator("list_objects_v2")
@@ -479,7 +502,7 @@ class S3:
     def list_file_pages(
         self,
         s3_path: str,
-        return_as: Literal["names", "paths", "urls", "obj"] = "urls",
+        return_as: S3ListReturnAs = "urls",
     ) -> Generator[List[str], None, None]:
         """List files matching an S3 path with optional glob pattern, yielding one page at a time.
 
@@ -491,6 +514,7 @@ class S3:
             for page in s3.list_file_pages("s3://my-bucket/data/*.parquet"):
                 process(page)
         """
+        return_as = _validate_s3_list_return_as(return_as)
         bucket_name, prefix, pattern = self.parse_s3_path(s3_path)
 
         paginator = self.client.get_paginator("list_objects_v2")
@@ -515,11 +539,12 @@ class S3:
                     if return_as == "names":
                         page_files = [f.split("/")[-1] for f in page_files]
                 yield page_files
+
     def bucket_and_partition(
         self, path: str, require_partition: bool = False
     ) -> None | Tuple[str, str]:
         """Split a s3 path into bucket and partition."""
-        if match := self._bucket_and_partition_re.search(path):
+        if match := self._bucket_and_partition_re.fullmatch(path):
             # bucket name, partition
             bucket = match.group(1)
             partition = match.group(2)
@@ -528,9 +553,7 @@ class S3:
             return bucket, partition
         return None, None
 
-    def parse_s3_path(
-        self, s3_path: str
-    ) -> Tuple[str, str, Optional[str]]:
+    def parse_s3_path(self, s3_path: str) -> Tuple[str, str, Optional[str]]:
         """Parse S3 path into bucket, prefix, and optional glob pattern.
 
         Args:
@@ -546,15 +569,17 @@ class S3:
 
         if path:
             # Find where the glob pattern starts
-            glob_chars = {'*', '?'}
-            glob_start_idx = next((i for i, char in enumerate(path) if char in glob_chars), len(path))
+            glob_chars = {"*", "?"}
+            glob_start_idx = next(
+                (i for i, char in enumerate(path) if char in glob_chars), len(path)
+            )
 
             if glob_start_idx < len(path):
                 # There's a glob pattern
                 # The prefix is everything up to the last '/' before the glob
-                prefix_end = path.rfind('/', 0, glob_start_idx)
+                prefix_end = path.rfind("/", 0, glob_start_idx)
                 if prefix_end != -1:
-                    prefix = path[:prefix_end + 1]
+                    prefix = path[: prefix_end + 1]
                     pattern = path
                 else:
                     # Glob starts at the beginning
@@ -571,6 +596,8 @@ class S3:
             # path has a known file extension.
             return True
         bucket_name, partition = self.bucket_and_partition(path)
+        if not partition:
+            return False
         try:
             # Check if the path is a file
             self.client.head_object(Bucket=bucket_name, Key=partition)

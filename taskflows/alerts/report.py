@@ -4,7 +4,6 @@ from io import BytesIO
 from typing import List as ListType
 from typing import Optional, Sequence, Union
 
-import imgkit
 from dominate import tags as d
 
 from .components import Component, Text, get_theme_colors
@@ -144,6 +143,8 @@ def render_components_image(
     """
     options = {
         "format": "png",
+        "encoding": "UTF-8",
+        "zoom": "2",
         "quality": "100",  # Maximum quality
         "quiet": "",
         "width": "1200",  # Fixed width for consistency
@@ -151,10 +152,12 @@ def render_components_image(
 
     # Render high-quality PNG image of HTML to BytesIO
     html_content = render_components_html(components, theme=theme)
-    # Use False to get bytes directly from imgkit
-    img_bytes = imgkit.from_string(html_content, False, options=options)
-    # Create BytesIO object from the returned bytes
-    output = BytesIO(img_bytes)
+    output = BytesIO()
+
+    # Use the components module object so legacy tests and callers can patch it.
+    from . import components as components_module
+
+    components_module.imgkit.from_string(html_content, output, options=options)
     output.seek(0)
     return output
 

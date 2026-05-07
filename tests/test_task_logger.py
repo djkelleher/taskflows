@@ -1,12 +1,23 @@
-import random
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+import asyncio
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import MagicMock, patch
 
 import pytest
 from taskflows.alerts import MsgDst
 
-from taskflows.tasks import Alerts, TaskLogger, build_loki_query_url
+from taskflows.tasks import (
+    Alerts,
+    TaskLogger,
+    build_loki_query_url,
+    get_current_task_id,
+    run_task,
+    task,
+)
 
 
 def test_build_loki_query_url_basic():
@@ -62,6 +73,16 @@ def test_task_logger_creation():
     assert task_logger.required is False
     assert task_logger.alerts == []
     assert task_logger.errors == []
+
+
+def test_task_decorator_preserves_function_metadata():
+    @task(name="decorated")
+    def original_function():
+        """Original docstring."""
+        return "ok"
+
+    assert original_function.__name__ == "original_function"
+    assert original_function.__doc__ == "Original docstring."
 
 
 @pytest.mark.asyncio
@@ -170,7 +191,9 @@ async def test_task_logger_error_alert_includes_loki_url(mock_send_alert):
 
     # Check that Loki URL is in the alert content
     call_args = mock_send_alert.call_args
-    components = call_args.kwargs.get("content", call_args.args[0] if call_args.args else [])
+    components = call_args.kwargs.get(
+        "content", call_args.args[0] if call_args.args else []
+    )
 
     # Should have at least 2 components: error message and Loki URL
     assert len(components) >= 2
@@ -207,7 +230,9 @@ async def test_task_logger_finish_alert_includes_loki_url(mock_send_alert):
 
     # Check that Loki URL is in the alert content
     call_args = mock_send_alert.call_args
-    components = call_args.kwargs.get("content", call_args.args[0] if call_args.args else [])
+    components = call_args.kwargs.get(
+        "content", call_args.args[0] if call_args.args else []
+    )
 
     # Check that one component contains the Loki URL
     loki_url_found = False
@@ -216,3 +241,102 @@ async def test_task_logger_finish_alert_includes_loki_url(mock_send_alert):
             loki_url_found = True
             break
     assert loki_url_found
+
+
+@pytest.mark.asyncio
+async def test_sync_task_timeout_stops_underlying_work():
+    """Timed sync tasks should not continue mutating state after timeout."""
+    with TemporaryDirectory() as temp_dir:
+        marker = Path(temp_dir) / "completed"
+
+        def slow_write():
+            time.sleep(1)
+            marker.write_text("done")
+
+        with pytest.raises(TimeoutError):
+            await run_task(
+                slow_write,
+                name="slow_write",
+                required=True,
+                timeout=0.2,
+            )
+
+        await asyncio.sleep(1.0)
+        assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_sync_task_timeout_stops_child_process_tree():
+    """Timed sync tasks should terminate subprocesses started by the worker."""
+    with TemporaryDirectory() as temp_dir:
+        marker = Path(temp_dir) / "child_completed"
+
+        def slow_child_process():
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib, sys, time; "
+                        "time.sleep(1); "
+                        "pathlib.Path(sys.argv[1]).write_text('done')"
+                    ),
+                    str(marker),
+                ]
+            )
+            proc.wait()
+
+        with pytest.raises(TimeoutError):
+            await run_task(
+                slow_child_process,
+                name="slow_child_process",
+                required=True,
+                timeout=0.2,
+            )
+
+        await asyncio.sleep(1.2)
+        assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_timed_sync_task_stops_underlying_work():
+    """Cancelling a timed sync task should terminate its worker process."""
+    with TemporaryDirectory() as temp_dir:
+        marker = Path(temp_dir) / "completed_after_cancel"
+
+        def slow_write():
+            time.sleep(1)
+            marker.write_text("done")
+
+        task = asyncio.create_task(
+            run_task(
+                slow_write,
+                name="slow_write_cancelled",
+                required=True,
+                timeout=10,
+            )
+        )
+        await asyncio.sleep(0.2)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        await asyncio.sleep(1.0)
+        assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_timed_sync_task_preserves_task_context():
+    def read_task_context():
+        return get_current_task_id()
+
+    task_id = await run_task(
+        read_task_context,
+        name="read_task_context",
+        required=True,
+        timeout=2,
+    )
+
+    assert isinstance(task_id, str)
+    assert task_id

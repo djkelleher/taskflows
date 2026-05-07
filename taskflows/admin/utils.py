@@ -1,5 +1,6 @@
 """Utility functions for admin module."""
 
+import ipaddress
 import socket
 from functools import cache
 from typing import Optional
@@ -43,7 +44,19 @@ def get_public_ipv4() -> Optional[str]:
             if resp.status_code != 200:
                 logger.debug(f"Non-200 from {url}: {resp.status_code}")
                 continue
-            candidate = resp.text.strip().split()[0]
+            response_parts = resp.text.strip().split()
+            if not response_parts:
+                logger.debug(f"Empty IP response from {url}")
+                continue
+            candidate = response_parts[0]
+            try:
+                parsed_ip = ipaddress.ip_address(candidate)
+            except ValueError:
+                logger.debug(f"Invalid IP response from {url}: {candidate!r}")
+                continue
+            if parsed_ip.version != 4:
+                logger.debug(f"Non-IPv4 response from {url}: {candidate!r}")
+                continue
             logger.debug(f"Selected public IP {candidate} from {url}")
             return candidate
         except requests.RequestException as e:

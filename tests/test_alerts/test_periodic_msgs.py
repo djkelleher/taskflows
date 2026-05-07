@@ -1,7 +1,14 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from taskflows.alerts import ContentType, EmailAddrs, PeriodicMsgs, PeriodicMsgSender, Text
+from taskflows.alerts import (
+    ContentType,
+    EmailAddrs,
+    PeriodicMsgs,
+    PeriodicMsgSender,
+    Text,
+    send_alert,
+)
 
 
 @pytest.fixture
@@ -78,8 +85,27 @@ class TestPeriodicMsgs:
         # Check callback was called
         callback.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_send_alert_returns_false_for_invalid_destinations(self):
+        result = await send_alert(Text("Test message"), send_to=object())
+
+        assert result is False
+
 
 class TestPeriodicMsgSender:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pub_freq", [0, -1])
+    async def test_add_periodic_pub_group_member_rejects_nonpositive_frequency(
+        self,
+        slack_channel,
+        pub_freq,
+    ):
+        sender = PeriodicMsgSender()
+        periodic_msg = PeriodicMsgs(send_to=slack_channel)
+
+        with pytest.raises(ValueError, match="pub_freq"):
+            await sender.add_periodic_pub_group_member(periodic_msg, pub_freq)
+
     @pytest.mark.asyncio
     async def test_add_periodic_pub_group_member(self, slack_channel):
         # Create a PeriodicMsgSender
@@ -92,10 +118,11 @@ class TestPeriodicMsgSender:
         # Add them to the sender with mocked publish methods
         with (
             patch.object(hourly_msg, "publish") as mock_hourly_publish,
-            patch.object(daily_msg, "publish") as mock_daily_publish,
+            patch.object(daily_msg, "publish"),
             patch("asyncio.create_task") as mock_create_task,
             patch("asyncio.sleep") as mock_sleep,
         ):
+
             def close_coro(coro):
                 coro.close()
                 return MagicMock()

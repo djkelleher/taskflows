@@ -12,7 +12,6 @@ venv = Venv("trading")
 def temp_file():
     with NamedTemporaryFile() as f:
         yield Path(f.name)
-        # yield f"/opt/{Path(f.name).name}"
 
 
 @pytest.fixture
@@ -23,10 +22,6 @@ def docker_container(temp_file):
         command=lambda: temp_file.write_text("hello"),
         network_mode="host",
         volumes=[
-            # Volume(
-            #    host_path="/home/dan/.taskflows",
-            #    container_path=f"/root/.taskflows",
-            # ),
             Volume(
                 host_path=temp_file,
                 container_path=temp_file,
@@ -118,7 +113,11 @@ def test_docker_run_cli_command_with_quoted_args():
     # The command should contain properly split arguments
     # "echo 'hello world'" should become ["echo", "hello world"]
     assert "echo" in cli_cmd
-    assert "'hello world'" in cli_cmd or '"hello world"' in cli_cmd or "hello world" in cli_cmd
+    assert (
+        "'hello world'" in cli_cmd
+        or '"hello world"' in cli_cmd
+        or "hello world" in cli_cmd
+    )
 
 
 def test_docker_run_cli_command_with_escaped_spaces():
@@ -155,3 +154,20 @@ def test_docker_run_cli_command_with_multiple_args():
     # Verify command is properly constructed
     assert "python" in cli_cmd
     assert "-c" in cli_cmd
+
+
+def test_docker_callable_command_uses_signed_pickle_entrypoint():
+    container = DockerContainer(
+        name="callable-service",
+        image="python:3.11-slim",
+        command=lambda: None,
+    )
+
+    srv = Service(name="callable-service", environment=container)
+
+    assert "_deserialize_and_call callable-service command" in srv.start_command
+    assert "_run_function" not in srv.start_command
+    assert any(
+        pkl.name == "callable-service" and pkl.attr == "command"
+        for pkl in srv._pkl_funcs
+    )

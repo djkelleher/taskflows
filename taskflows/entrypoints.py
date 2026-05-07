@@ -14,15 +14,22 @@ from .dynamic_imports import import_module_attr
 
 from .common import logger
 
+_INT_RE = re.compile(r"^[+-]?\d+$")
+_FLOAT_RE = re.compile(r"^[+-]?(?:\d+\.\d*|\.\d+)$")
 
-def parse_str_kwargs(kwargs: Sequence[str]) -> Dict[str, float | str]:
+
+def parse_str_kwargs(kwargs: Sequence[str]) -> Dict[str, int | float | str]:
     """Parses string in the form 'key=value'"""
     kwargs_dict = {}
     for pair in kwargs:
         if "=" not in pair:
             raise click.BadParameter(f"Invalid key=value pair: {pair}")
         key, value = pair.split("=", 1)
-        if re.match(r"(\d+(\.\d+)?)$", value):
+        if not key or not value:
+            raise click.BadParameter(f"Invalid key=value pair: {pair}")
+        if _INT_RE.match(value):
+            value = int(value)
+        elif _FLOAT_RE.match(value):
             value = float(value)
         kwargs_dict[key] = value
     return kwargs_dict
@@ -170,9 +177,7 @@ class ShutdownHandler:
                 await asyncio.wait_for(cb(), timeout=5)
             except Exception as err:
                 # Log any exceptions that occur in the callbacks
-                logger.exception(
-                    f"{type(err)} error in shutdown callback {cb}: {err}"
-                )
+                logger.exception(f"{type(err)} error in shutdown callback {cb}: {err}")
         # Store the exit code for retrieval after event loop completes
         self._exit_code = exit_code
         # Schedule loop stop to happen after this coroutine completes

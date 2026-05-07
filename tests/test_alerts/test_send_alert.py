@@ -132,3 +132,18 @@ async def test_email_retries(components, request, retry_count):
         # plus 1 (since the send_email function will try to send the
         # email at least once).
         assert mock_send.call_count == retry_count + 1
+
+
+@pytest.mark.asyncio
+async def test_send_email_rejects_negative_retries(components):
+    send_to = EmailAddrs(
+        sender_addr="sender@example.com",
+        password="secret",
+        receiver_addr="receiver@example.com",
+    )
+
+    with patch("aiosmtplib.send") as mock_send:
+        with pytest.raises(ValueError, match="retries"):
+            await send_email(content=components, send_to=send_to, retries=-1)
+
+    mock_send.assert_not_called()

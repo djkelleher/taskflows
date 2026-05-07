@@ -31,7 +31,7 @@ def test_exception_logging():
 
     try:
         # Simulate an error
-        result = 1 / 0
+        1 / 0
     except ZeroDivisionError:
         logger.error("division_by_zero", operation="test_calculation", exc_info=True)
 

@@ -8,6 +8,7 @@ access must go through this proxy.
 import aiohttp
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
+from urllib.parse import urljoin
 
 from taskflows.common import Config, logger
 
@@ -27,7 +28,12 @@ async def _get_session() -> aiohttp.ClientSession:
 
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def grafana_proxy(path: str, request: Request):
-    target_url = f"http://{config.grafana}/grafana/{path}"
+    grafana_base = config.grafana.rstrip("/")
+    if not grafana_base.startswith(("http://", "https://")):
+        grafana_base = f"http://{grafana_base}"
+    if not grafana_base.rstrip("/").endswith("/grafana"):
+        grafana_base = f"{grafana_base}/grafana"
+    target_url = urljoin(f"{grafana_base}/", path.lstrip("/"))
     query_string = str(request.url.query)
     if query_string:
         target_url = f"{target_url}?{query_string}"
@@ -56,11 +62,17 @@ async def grafana_proxy(path: str, request: Request):
             content = await resp.read()
 
             # Build response headers, stripping hop-by-hop and X-Frame-Options
-            response_headers = {}
-            skip = {"transfer-encoding", "content-encoding", "content-length", "x-frame-options"}
-            for key, value in resp.headers.items():
-                if key.lower() not in skip:
-                    response_headers[key] = value
+            skip = {
+                "transfer-encoding",
+                "content-encoding",
+                "content-length",
+                "x-frame-options",
+            }
+            response_headers = {
+                key: value
+                for key, value in resp.headers.items()
+                if key.lower() not in skip
+            }
 
             return Response(
                 content=content,

@@ -1,3 +1,4 @@
+from datetime import datetime
 from io import StringIO
 from typing import Dict
 from uuid import uuid4
@@ -6,8 +7,12 @@ import pytest
 from taskflows.alerts.components import (
     ContentType,
     FontSize,
+    Grid,
     LineBreak,
+    LogEntry,
     Map,
+    ProgressBar,
+    PriceChange,
     Table,
     Text,
     font_size_css,
@@ -78,6 +83,25 @@ def test_text_edge_cases():
     # Test ERROR with MEDIUM should get ## **text** format
     error_text = Text("Error", ContentType.ERROR, FontSize.MEDIUM)
     assert error_text.classic_md() == "## **Error**"
+
+
+def test_text_truncated_preview_never_exceeds_max_length():
+    text = Text("abcdef", max_length=3, preview_suffix="...long")
+
+    assert text.value == "..."
+    assert len(text.value) == 3
+
+
+def test_text_attachment_cache_is_rewound_between_calls():
+    text = Text("abcdef", max_length=3)
+
+    first_name, first_content = text.create_attachment_if_needed()
+    assert first_content.read() == "abcdef"
+
+    second_name, second_content = text.create_attachment_if_needed()
+    assert second_name == first_name
+    assert second_content is first_content
+    assert second_content.read() == "abcdef"
 
 
 def test_map_render():
@@ -188,22 +212,47 @@ def test_table_missing_column_values():
     assert "Val1" in html_result
     assert "Val3" in html_result
 
-    # slack_md will fail with ValueError due to column length mismatch in PrettyTable
-    # This is expected behavior when columns have different lengths
-    with pytest.raises(
-        ValueError, match="Column length .* does not match number of rows"
-    ):
-        table.slack_md()
+    classic_result = table.classic_md()
+    assert "Val1" in classic_result
+    assert "Val3" in classic_result
 
-    # Test with properly structured data that slack_md can handle
-    proper_rows = [
-        {"Col1": "Val1", "Col2": "Val2"},
-        {"Col1": "Val3", "Col2": ""},  # Empty value instead of missing
-    ]
-    proper_table = Table(rows=proper_rows)
-    slack_result = proper_table.slack_md()
+    slack_result = table.slack_md()
     assert isinstance(slack_result, str)
     assert "Val1" in slack_result
+    assert "Val3" in slack_result
+
+
+def test_table_markdown_escapes_cell_delimiters_and_newlines():
+    table = Table(rows=[{"Col1": "left|right\nnext"}])
+
+    classic_md = table.classic_md()
+    discord_md = table.discord_md()
+
+    assert r"left\|right<br>next" in classic_md
+    assert r"left\|right<br>next" in discord_md
+
+
+def test_table_accepts_headers_alias_and_sequence_rows():
+    table = Table(
+        headers=["Name", "Department"],
+        rows=[
+            ["Alice", "Engineering"],
+            ["Bob", "Marketing"],
+        ],
+    )
+
+    assert table.columns == ["Name", "Department"]
+    assert table.rows == [
+        {"Name": "Alice", "Department": "Engineering"},
+        {"Name": "Bob", "Department": "Marketing"},
+    ]
+    assert "Alice" in table.classic_md()
+    assert "Marketing" in table.slack_md()
+
+
+def test_table_rejects_conflicting_columns_and_headers():
+    with pytest.raises(ValueError, match="columns and headers"):
+        Table(rows=[["Alice"]], columns=["Name"], headers=["User"])
 
 
 def test_table_attach_rows_functionality():
@@ -230,6 +279,38 @@ def test_table_attach_rows_functionality():
     # Check that rows are now None (not rendered in table)
     assert table.rows is None
     assert table._attachment is not None
+
+
+def test_table_attachment_renders_in_slack_markdown_without_inline_rows():
+    table = Table(rows=[{"Metric": "CPU", "Value": "85%"}], title="System Metrics")
+    attachment_file = table.attach_rows_as_file()
+
+    slack_md = table.slack_md()
+
+    assert "System Metrics" in slack_md
+    assert attachment_file.filename in slack_md
+    assert "CPU" not in slack_md
+
+
+def test_table_attachment_filename_stem_is_sanitized():
+    table = Table(rows=[{"col": "value"}], title="../Unsafe / Title")
+
+    attachment_file = table.attach_rows_as_file()
+
+    assert "/" not in attachment_file.filename
+    assert attachment_file.filename.startswith("Unsafe_Title_")
+
+
+def test_table_attach_rows_as_file_is_idempotent_and_rewinds_content():
+    table = Table(rows=[{"col": "value"}], title="Report")
+
+    first = table.attach_rows_as_file()
+    assert first.content.read()
+
+    second = table.attach_rows_as_file()
+
+    assert second is first
+    assert second.content.read() == "col\r\nvalue\r\n"
 
 
 def test_render_components_html(components, output_dir):
@@ -296,6 +377,24 @@ def test_render_components_md_all_formats():
     )
     assert "**Test**" in discord_md
     assert "**Key: **" in discord_md
+
+
+def test_all_component_gallery_renders_all_text_formats():
+    """The public component gallery should render without network sends."""
+    from tests.test_alerts.send_all_components_example import create_all_components
+
+    components = create_all_components()
+
+    assert len(components) > 50
+    html = render_components_html(components)
+    classic_md = render_components_md(components)
+    slack_md = render_components_md(components, slack_format=True)
+    discord_md = render_components_md(components, discord_format=True)
+
+    assert "Alert Messages Component Gallery" in html
+    assert "Alert Messages Component Gallery" in classic_md
+    assert "Alert Messages Component Gallery" in slack_md
+    assert "Alert Messages Component Gallery" in discord_md
 
 
 def test_render_components_image_with_output(components, output_dir):
@@ -531,6 +630,26 @@ def test_image_component():
     assert "![Alt text](https://example.com/image.png)" in discord_md
 
 
+def test_image_accepts_url_and_alt_text_aliases():
+    from alerts.components import Image
+
+    image = Image(url="https://example.com/image.png", alt_text="Alt text")
+
+    assert image.src == "https://example.com/image.png"
+    assert image.alt == "Alt text"
+    assert "Alt text" in image.html().render()
+
+
+def test_image_rejects_missing_or_conflicting_source_aliases():
+    from alerts.components import Image
+
+    with pytest.raises(ValueError, match="src or url"):
+        Image()
+
+    with pytest.raises(ValueError, match="src and url"):
+        Image(src="https://example.com/a.png", url="https://example.com/b.png")
+
+
 def test_card_component():
     """Test Card component functionality."""
     from alerts.components import Card
@@ -561,6 +680,26 @@ def test_card_component():
     assert "Card Footer" in discord_md
 
 
+def test_card_accepts_title_and_content_aliases():
+    from alerts.components import Card
+
+    card = Card(title="Feature Release", content="Dashboard shipped")
+
+    assert "Feature Release" in card.classic_md()
+    assert "Dashboard shipped" in card.slack_md()
+    assert "Dashboard shipped" in card.html().render()
+
+
+def test_card_rejects_conflicting_aliases():
+    from alerts.components import Card
+
+    with pytest.raises(ValueError, match="header and title"):
+        Card([Text("body")], header="Header", title="Title")
+
+    with pytest.raises(ValueError, match="body and content"):
+        Card([Text("body")], content="content")
+
+
 def test_timeline_component():
     """Test Timeline component functionality."""
     from alerts.components import Timeline
@@ -589,6 +728,27 @@ def test_timeline_component():
 
     discord_md = timeline.discord_md()
     assert "**10:00** - Start" in discord_md  # Timeline uses same format for all
+
+
+def test_timeline_accepts_tuple_events():
+    from alerts.components import Timeline
+
+    event_time = datetime(2026, 1, 2, 3, 4, 5)
+    timeline = Timeline([("10:00", "Start"), (event_time, "Done", "Finished")])
+
+    assert timeline.events == [
+        {"time": "10:00", "title": "Start"},
+        {"time": str(event_time), "title": "Done", "description": "Finished"},
+    ]
+    assert str(event_time) in timeline.html().render()
+    assert "Finished" in timeline.classic_md()
+
+
+def test_timeline_rejects_short_tuple_events():
+    from alerts.components import Timeline
+
+    with pytest.raises(ValueError, match="time and title"):
+        Timeline([("10:00",)])
 
 
 def test_badge_component():
@@ -662,6 +822,38 @@ def test_price_change_component():
     assert discord_md == price_change.classic_md()
 
 
+def test_alert_accepts_content_type_enum():
+    from alerts.components import Alert
+
+    alert = Alert("Maintenance", ContentType.WARNING)
+
+    assert alert.alert_type == "warning"
+    assert "**WARNING**" in alert.classic_md()
+    assert "Maintenance" in alert.html().render()
+
+
+def test_price_change_accepts_symbol_first_legacy_order():
+    price_change = PriceChange("AAPL", 150.25, 145.30)
+
+    assert price_change.symbol == "AAPL"
+    assert price_change.current == 150.25
+    assert price_change.previous == 145.30
+    assert "**AAPL $150.25**" in price_change.classic_md()
+    assert "AAPL" in price_change.html().render()
+
+
+def test_price_change_accepts_numeric_string_current():
+    price_change = PriceChange("150.25", currency="$")
+
+    assert price_change.current == 150.25
+    assert price_change.symbol is None
+
+
+def test_price_change_rejects_symbol_without_prices():
+    with pytest.raises(ValueError, match="Symbol-first PriceChange"):
+        PriceChange("AAPL")
+
+
 def test_status_indicator_component():
     """Test StatusIndicator component functionality."""
     from alerts.components import StatusIndicator
@@ -721,6 +913,76 @@ def test_grid_component():
 
     discord_md = grid.discord_md()
     assert "Row 1, Col 1" in discord_md
+
+
+def test_grid_accepts_flat_components_with_column_count():
+    grid = Grid([Text("A"), Text("B"), Text("C")], columns=2)
+
+    assert len(grid.components) == 2
+    assert [component.value for component in grid.components[0]] == ["A", "B"]
+    assert [component.value for component in grid.components[1]] == ["C"]
+    assert "A" in grid.classic_md()
+
+
+def test_grid_rejects_non_positive_column_count():
+    with pytest.raises(ValueError, match="columns must be positive"):
+        Grid([Text("A")], columns=0)
+
+
+def test_grid_rejects_negative_gap():
+    with pytest.raises(ValueError, match="Grid gap must be non-negative"):
+        Grid([[Text("A")]], gap=-1)
+
+
+def test_tree_view_html_renders_nested_data():
+    from alerts.components import TreeView
+
+    tree = TreeView({"root": {"leaf": "value"}})
+    html = tree.html().render()
+
+    assert "root" in html
+    assert "leaf" in html
+    assert "value" in html
+
+
+def test_progress_bar_rejects_non_positive_max_value():
+    with pytest.raises(ValueError, match="max_value must be positive"):
+        ProgressBar(1, max_value=0)
+
+
+def test_progress_bar_clamps_value_to_valid_range():
+    low = ProgressBar(-10, max_value=100)
+    high = ProgressBar(150, max_value=100)
+
+    assert low.percentage == 0
+    assert "0.0%" in low.classic_md()
+    assert high.percentage == 100
+    assert "100.0%" in high.slack_md()
+
+
+def test_progress_bar_accepts_legacy_positional_label():
+    progress = ProgressBar(75, "Data Processing")
+
+    assert progress.label == "Data Processing"
+    assert progress.max_value == 100
+    assert "**Data Processing:** 75.0%" in progress.classic_md()
+    assert "Data Processing" in progress.html().render()
+
+
+def test_log_entry_accepts_string_level_and_legacy_positional_order():
+    timestamp = datetime(2026, 1, 2, 3, 4, 5)
+    entry = LogEntry(timestamp, "WARNING", "Memory usage above 80%")
+
+    assert entry.timestamp == timestamp
+    assert entry.level is ContentType.WARNING
+    assert entry.message == "Memory usage above 80%"
+    assert "WARNING" in entry.classic_md()
+    assert "Memory usage above 80%" in entry.html().render()
+
+
+def test_log_entry_rejects_unknown_level():
+    with pytest.raises(ValueError, match="Unknown content type"):
+        LogEntry("message", "notice")
 
 
 def test_components_list_edge_cases():

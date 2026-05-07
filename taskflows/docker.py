@@ -1,13 +1,10 @@
 import atexit
-import base64
+import os
 import shlex
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
-from weakref import WeakValueDictionary
-
-import cloudpickle
 import docker
 from docker.errors import ImageNotFound
 from docker.models.containers import Container
@@ -17,7 +14,7 @@ from docker.types.containers import LogConfigTypesEnum
 from dotenv import dotenv_values
 from xxhash import xxh32
 
-from .common import logger
+from .common import logger, redact_sensitive
 from .constraints import CgroupConfig
 from .exec import PickledFunction
 
@@ -56,7 +53,8 @@ def get_docker_client(user_host: Optional[str] = None) -> docker.DockerClient:
             del _docker_clients[base_url]
 
     # Create new client
-    client = docker.DockerClient(base_url=base_url)
+    timeout = int(os.getenv("TASKFLOWS_DOCKER_CLIENT_TIMEOUT_SECONDS", "15"))
+    client = docker.DockerClient(base_url=base_url, timeout=timeout)
     _docker_clients[base_url] = client
     return client
 
@@ -82,12 +80,11 @@ def docker_client_context(user_host: Optional[str] = None):
 
 def cleanup_docker_clients():
     """Close all Docker clients. Called on application exit."""
-    for base_url, client in list(_docker_clients.items()):
+    for _base_url, client in list(_docker_clients.items()):
         try:
-            logger.debug(f"Closing Docker client for {base_url}")
             client.close()
-        except Exception as e:
-            logger.warning(f"Error closing Docker client for {base_url}: {e}")
+        except Exception:
+            pass
     _docker_clients.clear()
 
 
@@ -199,12 +196,13 @@ class DockerImage:
         for row in log:
             if "id" in row:
                 row_fmt = f"[{row['id']}]"
-                if s := row["status"]:
+                if s := row.get("status"):
                     row_fmt += f"[{s}]"
                 if pd := row.get("progress_detail"):
                     row_fmt += f"[{pd}]"
                 if p := row.get("progress"):
                     row_fmt += f"[{p}]"
+                fmt_log.append(row_fmt)
             elif "stream" in row:
                 fmt_log.append(row["stream"])
         fmt_log = "".join(fmt_log)
@@ -247,7 +245,7 @@ class Ulimit:
 @dataclass
 class DockerContainer:
     """Docker container.
-    
+
     Note: Resource constraints must be specified using the `cgroup_config` parameter
     with a CgroupConfig instance. Individual resource parameters have been removed
     in favor of centralized resource management.
@@ -265,9 +263,10 @@ class DockerContainer:
     ] = None
     # Restart the container when it exits?
     restart_policy: Literal["no", "always", "unless-stopped", "on-failure"] = "no"
+    # Run an init inside the container that forwards signals and reaps processes
     init: Optional[bool] = None
     detach: Optional[bool] = None
-    shm_size: Optional[str] = None
+    shm_size: Optional[Union[str, int]] = None
     # Environment variables to set inside
     environment: Optional[Union[Dict[str, str]]] = None
     env_file: Optional[Union[str, Path]] = None
@@ -321,9 +320,6 @@ class DockerContainer:
     healthcheck: Optional[Dict[str, Any]] = None
     # Optional hostname for the container.
     hostname: Optional[str] = None
-    # Run an init inside the container that forwards
-    # signals and reaps processes
-    init: Optional[bool] = None
     # Path to the docker-init binary
     init_path: Optional[str] = None
     # Set the IPC mode for the container.
@@ -347,8 +343,6 @@ class DockerContainer:
     # the container. More powerful alternative to. Each
     # item in the list is expected to be aobject.
     mounts: Optional[List[docker.types.Mount]] = None
-    # The name for this container.
-    name: Optional[str] = None
     # CPU quota in units of 1e-9 CPUs.
     nano_cpus: Optional[int] = None
     # Name of the network this container will be connected
@@ -378,8 +372,6 @@ class DockerContainer:
     # A list of string values to
     # customize labels for MLS systems, such as SELinux.
     security_opt: Optional[List[str]] = None
-    # Size of /dev/shm (e.g.).
-    shm_size: Optional[Union[str, int]] = None
     # The stop signal to use to stop the container
     # (e.g.).
     stop_signal: Optional[str] = None
@@ -420,7 +412,9 @@ class DockerContainer:
             from taskflows.security_validation import validate_env_file_path
 
             try:
-                self.env_file = str(validate_env_file_path(self.env_file, allow_nonexistent=True))
+                self.env_file = str(
+                    validate_env_file_path(self.env_file, allow_nonexistent=True)
+                )
             except Exception as e:
                 from taskflows.common import logger
 
@@ -442,7 +436,6 @@ class DockerContainer:
     def name_or_generated(self) -> str:
         """Get container name, generating if needed."""
         return self._ensure_name()
-    
 
     @property
     def exists(self):
@@ -494,14 +487,15 @@ class DockerContainer:
         # if image is not build, it must be built.
         if isinstance(self.image, DockerImage):
             self.image.build()
-        if self.command and not isinstance(self.command, str):
-            self.command = PickledFunction(self.command, self.name, "command")
+        pkl_func = self.prepare_callable_command()
+        if pkl_func is not None:
+            pkl_func.write()
 
         # Apply cgroup configuration if present
         cfg = self._apply_cgroup_config(self._params())
 
         cfg.update(kwargs)
-        logger.info(f"Creating Docker container {self.name}: {cfg}")
+        logger.info(f"Creating Docker container {self.name}: {redact_sensitive(cfg)}")
         client = get_docker_client()
 
         # Try to create container with automatic retry on common errors
@@ -537,26 +531,27 @@ class DockerContainer:
                     raise
 
         # Shouldn't reach here, but just in case
-        raise RuntimeError(f"Failed to create container {self.name} after {max_attempts} attempts")
+        raise RuntimeError(
+            f"Failed to create container {self.name} after {max_attempts} attempts"
+        )
 
     def docker_run_cli_command(self) -> str:
         """Build the docker run CLI command string for this container.
 
-        SECURITY: All user-controlled values are escaped using shlex.quote()
-        to prevent command injection when the command string is executed.
+        SECURITY: User-controlled values are escaped once at the final
+        shlex.join() boundary to prevent command injection while preserving
+        arguments that contain spaces.
         """
-        import shlex
 
         # Build docker run command
         cmd = ["docker", "run"]
 
-        # Handle command
-        if self.command and not isinstance(self.command, str):
-            self.command = f"_run_function {base64.b64encode(cloudpickle.dumps(self.command)).decode('utf-8')}"
+        # Handle callable command via the signed-pickle execution path.
+        self.prepare_callable_command()
 
-        # Container name (user-controlled, must be escaped)
+        # Container name
         container_name = self._ensure_name()
-        cmd.extend(["--name", shlex.quote(container_name)])
+        cmd.extend(["--name", container_name])
 
         # Auto-remove container (incompatible with --restart, and for
         # ephemeral containers systemd handles restarts anyway)
@@ -566,85 +561,77 @@ class DockerContainer:
         if self.detach is None or self.detach:
             cmd.append("-d")
 
-        # Network mode (user-controlled, must be escaped)
         if self.network_mode:
-            cmd.extend(["--network", shlex.quote(self.network_mode)])
+            cmd.extend(["--network", self.network_mode])
 
         # Init
         if self.init:
             cmd.append("--init")
 
-        # Shared memory size (user-controlled, must be escaped)
         if self.shm_size:
-            cmd.extend(["--shm-size", shlex.quote(str(self.shm_size))])
+            cmd.extend(["--shm-size", str(self.shm_size)])
 
-        # Environment variables (CRITICAL: user-controlled, must be escaped)
+        # Environment variables
         env = {}
         if self.environment:
             env.update(self.environment)
         if self.env_file:
             env.update(dotenv_values(self.env_file))
         for key, value in env.items():
-            # Escape both key and value to prevent injection
-            cmd.extend(["--env", shlex.quote(f"{key}={value}")])
-            
-        # Volumes (user-controlled paths, must be escaped)
+            cmd.extend(["--env", f"{key}={value}"])
+
+        # Volumes
         volumes = [self.volumes] if isinstance(self.volumes, Volume) else self.volumes
         if volumes:
             for v in volumes:
                 mode = "ro" if v.read_only else "rw"
-                cmd.extend(["-v", shlex.quote(f"{v.host_path}:{v.container_path}:{mode}")])
+                cmd.extend(["-v", f"{v.host_path}:{v.container_path}:{mode}"])
 
-        # Volumes from (user-controlled, must be escaped)
         if self.volumes_from:
             for vf in self.volumes_from:
-                cmd.extend(["--volumes-from", shlex.quote(vf)])
+                cmd.extend(["--volumes-from", vf])
 
-        # Volume driver (user-controlled, must be escaped)
         if self.volume_driver:
-            cmd.extend(["--volume-driver", shlex.quote(self.volume_driver)])
+            cmd.extend(["--volume-driver", self.volume_driver])
 
-        # Ulimits (user-controlled values, must be escaped)
         ulimits = [self.ulimits] if isinstance(self.ulimits, Ulimit) else self.ulimits
         if ulimits:
-            for l in ulimits:
-                ulimit_str = f"{l.name}="
-                if l.soft is not None:
-                    ulimit_str += str(l.soft)
-                if l.hard is not None:
-                    ulimit_str += f":{l.hard}"
-                cmd.extend(["--ulimit", shlex.quote(ulimit_str)])
+            for limit in ulimits:
+                ulimit_str = f"{limit.name}="
+                if limit.soft is not None:
+                    ulimit_str += str(limit.soft)
+                if limit.hard is not None:
+                    ulimit_str += f":{limit.hard}"
+                cmd.extend(["--ulimit", ulimit_str])
 
         # Apply cgroup configuration if present
         if self.cgroup_config:
             cgroup_args = self.cgroup_config.to_docker_cli_args()
-            # Cgroup args should already be safe, but escape them anyway
-            cmd.extend([shlex.quote(arg) if not arg.startswith("--") else arg for arg in cgroup_args])
+            cmd.extend([str(arg) for arg in cgroup_args])
 
-        # Other container settings (all user-controlled, must be escaped)
         if self.hostname:
-            cmd.extend(["--hostname", shlex.quote(self.hostname)])
+            cmd.extend(["--hostname", self.hostname])
         if self.domainname:
-            cmd.extend(["--domainname", shlex.quote(str(self.domainname))])
+            cmd.extend(["--domainname", str(self.domainname)])
         if self.dns:
             for dns_server in self.dns:
-                cmd.extend(["--dns", shlex.quote(dns_server)])
+                cmd.extend(["--dns", dns_server])
         if self.dns_search:
             for domain in self.dns_search:
-                cmd.extend(["--dns-search", shlex.quote(domain)])
+                cmd.extend(["--dns-search", domain])
         if self.dns_opt:
             for opt in self.dns_opt:
-                cmd.extend(["--dns-opt", shlex.quote(opt)])
+                cmd.extend(["--dns-opt", opt])
         if self.mac_address:
-            cmd.extend(["--mac-address", shlex.quote(self.mac_address)])
+            cmd.extend(["--mac-address", self.mac_address])
         if self.pid_mode:
-            cmd.extend(["--pid", shlex.quote(self.pid_mode)])
+            cmd.extend(["--pid", self.pid_mode])
         if self.ipc_mode:
-            cmd.extend(["--ipc", shlex.quote(self.ipc_mode)])
+            cmd.extend(["--ipc", self.ipc_mode])
         if self.uts_mode:
-            cmd.extend(["--uts", shlex.quote(self.uts_mode)])
+            cmd.extend(["--uts", self.uts_mode])
         if self.userns_mode:
-            cmd.extend(["--userns", shlex.quote(self.userns_mode)])
+            cmd.extend(["--userns", self.userns_mode])
         if self.privileged:
             cmd.append("--privileged")
         if self.publish_all_ports:
@@ -653,24 +640,26 @@ class DockerContainer:
             cmd.append("-t")
         if self.entrypoint:
             if isinstance(self.entrypoint, list):
-                # Escape each element and join
-                cmd.extend(["--entrypoint", shlex.quote(" ".join(shlex.quote(e) for e in self.entrypoint))])
+                cmd.extend(
+                    ["--entrypoint", shlex.join([str(e) for e in self.entrypoint])]
+                )
             else:
-                cmd.extend(["--entrypoint", shlex.quote(str(self.entrypoint))])
-            
-        # Ports (user-controlled, must be escaped)
+                cmd.extend(["--entrypoint", str(self.entrypoint)])
+
         if self.ports:
             for container_port, host_config in self.ports.items():
                 if host_config:
                     if isinstance(host_config, dict):
-                        host_port = host_config.get('HostPort')
-                        host_ip = host_config.get('HostIp', '')
+                        host_port = host_config.get("HostPort")
+                        host_ip = host_config.get("HostIp", "")
                         if host_ip:
-                            cmd.extend(["-p", shlex.quote(f"{host_ip}:{host_port}:{container_port}")])
+                            cmd.extend(
+                                ["-p", f"{host_ip}:{host_port}:{container_port}"]
+                            )
                         else:
-                            cmd.extend(["-p", shlex.quote(f"{host_port}:{container_port}")])
+                            cmd.extend(["-p", f"{host_port}:{container_port}"])
                     else:
-                        cmd.extend(["-p", shlex.quote(f"{host_config}:{container_port}")])
+                        cmd.extend(["-p", f"{host_config}:{container_port}"])
 
         # Log configuration with resilience options
         cmd.extend(["--log-driver", "fluentd"])
@@ -679,7 +668,6 @@ class DockerContainer:
         cmd.extend(["--log-opt", "fluentd-buffer-limit=1048576"])
         cmd.extend(["--log-opt", "tag=docker.{{.Name}}"])
 
-        # Image (user-controlled, must be escaped)
         if isinstance(self.image, DockerImage):
             image_name = self.image.tag
             # Ensure image is built
@@ -687,43 +675,43 @@ class DockerContainer:
         else:
             image_name = self.image
 
-        cmd.append(shlex.quote(image_name))
-        
+        cmd.append(image_name)
+
         # Command
         if self.command:
-            # Use shlex.split() for proper shell parsing
+            command = str(self.command)
             try:
-                cmd.extend(shlex.split(self.command))
+                cmd.extend(shlex.split(command))
             except ValueError as e:
                 # SECURITY: Do not fall back to unsafe split - fail hard
                 raise ValueError(
                     f"Invalid command syntax: {e}. "
                     "Commands must use proper shell quoting. "
-                    f"Got: {self.command!r}"
+                    f"Got: {command!r}"
                 ) from e
-        
-        # Return the command string
-        return " ".join(cmd)
+
+        return shlex.join(cmd)
 
     def run(self):
         """Run container using the Python Docker API."""
         # Handle command serialization
-        if self.command and not isinstance(self.command, str):
-            self.command = PickledFunction(self.command, self.name, "command")
-        
+        pkl_func = self.prepare_callable_command()
+        if pkl_func is not None:
+            pkl_func.write()
+
         cfg = self._params()
-        
+
         # Apply cgroup configuration if present
         self._apply_cgroup_config(cfg)
-        
+
         # Enable auto-removal of the container when it exits
         cfg["auto_remove"] = True
         # Run detached by default (can be overridden by self.detach)
         cfg["detach"] = self.detach if self.detach is not None else True
-        
-        logger.info(f"Running Docker container {self.name}: {cfg}")
+
+        logger.info(f"Running Docker container {self.name}: {redact_sensitive(cfg)}")
         client = get_docker_client()
-        
+
         # Pull image if not present
         try:
             client.images.get(self.image)
@@ -735,7 +723,7 @@ class DockerContainer:
             else:
                 image, tag = image_and_tag
                 client.images.pull(image, tag=tag)
-        
+
         return client.containers.run(**cfg)
 
     def delete(self):
@@ -765,13 +753,13 @@ class DockerContainer:
         if env:
             cfg["environment"] = env
         cfg["name"] = self.name
-        if self.command and " " in self.command:
-            cfg["command"] = self.command.split()
+        if self.command and " " in str(self.command):
+            cfg["command"] = shlex.split(str(self.command))
         ulimits = [self.ulimits] if isinstance(self.ulimits, Ulimit) else self.ulimits
         if ulimits:
             cfg["ulimits"] = [
-                docker.types.Ulimit(name=l.name, soft=l.soft, hard=l.hard)
-                for l in ulimits
+                docker.types.Ulimit(name=limit.name, soft=limit.soft, hard=limit.hard)
+                for limit in ulimits
             ]
         volumes = [self.volumes] if isinstance(self.volumes, Volume) else self.volumes
         if volumes:
@@ -786,97 +774,121 @@ class DockerContainer:
             cfg["image"] = self.image.tag
         return cfg
 
+    def prepare_callable_command(self) -> Optional[PickledFunction]:
+        """Convert a Python callable command to a signed-pickle entrypoint."""
+        if not self.command or isinstance(self.command, str):
+            return None
+        if isinstance(self.command, PickledFunction):
+            return self.command
+        self._ensure_name()
+        self.command = PickledFunction(self.command, self.name, "command")
+        return self.command
+
     def _apply_cgroup_config(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         """Apply cgroup configuration to the container config dictionary using intelligent mapping."""
         if not self.cgroup_config:
             return cfg
-        
+
         # Use the centralized intelligent mapping logic from CgroupConfig
         # This leverages all the smart parameter conversion and precedence rules
-        
+
         # CPU configuration - use intelligent mapping
         if self.cgroup_config.cpu_quota:
-            cfg['cpu_quota'] = self.cgroup_config.cpu_quota
+            cfg["cpu_quota"] = self.cgroup_config.cpu_quota
         if self.cgroup_config.cpu_period:
-            cfg['cpu_period'] = self.cgroup_config.cpu_period
-            
+            cfg["cpu_period"] = self.cgroup_config.cpu_period
+
         # CPU weight: prefer cpu_shares, fallback to converted cpu_weight
         if self.cgroup_config.cpu_shares:
-            cfg['cpu_shares'] = self.cgroup_config.cpu_shares
+            cfg["cpu_shares"] = self.cgroup_config.cpu_shares
         elif self.cgroup_config.cpu_weight:
             # Convert systemd weight (1-10000) to Docker shares (~1024 default)
             docker_shares = int((self.cgroup_config.cpu_weight / 100) * 1024)
-            cfg['cpu_shares'] = docker_shares
-            
+            cfg["cpu_shares"] = docker_shares
+
         if self.cgroup_config.cpuset_cpus:
-            cfg['cpuset_cpus'] = self.cgroup_config.cpuset_cpus
+            cfg["cpuset_cpus"] = self.cgroup_config.cpuset_cpus
 
         # Memory configuration - use intelligent mapping
         effective_memory = self.cgroup_config._calculate_effective_memory_limit()
         if effective_memory:
-            cfg['mem_limit'] = effective_memory
-            
+            cfg["mem_limit"] = effective_memory
+
         effective_swap = self.cgroup_config._calculate_effective_swap_limit()
         if effective_swap:
-            cfg['memswap_limit'] = effective_swap
-            
-        effective_reservation = self.cgroup_config._calculate_effective_memory_reservation()
+            cfg["memswap_limit"] = effective_swap
+
+        effective_reservation = (
+            self.cgroup_config._calculate_effective_memory_reservation()
+        )
         if effective_reservation:
-            cfg['mem_reservation'] = effective_reservation
-            
+            cfg["mem_reservation"] = effective_reservation
+
         if self.cgroup_config.memory_swappiness is not None:
-            cfg['mem_swappiness'] = self.cgroup_config.memory_swappiness
+            cfg["mem_swappiness"] = self.cgroup_config.memory_swappiness
 
         # I/O configuration - intelligent mapping
         # I/O weight: prefer blkio_weight, fallback to converted io_weight
         if self.cgroup_config.blkio_weight:
-            cfg['blkio_weight'] = self.cgroup_config.blkio_weight
+            cfg["blkio_weight"] = self.cgroup_config.blkio_weight
         elif self.cgroup_config.io_weight:
             # Convert systemd IOWeight (1-10000) to Docker blkio-weight (10-1000)
             docker_blkio = max(10, min(1000, int(self.cgroup_config.io_weight / 10)))
-            cfg['blkio_weight'] = docker_blkio
-            
+            cfg["blkio_weight"] = docker_blkio
+
         # Device bandwidth and IOPS limits (direct mapping)
         if self.cgroup_config.device_read_bps:
-            cfg['device_read_bps'] = [f"{dev}:{bps}" for dev, bps in self.cgroup_config.device_read_bps.items()]
+            cfg["device_read_bps"] = [
+                f"{dev}:{bps}"
+                for dev, bps in self.cgroup_config.device_read_bps.items()
+            ]
         if self.cgroup_config.device_write_bps:
-            cfg['device_write_bps'] = [f"{dev}:{bps}" for dev, bps in self.cgroup_config.device_write_bps.items()]
+            cfg["device_write_bps"] = [
+                f"{dev}:{bps}"
+                for dev, bps in self.cgroup_config.device_write_bps.items()
+            ]
         if self.cgroup_config.device_read_iops:
-            cfg['device_read_iops'] = [f"{dev}:{iops}" for dev, iops in self.cgroup_config.device_read_iops.items()]
+            cfg["device_read_iops"] = [
+                f"{dev}:{iops}"
+                for dev, iops in self.cgroup_config.device_read_iops.items()
+            ]
         if self.cgroup_config.device_write_iops:
-            cfg['device_write_iops'] = [f"{dev}:{iops}" for dev, iops in self.cgroup_config.device_write_iops.items()]
-            
+            cfg["device_write_iops"] = [
+                f"{dev}:{iops}"
+                for dev, iops in self.cgroup_config.device_write_iops.items()
+            ]
+
         # Process limits
         if self.cgroup_config.pids_limit:
-            cfg['pids_limit'] = self.cgroup_config.pids_limit
-            
+            cfg["pids_limit"] = self.cgroup_config.pids_limit
+
         # Security and isolation
         if self.cgroup_config.oom_score_adj is not None:
-            cfg['oom_score_adj'] = self.cgroup_config.oom_score_adj
+            cfg["oom_score_adj"] = self.cgroup_config.oom_score_adj
         if self.cgroup_config.read_only_rootfs:
-            cfg['read_only'] = self.cgroup_config.read_only_rootfs
+            cfg["read_only"] = self.cgroup_config.read_only_rootfs
         if self.cgroup_config.cap_add:
-            cfg['cap_add'] = self.cgroup_config.cap_add
+            cfg["cap_add"] = self.cgroup_config.cap_add
         if self.cgroup_config.cap_drop:
-            cfg['cap_drop'] = self.cgroup_config.cap_drop
+            cfg["cap_drop"] = self.cgroup_config.cap_drop
         if self.cgroup_config.devices:
-            cfg['devices'] = self.cgroup_config.devices
-            
+            cfg["devices"] = self.cgroup_config.devices
+
         # Environment and execution settings
         if self.cgroup_config.environment:
-            env = cfg.get('environment', {})
+            env = cfg.get("environment", {})
             env.update(self.cgroup_config.environment)
-            cfg['environment'] = env
+            cfg["environment"] = env
         if self.cgroup_config.user:
-            cfg['user'] = self.cgroup_config.user
+            cfg["user"] = self.cgroup_config.user
         if self.cgroup_config.group:
-            cfg['group'] = self.cgroup_config.group
+            cfg["group"] = self.cgroup_config.group
         if self.cgroup_config.working_dir:
-            cfg['working_dir'] = self.cgroup_config.working_dir
-            
+            cfg["working_dir"] = self.cgroup_config.working_dir
+
         # Apply timeouts
         if self.cgroup_config.timeout_stop:
-            cfg['stop_timeout'] = self.cgroup_config.timeout_stop
+            cfg["stop_timeout"] = self.cgroup_config.timeout_stop
 
         return cfg
 
@@ -890,6 +902,7 @@ class DockerContainer:
             A dictionary representation of the container.
         """
         from taskflows.serialization import to_dict
+
         return to_dict(self, include_none=include_none)
 
     def to_json(self, indent: int = 2, include_none: bool = False) -> str:
@@ -903,6 +916,7 @@ class DockerContainer:
             A JSON string representation of the container.
         """
         from taskflows.serialization import serialize
+
         return serialize(self, format="json", indent=indent, include_none=include_none)
 
     def to_yaml(self, include_none: bool = False) -> str:
@@ -915,6 +929,7 @@ class DockerContainer:
             A YAML string representation of the container.
         """
         from taskflows.serialization import serialize
+
         return serialize(self, format="yaml", include_none=include_none)
 
     @classmethod
@@ -928,6 +943,7 @@ class DockerContainer:
             A DockerContainer instance.
         """
         from taskflows.serialization import from_dict
+
         return from_dict(data, cls)
 
     @classmethod
@@ -941,6 +957,7 @@ class DockerContainer:
             A DockerContainer instance.
         """
         from taskflows.serialization import deserialize
+
         return deserialize(data, cls, format="json")
 
     @classmethod
@@ -954,6 +971,7 @@ class DockerContainer:
             A DockerContainer instance.
         """
         from taskflows.serialization import deserialize
+
         return deserialize(data, cls, format="yaml")
 
 

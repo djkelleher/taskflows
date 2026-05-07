@@ -1,23 +1,28 @@
+import asyncio
 import json
+import re
 import socket
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 from fnmatch import fnmatchcase
-from functools import cache
 from pathlib import Path
 from typing import Dict, Literal, Optional, Sequence
+from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
 from taskflows.alerts.components import Component, Map, Table, Text
 from taskflows.alerts.utils import as_code_block
 
-# from trading.databases.timescale import pgconn
 from taskflows.dynamic_imports import find_instances
-from fastapi import status
-
-from taskflows.admin.security import security_config
-from taskflows.common import config, load_service_files, logger, sort_service_names
+from taskflows.common import (
+    config,
+    load_service_files,
+    logql_string,
+    logger,
+    redact_sensitive,
+    sort_service_names,
+)
 from taskflows.dashboard import Dashboard
 from taskflows.db import get_servers
 from taskflows.db import upsert_server as db_upsert_server
@@ -43,15 +48,11 @@ from taskflows.service import (
     systemd_manager,
 )
 
-from .security import create_hmac_headers  # new import reuse
-from .security import load_security_config, security_config
+from .security import create_hmac_headers, load_security_config, security_config
+from .utils import get_public_ipv4, with_hostname
 
-HOSTNAME = socket.gethostname()
-
-
-def with_hostname(data: dict) -> dict:
-    #logger.debug(f"with_hostname called: {data}")
-    return {**data, "hostname": HOSTNAME}
+_API_RESPONSE_MAX_CHARS = 8000
+_API_TRACEBACK_MAX_LINES = 40
 
 
 async def get_unit_files(
@@ -143,23 +144,23 @@ async def task_history(
     if not grafana_url.startswith("http"):
         grafana_url = f"http://{grafana_url}"
 
+    example_pattern = logql_string(f".*{re.escape(match or 'your_task')}.*")
     message = (
         f"Task history is now available via Loki log queries. "
         f"Visit {grafana_url}/explore to query task logs using LogQL. "
-        f"Example query: {{service_name=~\".*{match or 'your_task'}.*\"}}"
+        f"Example query: {{service_name=~{example_pattern}}}"
     )
 
     if as_json:
-        return with_hostname({
-            "history": [],
-            "message": message,
-            "grafana_url": f"{grafana_url}/explore",
-        })
+        return with_hostname(
+            {
+                "history": [],
+                "message": message,
+                "grafana_url": f"{grafana_url}/explore",
+            }
+        )
 
-    return Table(
-        [{"Info": message}],
-        title="Task History - Use Loki"
-    )
+    return Table([{"Info": message}], title="Task History - Use Loki")
 
 
 async def list_services(
@@ -307,9 +308,9 @@ async def status(
                 units_meta[stem]["Service\nEnabled"] = enabled_status
                 await manager.call_load_unit(Path(file_path).name)
 
-            for file_path, enabled_status in (await get_unit_file_states(
-                unit_type="timer", match=match
-            )).items():
+            for file_path, enabled_status in (
+                await get_unit_file_states(unit_type="timer", match=match)
+            ).items():
                 units_meta[Path(file_path).stem]["Timer\nEnabled"] = enabled_status
 
             # Add unit runtime data
@@ -323,7 +324,9 @@ async def status(
 
             # Filter out not-found units
             units_meta = {
-                k: v for k, v in units_meta.items() if v.get("load_state") != "not-found"
+                k: v
+                for k, v in units_meta.items()
+                if v.get("load_state") != "not-found"
             }
 
             # Process rows
@@ -338,13 +341,16 @@ async def status(
                     continue
 
                 # Filter out stop-* and restart-* services unless all flag is set
-                if not all and (srv_name.startswith("stop-") or srv_name.startswith("restart-")):
+                if not all and srv_name.startswith(("stop-", "restart-")):
                     continue
 
                 # Format timers
                 timers = [
                     f"{t['base']}({t['spec']})" for t in row.get("Timers Calendar", [])
-                ] + [f"{t['base']}({t['offset']})" for t in row.get("Timers Monotonic", [])]
+                ] + [
+                    f"{t['base']}({t['offset']})"
+                    for t in row.get("Timers Monotonic", [])
+                ]
                 row["Timers"] = "\n".join(timers) or "-"
 
                 # Calculate uptime
@@ -428,12 +434,23 @@ async def logs(
     if host is None:
         # Call local free function
         logger.info(f"logs called for service_name={service_name}, n_lines={n_lines}")
-        data = with_hostname({"logs": service_logs(service_name, n_lines or 1000)})
+        data = with_hostname(
+            {
+                "logs": await asyncio.to_thread(
+                    service_logs, service_name, n_lines or 1000
+                )
+            }
+        )
     else:
         # Call via API
         params = {"n_lines": n_lines} if n_lines else {}
-        data = call_api(
-            host, f"/logs/{service_name}", method="GET", timeout=30, params=params
+        data = await asyncio.to_thread(
+            call_api,
+            host,
+            f"/logs/{service_name}",
+            method="GET",
+            timeout=30,
+            params=params,
         )
 
     if as_json:
@@ -532,7 +549,8 @@ async def create(
 
     if not search_in and not yaml_file:
         return Table(
-            [{"Error": "Either search_in or yaml_file parameter is required"}], title="Create - Error"
+            [{"Error": "Either search_in or yaml_file parameter is required"}],
+            title="Create - Error",
         )
 
     if host is None:
@@ -547,21 +565,22 @@ async def create(
         if yaml_file:
             # Load services from YAML file
             from taskflows.serialization import load_services_from_yaml
+
             services = load_services_from_yaml(yaml_file)
-            print(f"Loaded {len(services)} services from {yaml_file}")
+            logger.info(f"Loaded {len(services)} services from {yaml_file}")
         else:
             # Search Python files for Service instances
             services = find_instances(class_type=Service, search_in=search_in)
-            print(f"Found {len(services)} services")
+            logger.info(f"Found {len(services)} services")
 
             for sr in find_instances(class_type=ServiceRegistry, search_in=search_in):
-                print(f"ServiceRegistry found with {len(sr.services)} services")
+                logger.info(f"ServiceRegistry found with {len(sr.services)} services")
                 services.extend(sr.services)
 
             dashboards = find_instances(class_type=Dashboard, search_in=search_in)
-            print(f"Found {len(dashboards)} dashboards")
+            logger.info(f"Found {len(dashboards)} dashboards")
 
-        print(f"Total services: {len(services)}")
+        logger.info(f"Total services: {len(services)}")
         if include:
             services = [s for s in services if fnmatchcase(name=s.name, pat=include)]
             dashboards = [
@@ -597,7 +616,7 @@ async def create(
         if search_in:
             data["search_in"] = search_in
         if yaml_file:
-            data["yaml_file"] = yaml_file
+            data["yaml_content"] = Path(yaml_file).read_text()
         if include:
             data["include"] = include
         if exclude:
@@ -928,36 +947,6 @@ async def enable(
     return Table(rows, title=f"Enabled Items ({len(rows)})")
 
 
-@cache
-def get_public_ipv4() -> Optional[str]:
-    """Detect and cache the machine's public IPv4 address.
-
-    Tries multiple external services and returns the first validated public IPv4.
-    Cached for process lifetime; call get_public_ipv4.cache_clear() if refresh needed.
-    """
-    services = (
-        "https://api.ipify.org",
-        "https://ipv4.icanhazip.com",
-        "https://checkip.amazonaws.com",
-    )
-    for url in services:
-        try:
-            resp = requests.get(url, timeout=5)
-            if resp.status_code != 200:
-                logger.debug(f"get_public_ipv4: Non-200 from {url}: {resp.status_code}")
-                continue
-            # Some services may return with newline; split to be safe
-            candidate = resp.text.strip().split()[0]
-            logger.debug(f"get_public_ipv4: Selected public IP {candidate} from {url}")
-            return candidate
-        except requests.RequestException as e:
-            logger.debug(f"get_public_ipv4: Request error from {url}: {e}")
-        except Exception as e:
-            logger.debug(f"get_public_ipv4: Unexpected error from {url}: {e}")
-    logger.warning("get_public_ipv4: Failed to determine public IPv4 address")
-    return None
-
-
 async def upsert_server(
     hostname: Optional[str] = None, public_ipv4: Optional[str] = None
 ) -> None:
@@ -1032,7 +1021,7 @@ async def execute_command_on_servers(
     elif command == "remove-server":
         return {
             "localhost": Text(
-                "Server removal is not supported. " "Servers are managed automatically."
+                "Server removal is not supported. Servers are managed automatically."
             )
         }
 
@@ -1073,7 +1062,11 @@ async def execute_command_on_servers(
         for hostname, table in results.items():
             # Extract title from first table
             if combined_title is None and table.title:
-                combined_title = table.title.value if hasattr(table.title, 'value') else str(table.title)
+                combined_title = (
+                    table.title.value
+                    if hasattr(table.title, "value")
+                    else str(table.title)
+                )
 
             # Add Host column to each row
             for row in table.rows:
@@ -1102,16 +1095,39 @@ def call_api(
     if not server.startswith("http"):
         server = f"http://{server}"
     url = server.rstrip("/") + endpoint
-    logger.info(f"{method.upper()} {url} params={params} json_data={json_data}")
+    logger.info(
+        f"{method.upper()} {url} params={redact_sensitive(params)} "
+        f"json_data={redact_sensitive(json_data)}"
+    )
+
+    body = ""
+    request_data = None
+    if json_data is not None:
+        body = json.dumps(json_data, separators=(",", ":"))
+        request_data = body.encode("utf-8")
+
+    parsed_endpoint = urlsplit(endpoint)
+    endpoint_path = parsed_endpoint.path or "/"
+    query_parts = [
+        part
+        for part in (parsed_endpoint.query, urlencode(params or {}, doseq=True))
+        if part
+    ]
+    query_string = "&".join(query_parts)
 
     def build_headers(cfg) -> Dict[str, str]:
         headers: Dict[str, str] = {}
-        body = ""
-        if json_data is not None:
-            body = json.dumps(json_data, separators=(",", ":"))
         if endpoint != "/health" and cfg.enable_hmac and cfg.hmac_secret:
             try:
-                headers.update(create_hmac_headers(cfg.hmac_secret, body))
+                headers.update(
+                    create_hmac_headers(
+                        cfg.hmac_secret,
+                        body,
+                        method=method.upper(),
+                        path=endpoint_path,
+                        query_string=query_string,
+                    )
+                )
                 if json_data is not None:
                     headers["Content-Type"] = "application/json"
                 logger.debug(f"HMAC headers added for {url}")
@@ -1128,7 +1144,7 @@ def call_api(
                 method.upper(),
                 url,
                 params=params,
-                json=json_data,
+                data=request_data,
                 headers=headers,
                 timeout=timeout,
             )
@@ -1144,9 +1160,6 @@ def call_api(
             resp.raise_for_status()
             return resp.json()
         except requests.HTTPError as he:
-            # Cap total size in logs
-            MAX_TOTAL = 8000
-            MAX_TB_LINES = 40
             try:
                 data = resp.json()
                 if (
@@ -1155,23 +1168,23 @@ def call_api(
                     and isinstance(data["traceback"], str)
                 ):
                     lines = data["traceback"].splitlines()
-                    if len(lines) > MAX_TB_LINES:
+                    if len(lines) > _API_TRACEBACK_MAX_LINES:
                         data["traceback"] = (
-                            "\n".join(lines[:MAX_TB_LINES])
-                            + f"\n... truncated {len(lines) - MAX_TB_LINES} lines ..."
+                            "\n".join(lines[:_API_TRACEBACK_MAX_LINES])
+                            + f"\n... truncated {len(lines) - _API_TRACEBACK_MAX_LINES} lines ..."
                         )
                 text = json.dumps(data, indent=2, ensure_ascii=False)
-                if len(text) > MAX_TOTAL:
+                if len(text) > _API_RESPONSE_MAX_CHARS:
                     text = (
-                        text[:MAX_TOTAL]
-                        + f"\n... truncated {len(text) - MAX_TOTAL} chars ..."
+                        text[:_API_RESPONSE_MAX_CHARS]
+                        + f"\n... truncated {len(text) - _API_RESPONSE_MAX_CHARS} chars ..."
                     )
             except Exception:
                 text = resp.text or ""
-                if len(text) > MAX_TOTAL:
-                    return (
-                        text[:MAX_TOTAL]
-                        + f"\n... truncated {len(text) - MAX_TOTAL} chars ..."
+                if len(text) > _API_RESPONSE_MAX_CHARS:
+                    text = (
+                        text[:_API_RESPONSE_MAX_CHARS]
+                        + f"\n... truncated {len(text) - _API_RESPONSE_MAX_CHARS} chars ..."
                     )
             logger.error(
                 "HTTPError status=%s url=%s error=%s\nResponse body:\n%s",
@@ -1187,6 +1200,7 @@ def call_api(
                 "error": str(he),
                 "status_code": status_code,
                 "endpoint": endpoint,
+                "response_body": text,
             }
         except Exception as e:
             logger.exception(f"{type(e)} Exception for {url}: {e}")

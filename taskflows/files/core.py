@@ -74,11 +74,13 @@ class Files:
         """
         if is_s3_path(directory):
             # If pattern provided separately, append to directory path
-            s3_path = f"{str(directory).rstrip('/')}/{pattern}" if pattern else str(directory)
+            s3_path = (
+                f"{str(directory).rstrip('/')}/{pattern}" if pattern else str(directory)
+            )
             return self.s3.list_files(s3_path)
         if pattern:
-            return list(Path(directory).glob(pattern))
-        return list(Path(directory).iterdir())
+            return sorted(path for path in Path(directory).glob(pattern) if path.is_file())
+        return sorted(path for path in Path(directory).iterdir() if path.is_file())
 
     def parquet_column_names(self, file: str | Path) -> List[str]:
         """Returns list of column names in parquet file."""
@@ -101,6 +103,7 @@ class Files:
     ):
         """Move or copy file to a new location."""
         is_s3_move = False
+        final_dst_path = dst_path
 
         if is_s3_path(src_path):
             if is_s3_path(dst_path):
@@ -113,18 +116,24 @@ class Files:
                     dst_path = Path(dst_path) / Path(src_path).name
                 # TODO make work with miltiple files.
                 try:
-                    self.s3.download_file(
+                    downloaded = self.s3.download_file(
                         s3_path=src_path,
                         local_path=dst_path,
                         overwrite=True,
                     )
+                    if not downloaded:
+                        raise RuntimeError(
+                            f"Failed to download {src_path} to {dst_path}"
+                        )
                 except Exception:
                     # Clean up partial local file on download error
                     if os.path.exists(dst_path):
                         try:
                             os.remove(dst_path)
                         except Exception as cleanup_err:
-                            logger.warning(f"Failed to clean up partial file {dst_path}: {cleanup_err}")
+                            logger.warning(
+                                f"Failed to clean up partial file {dst_path}: {cleanup_err}"
+                            )
                     raise
 
         elif is_s3_path(dst_path):
@@ -133,30 +142,43 @@ class Files:
                 dst_path, require_partition=False
             )
             if not partition:
-                partition = str(src_path).split(f"{bucket_name}/")[-1].lstrip("/")
+                partition = Path(src_path).name
+                final_dst_path = f"s3://{bucket_name}/{partition}"
             try:
                 self.s3.client.upload_file(str(src_path), bucket_name, partition)
             except Exception:
                 # Clean up partial S3 object on upload error
                 try:
-                    self.delete(dst_path, if_exists=True)
+                    self.delete(final_dst_path, if_exists=True)
                 except Exception as cleanup_err:
-                    logger.warning(f"Failed to clean up partial S3 object {dst_path}: {cleanup_err}")
+                    logger.warning(
+                        f"Failed to clean up partial S3 object {final_dst_path}: {cleanup_err}"
+                    )
                 raise
         else:
+            actual_dst_path = (
+                Path(dst_path) / Path(src_path).name
+                if os.path.isdir(dst_path)
+                else Path(dst_path)
+            )
+            final_dst_path = actual_dst_path
             try:
-                shutil.copy(src_path, dst_path)
+                shutil.copy2(src_path, dst_path)
             except Exception:
                 # Clean up partial destination file on copy error
-                if os.path.exists(dst_path):
+                if actual_dst_path.exists() and actual_dst_path.is_file():
                     try:
-                        os.remove(dst_path)
+                        actual_dst_path.unlink()
                     except Exception as cleanup_err:
-                        logger.warning(f"Failed to clean up partial file {dst_path}: {cleanup_err}")
+                        logger.warning(
+                            f"Failed to clean up partial file {actual_dst_path}: {cleanup_err}"
+                        )
                 raise
 
         if delete_src:
-            if not is_s3_move and not self.exists(dst_path):
+            if not is_s3_move and not self.exists(final_dst_path):
                 # would  already be checked for s3 move.
-                raise FileNotFoundError(f"Destination file {dst_path} does not exist after transfer")
+                raise FileNotFoundError(
+                    f"Destination file {final_dst_path} does not exist after transfer"
+                )
             self.delete(src_path)

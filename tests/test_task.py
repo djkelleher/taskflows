@@ -1,10 +1,28 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
+import json
+from datetime import datetime, timezone
 from time import sleep
+from urllib.parse import parse_qs, unquote, urlparse
 
 import pytest
 from taskflows import task
-from taskflows.tasks import build_loki_query_url, _RuntimeManager
+from taskflows.tasks import build_loki_query_url, run_task, _RuntimeManager
+
+
+class RecordingMetric:
+    def __init__(self):
+        self.calls = []
+        self.current_labels = None
+
+    def labels(self, **labels):
+        self.current_labels = labels
+        return self
+
+    def inc(self):
+        self.calls.append(("inc", self.current_labels))
+
+    def observe(self, value):
+        self.calls.append(("observe", self.current_labels, value))
 
 
 @pytest.mark.parametrize("required", [True, False])
@@ -40,6 +58,80 @@ async def test_good_async_task(required, retries, timeout):
 
     result = await return_100()
     assert result == 100
+
+
+def test_task_passes_positional_and_keyword_arguments_to_sync_function():
+    @task(name="test_args", required=True)
+    def combine(prefix: str, value: int, *, suffix: str) -> str:
+        return f"{prefix}-{value}-{suffix}"
+
+    assert combine("item", 7, suffix="done") == "item-7-done"
+
+
+@pytest.mark.parametrize("retries", [-1, -5])
+def test_task_rejects_negative_retries(retries):
+    with pytest.raises(ValueError, match="retries"):
+
+        @task(name="invalid_retries", retries=retries)
+        def do_work():
+            return 1
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_task_rejects_nonpositive_timeout(timeout):
+    with pytest.raises(ValueError, match="timeout"):
+
+        @task(name="invalid_timeout", timeout=timeout)
+        def do_work():
+            return 1
+
+
+@pytest.mark.asyncio
+async def test_run_task_rejects_invalid_execution_options():
+    def do_work():
+        return 1
+
+    with pytest.raises(ValueError, match="retries"):
+        await run_task(do_work, retries=-1)
+
+    with pytest.raises(ValueError, match="timeout"):
+        await run_task(do_work, timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_run_task_records_duration_with_monotonic_clock(monkeypatch):
+    from taskflows import metrics
+    import time
+
+    duration_metric = RecordingMetric()
+    count_metric = RecordingMetric()
+    monkeypatch.setattr(metrics, "task_duration", duration_metric)
+    monkeypatch.setattr(metrics, "task_count", count_metric)
+
+    perf_values = iter([5.0, 7.5])
+    monkeypatch.setattr(time, "perf_counter", lambda: next(perf_values))
+
+    async def do_work():
+        return "done"
+
+    assert await run_task(do_work, name="duration_test") == "done"
+
+    assert duration_metric.calls == [
+        (
+            "observe",
+            {"task_name": "duration_test", "status": "success"},
+            2.5,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_task_passes_positional_and_keyword_arguments_to_async_function():
+    @task(name="test_async_args", required=True)
+    async def combine(prefix: str, value: int, *, suffix: str) -> str:
+        return f"{prefix}-{value}-{suffix}"
+
+    assert await combine("item", 7, suffix="done") == "item-7-done"
 
 
 @pytest.mark.parametrize("required", [True, False])
@@ -149,11 +241,13 @@ def test_loki_query_url_default_time_range():
 
     # Try unquoted format: from=1234567890 or from:1234567890
     if not from_match:
-        from_match = re.search(r'from[=:](\d+)', decoded_url)
+        from_match = re.search(r"from[=:](\d+)", decoded_url)
     if not to_match:
-        to_match = re.search(r'to[=:](\d+)', decoded_url)
+        to_match = re.search(r"to[=:](\d+)", decoded_url)
 
-    assert from_match and to_match, f"Could not find timestamps in decoded URL: {decoded_url[:200]}"
+    assert from_match and to_match, (
+        f"Could not find timestamps in decoded URL: {decoded_url[:200]}"
+    )
     from_ts = int(from_match.group(1))
     to_ts = int(to_match.group(1))
 
@@ -162,7 +256,9 @@ def test_loki_query_url_default_time_range():
     expected_diff = 3600 * 1000  # 1 hour in milliseconds
 
     # Allow 1 second tolerance for execution time
-    assert abs(time_diff_ms - expected_diff) < 1000, f"Time diff: {time_diff_ms}ms, expected: {expected_diff}ms"
+    assert abs(time_diff_ms - expected_diff) < 1000, (
+        f"Time diff: {time_diff_ms}ms, expected: {expected_diff}ms"
+    )
 
 
 def test_loki_query_url_with_explicit_times():
@@ -181,6 +277,16 @@ def test_loki_query_url_with_explicit_times():
     assert expected_to in url
 
 
+def test_loki_query_url_escapes_task_name_as_regex_literal():
+    """Task names should not be able to alter the generated LogQL regex."""
+    url = build_loki_query_url('worker.*"prod\\job', error_only=True)
+    query_params = parse_qs(urlparse(url).query)
+    left = json.loads(unquote(query_params["left"][0]))
+    expr = left["queries"][0]["expr"]
+
+    assert expr == r'{service_name=~".*worker\\.\\*\"prod\\\\job.*"} |= "ERROR"'
+
+
 def test_runtime_manager_handles_none_thread():
     """Test that RuntimeManager handles None thread gracefully."""
     # Create a new RuntimeManager instance
@@ -197,6 +303,21 @@ def test_runtime_manager_handles_none_thread():
     assert portal is not None
 
     # Verify thread was created
+    assert manager._thread is not None
+    assert manager._thread.is_alive()
+
+
+def test_runtime_manager_fast_path_rechecks_portal_health():
+    """A stale healthy flag should not return a missing portal."""
+    manager = _RuntimeManager()
+    manager._portal = None
+    manager._thread = None
+    manager._portal_healthy = True
+    manager._last_health_check = datetime.now(timezone.utc).timestamp()
+
+    portal = manager.get_portal()
+
+    assert portal is not None
     assert manager._thread is not None
     assert manager._thread.is_alive()
 

@@ -1,9 +1,11 @@
 import csv
 import json
 import pickle
+import re
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import datetime
 from enum import Enum, auto
 from io import StringIO
@@ -11,7 +13,9 @@ from typing import Any, Dict
 from typing import List as ListType
 from typing import Literal, Optional, Sequence, Tuple, Union
 
+import imgkit  # noqa: F401
 from dominate import tags as d
+from dominate.util import raw as raw_html
 from prettytable import PrettyTable
 from rich.box import ROUNDED
 from rich.columns import Columns
@@ -117,17 +121,53 @@ def get_theme_colors(theme: str = "dark") -> dict:
             "code_bg": "#1a1a1a",
             "accent": "#B4EC51",
             # Content type colors
-            "info": "#B4EC51",
+            "info": "#333333",
             "warning": "#FF8C00",
             "error": "#DC2626",
-            "important": "#60A5FA",
+            "important": "#2563EB",
             # Status colors
-            "success": "#10B981",
+            "success": "#059669",
             "neutral": "#9CA3AF",
             # Additional colors
             "table_alt_row": "#333333",
             "card_border": "#4b5563",
         }
+
+
+def _truncate_with_suffix(value: str, max_length: int, suffix: str) -> str:
+    """Return a preview no longer than max_length."""
+    if max_length <= 0:
+        return ""
+    if not suffix:
+        return value[:max_length]
+    if len(suffix) >= max_length:
+        return suffix[:max_length]
+    return value[: max_length - len(suffix)] + suffix
+
+
+def _markdown_table_cell(value: Any) -> str:
+    """Escape cell content that would otherwise corrupt Markdown tables."""
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return text.replace("\n", "<br>").replace("|", r"\|")
+
+
+def _safe_filename_stem(value: str, max_length: int = 100) -> str:
+    """Create a filesystem-safe stem while preserving readable attachment names."""
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
+    stem = stem[:max_length].strip("._-")
+    return stem or "table"
+
+
+def _coerce_content_type(level: ContentType | str) -> ContentType:
+    if isinstance(level, ContentType):
+        return level
+    try:
+        return ContentType[str(level).upper()]
+    except KeyError as exc:
+        valid = ", ".join(ContentType.__members__)
+        raise ValueError(
+            f"Unknown content type {level!r}. Expected one of: {valid}"
+        ) from exc
 
 
 class Component(ABC):
@@ -229,13 +269,21 @@ class Text(Component):
         self._attachment_info: Optional[Tuple[str, StringIO]] = None
 
         # Handle message truncation and attachment creation
-        if max_length and len(self.original_value) > max_length:
-            # Create preview text
-            truncate_at = max_length - len(self.preview_suffix)
-            self.value = self.original_value[:truncate_at] + self.preview_suffix
+        if (
+            max_length is not None
+            and max_length >= 0
+            and len(self.original_value) > max_length
+        ):
+            self.value = _truncate_with_suffix(
+                self.original_value, max_length, self.preview_suffix
+            )
             # Create attachment will be called by the parent when needed
         else:
             self.value = self.original_value
+
+    @property
+    def content(self) -> str:
+        return self.value
 
     def create_attachment_if_needed(self) -> Optional[Tuple[str, StringIO]]:
         """Create a text file attachment if the message was truncated.
@@ -244,9 +292,14 @@ class Text(Component):
             Optional[Tuple[str, StringIO]]: Filename and file object if attachment created, None otherwise.
         """
         if self._attachment_info:
+            self._attachment_info[1].seek(0)
             return self._attachment_info
 
-        if self.max_length and len(self.original_value) > self.max_length:
+        if (
+            self.max_length is not None
+            and self.max_length >= 0
+            and len(self.original_value) > self.max_length
+        ):
             # Generate filename based on content type and hash
             content_type_name = self.level.name.lower()
             content_hash = xxh32(self.original_value.encode()).hexdigest()[:8]
@@ -386,7 +439,7 @@ class Map(Component):
                     if i > 0:
                         d.span(
                             " | ",
-                            style=f"font-size:{font_size_css(FontSize.LARGE)};color:{get_theme_colors(theme)['text_secondary']};margin:0 8px;",
+                            style=f"font-size:{font_size_css(FontSize.LARGE)};color:{colors['text_secondary']};margin:0 8px;",
                         )
                     d.span(
                         f"{k}: ",
@@ -411,28 +464,33 @@ class Map(Component):
         return container
 
     def classic_md(self) -> str:
+        if not self.data:
+            return " "
         if self.inline:
-            # Inline format with | separator
-            return " | ".join([f"**{k}:** {v}" for k, v in self.data.items()])
+            return "\t".join([f"**{k}: **{v}" for k, v in self.data.items()])
         else:
             # Table format
             rows = ["|||", "|---:|:---|"]
             for k, v in self.data.items():
-                rows.append(f"|**{k}:**|{v}|")
+                rows.append(f"|**{k}: **|{v}|")
             rows.append("|||")
             return "\n".join(rows)
 
     def slack_md(self) -> str:
+        if not self.data:
+            return ""
         if self.inline:
-            return " | ".join([f"*{k}:* {v}" for k, v in self.data.items()])
+            return "\t".join([f"*{k}: *{v}" for k, v in self.data.items()])
         else:
-            return "\n".join([f"*{k}:* {v}" for k, v in self.data.items()])
+            return "\n".join([f"*{k}: *{v}" for k, v in self.data.items()])
 
     def discord_md(self) -> str:
+        if not self.data:
+            return ""
         if self.inline:
-            return " | ".join([f"**{k}:** {v}" for k, v in self.data.items()])
+            return "\t".join([f"**{k}: **{v}" for k, v in self.data.items()])
         else:
-            return "\n".join([f"**{k}:** {v}" for k, v in self.data.items()])
+            return "\n".join([f"**{k}: **{v}" for k, v in self.data.items()])
 
     def console(self, console: Optional[Console] = None) -> None:
         if console is None:
@@ -472,26 +530,53 @@ class Table(Component):
 
     def __init__(
         self,
-        rows: Sequence[Dict[str, Any]],
+        rows: Sequence[Dict[str, Any] | Sequence[Any]],
         title: Optional[str] = None,
         columns: Optional[Sequence[str]] = None,
+        headers: Optional[Sequence[str]] = None,
     ):
         """
         Args:
             rows (Sequence[Dict[str, Any]]): Iterable of row dicts (column: value).
             title (Optional[str], optional): A title to display above the table body. Defaults to None.
             columns (Optional[Sequence[str]], optional): A list of column names. Defaults to None (will be inferred from body rows).
+            headers (Optional[Sequence[str]], optional): Alias for columns.
         """
-        self.rows = [{k: str(v) for k, v in row.items()} for row in rows]
+        if headers is not None:
+            if columns is not None and list(columns) != list(headers):
+                raise ValueError(
+                    "Table columns and headers must match when both are provided."
+                )
+            columns = headers
+
+        raw_rows = list(rows)
+        if all(isinstance(row, Mapping) for row in raw_rows):
+            self.rows = [{k: str(v) for k, v in row.items()} for row in raw_rows]
+            table_columns = (
+                list(dict.fromkeys([c for row in self.rows for c in row]))
+                if columns is None
+                else list(columns)
+            )
+        else:
+            row_values = [list(row) for row in raw_rows]
+            max_width = max((len(row) for row in row_values), default=0)
+            table_columns = list(columns) if columns is not None else []
+            if len(table_columns) < max_width:
+                table_columns.extend(
+                    f"Column {index + 1}"
+                    for index in range(len(table_columns), max_width)
+                )
+            self.rows = [
+                {table_columns[index]: str(value) for index, value in enumerate(values)}
+                for values in row_values
+            ]
+
         self.title = (
             Text(title, ContentType.IMPORTANT, FontSize.LARGE) if title else None
         )
-        self.columns = (
-            list(dict.fromkeys([c for row in self.rows for c in row.keys()]))
-            if columns is None
-            else columns
-        )
-        self._attachment: Map = None
+        self.columns = table_columns
+        self._attachment: Optional[Map] = None
+        self._attachment_file: Optional[AttachmentFile] = None
 
     def attach_rows_as_file(self, filename_stem_max_length=100) -> AttachmentFile:
         """Create a CSV file containing the table rows.
@@ -499,10 +584,13 @@ class Table(Component):
         Returns:
             AttachmentFile: Attachment file object containing the CSV data.
         """
-        stem = (
-            self.title.value[:filename_stem_max_length].replace(" ", "_")
-            if self.title
-            else "table"
+        if self._attachment_file is not None:
+            self._attachment_file.content.seek(0)
+            return self._attachment_file
+
+        stem = _safe_filename_stem(
+            self.title.value if self.title else "table",
+            max_length=filename_stem_max_length,
         )
         rows_id = xxh32(pickle.dumps(self.rows)).hexdigest()
         filename = f"{stem}_{rows_id}.csv"
@@ -514,6 +602,7 @@ class Table(Component):
 
         # Create AttachmentFile object
         attachment_file = AttachmentFile(content=file, filename=filename)
+        self._attachment_file = attachment_file
 
         self._attachment = Map({"Attachment": filename})
         # Don't render rows now that they're attached in a file.
@@ -521,29 +610,29 @@ class Table(Component):
         return attachment_file
 
     def html(self, theme: str = "dark"):
+        colors = get_theme_colors(theme)
         with (container := d.div()):
             if self.title:
                 d.h1(
                     self.title.value,
-                    style=f"color: {get_theme_colors(theme)['accent']};",
+                    style=f"color: {colors['accent']};",
                 )
             if self._attachment:
-                self._attachment.html()
+                self._attachment.html(theme)
             if self.rows:
                 with d.div():
                     with d.table(
-                        style=f"font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; font-size: 13px; border-collapse: collapse; table-layout: auto; margin: 0; background-color: {get_theme_colors(theme)['code_bg']}; border: 2px solid {get_theme_colors(theme)['accent']};"
+                        style=f"font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; font-size: 13px; border-collapse: collapse; table-layout: auto; margin: 0; background-color: {colors['code_bg']}; border: 2px solid {colors['accent']};"
                     ):
                         # Header row
                         with d.tr():
                             for column in self.columns:
                                 d.th(
                                     column,
-                                    style=f"border: 1px solid {get_theme_colors(theme)['accent']}; padding: 0.5em; text-align: center; vertical-align: middle; white-space: nowrap; background-color: {get_theme_colors(theme)['accent']}; font-weight: bold; font-size: 14px; color: {get_theme_colors(theme)['container_bg']};",
+                                    style=f"border: 1px solid {colors['accent']}; padding: 0.5em; text-align: center; vertical-align: middle; white-space: nowrap; background-color: {colors['accent']}; font-weight: bold; font-size: 14px; color: {colors['container_bg']};",
                                 )
                         # Data rows
                         for i, row in enumerate(self.rows):
-                            colors = get_theme_colors(theme)
                             row_bg = (
                                 colors["code_bg"]
                                 if i % 2 == 0
@@ -553,7 +642,7 @@ class Table(Component):
                                 for column in self.columns:
                                     d.td(
                                         row.get(column, ""),
-                                        style=f"border: 1px solid {get_theme_colors(theme)['accent']}; padding: 0.33em 0.5em 0.33em 0.5em; text-align: center; vertical-align: middle; white-space: nowrap; color: {get_theme_colors(theme)['accent']};",
+                                        style=f"border: 1px solid {colors['accent']}; padding: 0.33em 0.5em 0.33em 0.5em; text-align: center; vertical-align: middle; white-space: nowrap; color: {colors['accent']};",
                                     )
         return container
 
@@ -565,19 +654,28 @@ class Table(Component):
             data.append(self._attachment.classic_md())
         if self.rows:
             table_rows = [
-                self.columns,
+                [_markdown_table_cell(column) for column in self.columns],
                 [":----:" for _ in range(len(self.columns))],
-            ] + [[row[col] for col in self.columns] for row in self.rows]
-            data.append("\n".join(["|".join(row) for row in table_rows]))
+            ] + [
+                [_markdown_table_cell(row.get(col, "")) for col in self.columns]
+                for row in self.rows
+            ]
+            data.append("\n".join(["|" + "|".join(row) + "|" for row in table_rows]))
         return "\n\n".join(data).strip()
 
     def slack_md(self, float_format: str = ".3") -> str:
+        data = []
         if not self.rows:
-            return ""
-        columns = defaultdict(list)
-        for row in self.rows:
-            for k, v in row.items():
-                columns[k].append(v)
+            if self._attachment:
+                if self.title:
+                    data.append(self.title.slack_md())
+                data.append(self._attachment.slack_md())
+            return "\n\n".join(data).strip()
+
+        columns = {
+            column: [row.get(column, "") for row in self.rows]
+            for column in self.columns
+        }
         # Slack can't render very many rows in a single table.
         max_rows = 15
         table_slices = defaultdict(PrettyTable)
@@ -585,9 +683,11 @@ class Table(Component):
             for i in range(0, len(values), max_rows):
                 table = table_slices[i]
                 table.add_column(column, values[i : i + max_rows])
-        data = []
         if self.title:
-            data.append(table_slices.pop(0).get_string(title=self.title.value))
+            title_table = table_slices.pop(0)
+            if float_format:
+                title_table.float_format = float_format
+            data.append(title_table.get_string(title=self.title.value))
         for table in table_slices.values():
             if float_format:
                 table.float_format = float_format
@@ -607,13 +707,15 @@ class Table(Component):
         if self.rows:
             # Discord supports proper markdown tables
             table_rows = [
-                "|" + "|".join(self.columns) + "|",
+                "|" + "|".join(_markdown_table_cell(col) for col in self.columns) + "|",
                 "|" + "|".join([":---:" for _ in self.columns]) + "|",
             ]
             for row in self.rows:
                 table_rows.append(
                     "|"
-                    + "|".join([str(row.get(col, "")) for col in self.columns])
+                    + "|".join(
+                        [_markdown_table_cell(row.get(col, "")) for col in self.columns]
+                    )
                     + "|"
                 )
             data.append("\n".join(table_rows))
@@ -692,7 +794,7 @@ class List(Component):
         self.items = [str(item) for item in items]
         self.ordered = ordered
 
-    def html(self, _theme: str = "dark") -> d.html_tag:
+    def html(self, theme: str = "dark") -> d.html_tag:
         list_tag = d.ol if self.ordered else d.ul
         with (container := list_tag()):
             for item in self.items:
@@ -701,21 +803,21 @@ class List(Component):
 
     def classic_md(self) -> str:
         if self.ordered:
-            return "\n".join([f"{i+1}. {item}" for i, item in enumerate(self.items)])
+            return "\n".join([f"{i + 1}. {item}" for i, item in enumerate(self.items)])
         else:
             return "\n".join([f"- {item}" for item in self.items])
 
     def slack_md(self) -> str:
         # Slack supports bullet points with •
         if self.ordered:
-            return "\n".join([f"{i+1}. {item}" for i, item in enumerate(self.items)])
+            return "\n".join([f"{i + 1}. {item}" for i, item in enumerate(self.items)])
         else:
             return "\n".join([f"• {item}" for item in self.items])
 
     def discord_md(self) -> str:
         # Discord supports standard markdown lists
         if self.ordered:
-            return "\n".join([f"{i+1}. {item}" for i, item in enumerate(self.items)])
+            return "\n".join([f"{i + 1}. {item}" for i, item in enumerate(self.items)])
         else:
             return "\n".join([f"- {item}" for item in self.items])
 
@@ -730,7 +832,7 @@ class List(Component):
             tree = Tree("List Items", style=accent_color)
             for i, item in enumerate(self.items):
                 if self.ordered:
-                    tree.add(f"[bold]{i+1}.[/bold] {item}")
+                    tree.add(f"[bold]{i + 1}.[/bold] {item}")
                 else:
                     tree.add(item)
             console.print(tree)
@@ -739,7 +841,7 @@ class List(Component):
             for i, item in enumerate(self.items):
                 if self.ordered:
                     lines.append(
-                        f"[bold {accent_color}]{i+1}.[/bold {accent_color}] [bright_white]{item}[/bright_white]"
+                        f"[bold {accent_color}]{i + 1}.[/bold {accent_color}] [bright_white]{item}[/bright_white]"
                     )
                 else:
                     lines.append(
@@ -762,7 +864,7 @@ class LineBreak(Component):
     def __init__(self, n_break: int = 1) -> None:
         self.n_break = n_break
 
-    def html(self, _theme: str = "dark") -> d.html_tag:
+    def html(self, theme: str = "dark") -> d.html_tag:
         with (container := d.div()):
             for _ in range(self.n_break):
                 d.br()
@@ -867,10 +969,12 @@ class Image(Component):
 
     def __init__(
         self,
-        src: str,
+        src: Optional[str] = None,
         alt: str = "",
         width: Optional[int] = None,
         height: Optional[int] = None,
+        url: Optional[str] = None,
+        alt_text: Optional[str] = None,
     ):
         """
         Args:
@@ -878,13 +982,27 @@ class Image(Component):
             alt (str, optional): Alt text for the image. Defaults to "".
             width (Optional[int], optional): Image width in pixels. Defaults to None.
             height (Optional[int], optional): Image height in pixels. Defaults to None.
+            url (Optional[str], optional): Alias for src.
+            alt_text (Optional[str], optional): Alias for alt.
         """
+        if url is not None:
+            if src is not None and src != url:
+                raise ValueError("Image src and url must match when both are provided.")
+            src = url
+        if src is None:
+            raise ValueError("Image src or url is required.")
+        if alt_text is not None:
+            if alt and alt != alt_text:
+                raise ValueError(
+                    "Image alt and alt_text must match when both are provided."
+                )
+            alt = alt_text
         self.src = src
         self.alt = alt
         self.width = width
         self.height = height
 
-    def html(self, _theme: str = "dark") -> d.html_tag:
+    def html(self, theme: str = "dark") -> d.html_tag:
         style_parts = []
         if self.width:
             style_parts.append(f"max-width:{self.width}px;width:100%;")
@@ -930,12 +1048,24 @@ class Image(Component):
 class Timeline(Component):
     """A component that displays chronological events."""
 
-    def __init__(self, events: Sequence[Dict[str, Any]]):
+    def __init__(self, events: Sequence[Dict[str, Any] | Sequence[Any]]):
         """
         Args:
             events (Sequence[Dict[str, Any]]): List of events with 'time', 'title', and optional 'description'.
         """
-        self.events = events
+        self.events = [self._normalize_event(event) for event in events]
+
+    @staticmethod
+    def _normalize_event(event: Dict[str, Any] | Sequence[Any]) -> Dict[str, Any]:
+        if isinstance(event, Mapping):
+            return {key: str(value) for key, value in event.items()}
+        values = list(event)
+        if len(values) < 2:
+            raise ValueError(
+                "Timeline tuple events must include at least time and title."
+            )
+        keys = ("time", "title", "description", "status")
+        return {key: str(value) for key, value in zip(keys, values, strict=False)}
 
     def html(self, theme: str = "dark") -> d.html_tag:
         with (container := d.div(style="position: relative; padding-left: 32px;")):
@@ -954,7 +1084,7 @@ class Timeline(Component):
                             top: 4px;
                             width: 12px;
                             height: 12px;
-                            background-color: {get_theme_colors(theme)['accent']};
+                            background-color: {get_theme_colors(theme)["accent"]};
                             border-radius: 50%;
                             border: 3px solid white;
                             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
@@ -1173,10 +1303,11 @@ class ProgressBar(Component):
     def __init__(
         self,
         value: float,
-        max_value: float = 100,
+        max_value: float | str = 100,
         color: str = "blue",
         show_percentage: bool = True,
         width: int = 300,
+        label: Optional[str] = None,
     ):
         """
         Args:
@@ -1185,18 +1316,34 @@ class ProgressBar(Component):
             color (str, optional): Color of the progress bar. Defaults to "blue".
             show_percentage (bool, optional): Whether to show percentage text. Defaults to True.
             width (int, optional): Width of the progress bar in pixels. Defaults to 300.
+            label (Optional[str], optional): Label to display with the progress value.
         """
-        self.value = min(value, max_value)
+        if isinstance(max_value, str):
+            label = label or max_value
+            max_value = 100
+        if max_value <= 0:
+            raise ValueError("ProgressBar max_value must be positive.")
+        self.value = min(max(value, 0), max_value)
         self.max_value = max_value
         self.color = color
         self.show_percentage = show_percentage
         self.width = width
+        self.label = label
+
+    @property
+    def percentage(self) -> float:
+        return (self.value / self.max_value) * 100
 
     def html(self, theme: str = "dark") -> d.html_tag:
-        percentage = (self.value / self.max_value) * 100
+        percentage = self.percentage
         color_hex = get_color_hex(self.color, theme)
 
         with (container := d.div(style=f"width: {self.width}px;")):
+            if self.label:
+                d.div(
+                    self.label,
+                    style=f"margin-bottom: 4px; font-weight: 600; color: {get_theme_colors(theme)['accent']};",
+                )
             if self.show_percentage:
                 d.div(
                     f"{percentage:.1f}%",
@@ -1212,16 +1359,16 @@ class ProgressBar(Component):
         return container
 
     def classic_md(self) -> str:
-        percentage = (self.value / self.max_value) * 100
-        return f"**Progress:** {percentage:.1f}% ({self.value}/{self.max_value})"
+        label = self.label or "Progress"
+        return f"**{label}:** {self.percentage:.1f}% ({self.value}/{self.max_value})"
 
     def slack_md(self) -> str:
-        percentage = (self.value / self.max_value) * 100
-        return f"*Progress:* {percentage:.1f}% ({self.value}/{self.max_value})"
+        label = self.label or "Progress"
+        return f"*{label}:* {self.percentage:.1f}% ({self.value}/{self.max_value})"
 
     def discord_md(self) -> str:
-        percentage = (self.value / self.max_value) * 100
-        return f"**Progress:** {percentage:.1f}% ({self.value}/{self.max_value})"
+        label = self.label or "Progress"
+        return f"**{label}:** {self.percentage:.1f}% ({self.value}/{self.max_value})"
 
     def console(self, console: Optional[Console] = None) -> None:
         if console is None:
@@ -1250,18 +1397,18 @@ class ProgressBar(Component):
             console=console,
             transient=False,
         ) as progress:
-            task = progress.add_task("Progress", total=self.max_value)
+            task = progress.add_task(self.label or "Progress", total=self.max_value)
             progress.update(task, completed=self.value)
-
-            # Add a brief pause to show the progress bar
-            time.sleep(0.1)
 
 
 class Alert(Component):
     """An alert/notification component for important messages."""
 
     def __init__(
-        self, message: str, alert_type: str = "info", title: Optional[str] = None
+        self,
+        message: str,
+        alert_type: str | ContentType = "info",
+        title: Optional[str] = None,
     ):
         """
         Args:
@@ -1270,8 +1417,19 @@ class Alert(Component):
             title (Optional[str], optional): Optional title for the alert. Defaults to None.
         """
         self.message = message
-        self.alert_type = alert_type
+        self.alert_type = self._normalize_alert_type(alert_type)
         self.title = title
+
+    @staticmethod
+    def _normalize_alert_type(alert_type: str | ContentType) -> str:
+        if isinstance(alert_type, ContentType):
+            return {
+                ContentType.INFO: "info",
+                ContentType.WARNING: "warning",
+                ContentType.ERROR: "error",
+                ContentType.IMPORTANT: "info",
+            }[alert_type]
+        return str(alert_type).lower()
 
     def _get_alert_styles(self, alert_type: str, theme: str = "dark") -> tuple:
         """Get styles for alert type."""
@@ -1290,7 +1448,7 @@ class Alert(Component):
                 "warning": ("#92400E", colors["warning"], "#FDE68A", "⚠"),
                 "error": ("#991B1B", colors["error"], "#FCA5A5", "✗"),
             }
-        return styles.get(alert_type.lower(), styles["info"])
+        return styles.get(alert_type, styles["info"])
 
     def html(self, theme: str = "dark") -> d.html_tag:
         bg_color, border_color, text_color, icon = self._get_alert_styles(
@@ -1447,25 +1605,49 @@ class PriceChange(Component):
 
     def __init__(
         self,
-        current: float,
+        current: float | str,
         previous: Optional[float] = None,
-        currency: str = "$",
+        currency: str | float = "$",
+        symbol: Optional[str] = None,
     ):
         """
         Args:
-            current (float): Current price.
+            current (float): Current price. A leading string is treated as a symbol for compatibility with PriceChange("AAPL", current, previous).
             previous (Optional[float], optional): Previous price. If provided, shows change and percentage. Defaults to None.
             currency (str, optional): Currency symbol. Defaults to "$".
+            symbol (Optional[str], optional): Optional instrument symbol.
         """
-        self.current = current
-        self.previous = previous
-        self.currency = currency
+        if (
+            isinstance(current, str)
+            and previous is not None
+            and isinstance(currency, (int, float))
+        ):
+            symbol = current
+            current, previous, currency = previous, float(currency), "$"
+        elif isinstance(current, str):
+            try:
+                current = float(current)
+            except ValueError as exc:
+                raise ValueError(
+                    "Symbol-first PriceChange requires current and previous numeric prices."
+                ) from exc
+
+        self.current = float(current)
+        self.previous = float(previous) if previous is not None else None
+        self.currency = str(currency)
+        self.symbol = symbol
         if previous is not None:
-            self.change = current - previous
-            self.change_pct = (self.change / previous * 100) if previous != 0 else 0
+            self.change = self.current - self.previous
+            self.change_pct = (
+                (self.change / self.previous * 100) if self.previous != 0 else 0
+            )
         else:
             self.change = None
             self.change_pct = None
+
+    @property
+    def _label_prefix(self) -> str:
+        return f"{self.symbol} " if self.symbol else ""
 
     def html(self, theme: str = "dark") -> d.html_tag:
         with (container := d.div()):
@@ -1475,7 +1657,7 @@ class PriceChange(Component):
                 color = colors["success"] if self.change >= 0 else colors["error"]
                 symbol = "▲" if self.change >= 0 else "▼"
                 d.span(
-                    f"{self.currency}{self.current:.2f}",
+                    f"{self._label_prefix}{self.currency}{self.current:.2f}",
                     style="font-size:18px;font-weight:bold;",
                 )
                 d.span(" ")
@@ -1487,7 +1669,7 @@ class PriceChange(Component):
                 symbol = "▲" if self.current >= 0 else "▼"
                 color = colors["success"] if self.current >= 0 else colors["error"]
                 d.span(
-                    f"{symbol} {self.currency}{abs(self.current):.2f}",
+                    f"{self._label_prefix}{symbol} {self.currency}{abs(self.current):.2f}",
                     style=f"font-size:18px;font-weight:bold;color:{color};",
                 )
         return container
@@ -1496,10 +1678,10 @@ class PriceChange(Component):
         if self.previous is not None:
             symbol = "▲" if self.change >= 0 else "▼"
             change_text = f"{symbol} {self.currency}{abs(self.change):.2f} ({self.change_pct:+.1f}%)"
-            return f"**{self.currency}{self.current:.2f}** {change_text}"
+            return f"**{self._label_prefix}{self.currency}{self.current:.2f}** {change_text}"
         else:
             symbol = "▲" if self.current >= 0 else "▼"
-            return f"**{symbol} {self.currency}{abs(self.current):.2f}**"
+            return f"**{self._label_prefix}{symbol} {self.currency}{abs(self.current):.2f}**"
 
     def slack_md(self) -> str:
         return self.classic_md()
@@ -1637,7 +1819,9 @@ class MetricCard(Component):
             style = (
                 "green"
                 if self.change.startswith("+")
-                else "red" if self.change.startswith("-") else "dim"
+                else "red"
+                if self.change.startswith("-")
+                else "dim"
             )
 
             trend_icon = self._get_trend_icon(self.trend) if self.trend else ""
@@ -1703,10 +1887,12 @@ class Card(Component):
 
     def __init__(
         self,
-        body: Sequence[Component],
+        body: Optional[Sequence[Component | str] | Component | str] = None,
         header: Optional[str] = None,
         footer: Optional[str] = None,
         border_color: Optional[str] = None,
+        title: Optional[str] = None,
+        content: Optional[Sequence[Component | str] | Component | str] = None,
     ):
         """
         Args:
@@ -1714,8 +1900,32 @@ class Card(Component):
             header (Optional[str], optional): Header text. Defaults to None.
             footer (Optional[str], optional): Footer text. Defaults to None.
             border_color (Optional[str], optional): Border color for the card. Defaults to theme border.
+            title (Optional[str], optional): Alias for header.
+            content: Alias for body.
         """
-        self.body = body if isinstance(body, (list, tuple)) else [body]
+        if title is not None:
+            if header is not None and header != title:
+                raise ValueError(
+                    "Card header and title must match when both are provided."
+                )
+            header = title
+        if content is not None:
+            if body is not None:
+                raise ValueError("Card body and content cannot both be provided.")
+            body = content
+
+        body_items: Sequence[Component | str]
+        if body is None:
+            body_items = []
+        elif isinstance(body, (Component, str)):
+            body_items = [body]
+        else:
+            body_items = body
+
+        self.body = [
+            item if isinstance(item, Component) else Text(str(item))
+            for item in body_items
+        ]
         self.header = (
             Text(header, ContentType.IMPORTANT, FontSize.LARGE) if header else None
         )
@@ -1733,7 +1943,7 @@ class Card(Component):
             border-radius: 8px;
             padding: 20px;
             margin: 16px 0;
-            background-color: {colors['code_bg']};
+            background-color: {colors["code_bg"]};
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         """
             )
@@ -1823,13 +2033,30 @@ class Card(Component):
 class Grid(Component):
     """A component that arranges other components in a grid layout."""
 
-    def __init__(self, components: Sequence[Sequence[Component]], gap: int = 16):
+    def __init__(
+        self,
+        components: Sequence[Sequence[Component] | Component],
+        gap: int = 16,
+        columns: Optional[int] = None,
+    ):
         """
         Args:
-            components (Sequence[Sequence[Component]]): 2D array of components (rows and columns).
+            components: 2D array of components, or a flat component list when columns is provided.
             gap (int, optional): Gap between grid items in pixels. Defaults to 16.
+            columns (Optional[int], optional): Number of columns for flat component lists.
         """
-        self.components = components
+        if gap < 0:
+            raise ValueError("Grid gap must be non-negative.")
+        if columns is not None:
+            if columns <= 0:
+                raise ValueError("Grid columns must be positive.")
+            flat_components = list(components)
+            self.components = [
+                flat_components[index : index + columns]
+                for index in range(0, len(flat_components), columns)
+            ]
+        else:
+            self.components = components
         self.gap = gap
 
     def html(self, theme: str = "dark") -> d.html_tag:
@@ -1852,7 +2079,7 @@ class Grid(Component):
 
         # Create table headers (empty for grid)
         cols = len(self.components[0])
-        headers = [f"Col {i+1}" for i in range(cols)]
+        headers = [f"Col {i + 1}" for i in range(cols)]
         separator = [":---:" for _ in range(cols)]
 
         rows = [
@@ -1876,7 +2103,7 @@ class Grid(Component):
         for i, row in enumerate(self.components):
             section = []
             for j, component in enumerate(row):
-                section.append(f"*Row {i+1}, Col {j+1}:*\n{component.slack_md()}")
+                section.append(f"*Row {i + 1}, Col {j + 1}:*\n{component.slack_md()}")
             sections.append("\n".join(section))
         return "\n\n".join(sections)
 
@@ -1886,7 +2113,9 @@ class Grid(Component):
         for i, row in enumerate(self.components):
             section = []
             for j, component in enumerate(row):
-                section.append(f"**Row {i+1}, Col {j+1}:**\n{component.discord_md()}")
+                section.append(
+                    f"**Row {i + 1}, Col {j + 1}:**\n{component.discord_md()}"
+                )
             sections.append("\n".join(section))
         return "\n\n".join(sections)
 
@@ -1910,7 +2139,7 @@ class Grid(Component):
                 # Create a panel for each grid cell
                 panel = Panel(
                     content,
-                    title=f"Cell ({row_idx+1},{col_idx+1})",
+                    title=f"Cell ({row_idx + 1},{col_idx + 1})",
                     border_style=accent_color,
                     padding=(1, 2),
                 )
@@ -2057,7 +2286,7 @@ class TreeView(Component):
     ) -> Dict[str, Any]:
         """Build a nested dictionary representation for HTML/MD rendering."""
         if self.max_depth is not None and depth >= self.max_depth:
-            return {"...": f"(depth limit reached)"}
+            return {"...": "(depth limit reached)"}
 
         result = {}
 
@@ -2089,10 +2318,10 @@ class TreeView(Component):
                 html_parts.append(
                     f"""
                     <details {"open" if self.expanded or depth == 0 else ""}>
-                        <summary style="cursor: pointer; color: {colors['accent']}; font-weight: 600; margin: 4px 0;">
+                        <summary style="cursor: pointer; color: {colors["accent"]}; font-weight: 600; margin: 4px 0;">
                             ▶ {key}
                         </summary>
-                        <div style="margin-left: 20px; border-left: 2px solid {colors['border']}; padding-left: 12px;">
+                        <div style="margin-left: 20px; border-left: 2px solid {colors["border"]}; padding-left: 12px;">
                             {self._render_tree_html(value, theme, depth + 1)}
                         </div>
                     </details>
@@ -2102,9 +2331,9 @@ class TreeView(Component):
                 # Leaf node
                 html_parts.append(
                     f"""
-                    <div style="margin: 4px 0; color: {colors['text_primary']};">
-                        <span style="color: {colors['accent']}; font-weight: 500;">{key}:</span>
-                        <span style="color: {colors['text_secondary']}; font-family: monospace;"> {value}</span>
+                    <div style="margin: 4px 0; color: {colors["text_primary"]};">
+                        <span style="color: {colors["accent"]}; font-weight: 500;">{key}:</span>
+                        <span style="color: {colors["text_secondary"]}; font-family: monospace;"> {value}</span>
                     </div>
                 """
                 )
@@ -2126,7 +2355,7 @@ class TreeView(Component):
                 style=f"font-size: 16px; font-weight: 600; color: {colors['accent']}; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid {colors['border']};",
             )
             # Tree content
-            d.div(d.raw(self._render_tree_html(tree_data, theme)))
+            d.div(raw_html(self._render_tree_html(tree_data, theme)))
 
         return container
 
@@ -2241,7 +2470,7 @@ class LogEntry(Component):
     def __init__(
         self,
         message: str,
-        level: ContentType = ContentType.INFO,
+        level: ContentType | str = ContentType.INFO,
         source: Optional[str] = None,
         timestamp: Optional[datetime] = None,
     ):
@@ -2252,8 +2481,16 @@ class LogEntry(Component):
             source (Optional[str], optional): The source component/module that generated the log. Defaults to None.
             timestamp (Optional[datetime], optional): The log timestamp. Defaults to current time.
         """
+        if (
+            isinstance(message, datetime)
+            and isinstance(source, str)
+            and timestamp is None
+        ):
+            timestamp = message
+            message = source
+            source = None
         self.message = str(message)
-        self.level = level
+        self.level = _coerce_content_type(level)
         self.source = source
         self.timestamp = timestamp or datetime.now()
 
@@ -2375,3 +2612,33 @@ class LogEntry(Component):
         text.append(self.message)
 
         return text
+
+
+def render_components_html(*args, **kwargs):
+    from .report import render_components_html as _render_components_html
+
+    return _render_components_html(*args, **kwargs)
+
+
+def render_components_image(*args, **kwargs):
+    from .report import render_components_image as _render_components_image
+
+    return _render_components_image(*args, **kwargs)
+
+
+def render_components_image_async(*args, **kwargs):
+    from .report import render_components_image_async as _render_components_image_async
+
+    return _render_components_image_async(*args, **kwargs)
+
+
+def render_components_md(*args, **kwargs):
+    from .report import render_components_md as _render_components_md
+
+    return _render_components_md(*args, **kwargs)
+
+
+def _components_list(*args, **kwargs):
+    from .report import _components_list as _report_components_list
+
+    return _report_components_list(*args, **kwargs)

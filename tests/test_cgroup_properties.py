@@ -3,7 +3,6 @@
 Tests conversion accuracy between systemd and Docker cgroup parameters.
 """
 
-import pytest
 from hypothesis import given, strategies as st, assume
 from taskflows.constraints import CgroupConfig
 
@@ -73,7 +72,9 @@ class TestCPUWeightConversion:
         if cpu_weight >= 100:
             # For reasonable weights, expect <=10% error
             error_percent = abs(final_weight - cpu_weight) / cpu_weight * 100
-            assert error_percent <= 10, f"Weight {cpu_weight} -> {shares_value} shares -> {final_weight} weight (error: {error_percent:.1f}%)"
+            assert error_percent <= 10, (
+                f"Weight {cpu_weight} -> {shares_value} shares -> {final_weight} weight (error: {error_percent:.1f}%)"
+            )
 
 
 class TestIOWeightConversion:
@@ -141,7 +142,9 @@ class TestIOWeightConversion:
         if 100 <= io_weight <= 10000:
             # The conversion is lossy for non-multiples of 10
             expected = (io_weight // 10) * 10  # Round down to nearest 10
-            assert final_io_weight == expected, f"IOWeight {io_weight} -> {blkio_value} blkio -> {final_io_weight} IOWeight"
+            assert final_io_weight == expected, (
+                f"IOWeight {io_weight} -> {blkio_value} blkio -> {final_io_weight} IOWeight"
+            )
 
 
 class TestMemoryLimitCalculations:
@@ -171,7 +174,7 @@ class TestMemoryLimitCalculations:
 
     @given(
         memory_high=st.integers(min_value=1024, max_value=2**39),
-        memory_min=st.integers(min_value=512, max_value=2**38)
+        memory_min=st.integers(min_value=512, max_value=2**38),
     )
     def test_memory_high_precedence(self, memory_high, memory_min):
         """Test that memory_high takes precedence over memory_min."""
@@ -185,11 +188,13 @@ class TestMemoryLimitCalculations:
 
     @given(
         memory_limit=st.integers(min_value=1024 * 1024, max_value=2**39),
-        memory_swap_max=st.integers(min_value=1024 * 1024, max_value=2**39)
+        memory_swap_max=st.integers(min_value=1024 * 1024, max_value=2**39),
     )
     def test_swap_limit_calculation(self, memory_limit, memory_swap_max):
         """Test that swap limit is correctly calculated as memory + swap."""
-        config = CgroupConfig(memory_limit=memory_limit, memory_swap_max=memory_swap_max)
+        config = CgroupConfig(
+            memory_limit=memory_limit, memory_swap_max=memory_swap_max
+        )
 
         # Docker memory_swap_limit should be memory + swap
         effective_swap = config._calculate_effective_swap_limit()
@@ -199,7 +204,7 @@ class TestMemoryLimitCalculations:
 
     @given(
         memory_high=st.integers(min_value=1024, max_value=2**39),
-        memory_low=st.integers(min_value=512, max_value=2**38)
+        memory_low=st.integers(min_value=512, max_value=2**38),
     )
     def test_memory_reservation_precedence(self, memory_high, memory_low):
         """Test memory reservation calculation precedence."""
@@ -215,7 +220,7 @@ class TestCPUQuotaConversion:
 
     @given(
         cpu_quota=st.integers(min_value=1000, max_value=1000000),
-        cpu_period=st.integers(min_value=1000, max_value=1000000)
+        cpu_period=st.integers(min_value=1000, max_value=1000000),
     )
     def test_cpu_quota_to_systemd_percentage(self, cpu_quota, cpu_period):
         """Test that CPU quota converts to systemd percentage correctly."""
@@ -265,9 +270,7 @@ class TestCPUQuotaConversion:
 class TestDeviceLimits:
     """Property-based tests for device bandwidth limits."""
 
-    @given(
-        bps=st.integers(min_value=1024, max_value=10**9)
-    )
+    @given(bps=st.integers(min_value=1024, max_value=10**9))
     def test_device_read_bps_mapping(self, bps):
         """Test that device read bandwidth limits map correctly."""
         device = "/dev/sda"
@@ -286,9 +289,7 @@ class TestDeviceLimits:
         # Should be in format "device:bps"
         assert value == f"{device}:{bps}"
 
-    @given(
-        iops=st.integers(min_value=10, max_value=100000)
-    )
+    @given(iops=st.integers(min_value=10, max_value=100000))
     def test_device_write_iops_mapping(self, iops):
         """Test that device write IOPS limits map correctly."""
         device = "/dev/sdb"

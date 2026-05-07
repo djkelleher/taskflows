@@ -12,7 +12,6 @@ Usage:
 import argparse
 import asyncio
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import List
 
 from taskflows.alerts.components import (
@@ -364,7 +363,7 @@ async def send_to_discord(webhook_url: str):
             channel=discord_channel,
             username="Component Gallery Bot",
         )
-        print(f"✅ Successfully sent to Discord")
+        print("✅ Successfully sent to Discord")
     except Exception as e:
         print(f"❌ Failed to send to Discord: {e}")
 

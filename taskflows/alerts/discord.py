@@ -1,7 +1,6 @@
 import asyncio
 import json
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -64,6 +63,8 @@ async def send_discord_message(
     Returns:
         bool: Whether the message was sent successfully.
     """
+    if retries < 0:
+        raise ValueError("retries must be greater than or equal to 0")
     if isinstance(channel, str):
         webhook_url = channel
     else:
@@ -123,6 +124,8 @@ async def _send_single_discord_message(
     Returns:
         bool: Whether the message was sent successfully.
     """
+    if retries < 0:
+        raise ValueError("retries must be greater than or equal to 0")
     timeout = aiohttp.ClientTimeout(total=discord_settings.request_timeout_seconds)
 
     for attempt in range(retries + 1):
@@ -223,7 +226,7 @@ async def _send_single_discord_message(
             )  # Exponential backoff
 
     logger.error(
-        f"Failed to send Discord message after {discord_settings.retry_attempts + 1} attempts"
+        f"Failed to send Discord message after {retries + 1} attempts"
     )
     return False
 
@@ -238,6 +241,8 @@ def _split_message(message: str, max_length: int) -> list[str]:
     Returns:
         list[str]: List of message chunks.
     """
+    if max_length <= 0:
+        raise ValueError("max_length must be greater than 0")
     if len(message) <= max_length:
         return [message]
 
@@ -274,9 +279,13 @@ def _split_message(message: str, max_length: int) -> list[str]:
                     if temp_line:
                         chunks.append(temp_line.strip())
                         temp_line = ""
-                    # If single word is too long, just truncate it
+                    # If a single word is too long, split it without dropping text.
                     if len(word) > max_length:
-                        word = word[: max_length - 3] + "..."
+                        chunks.extend(
+                            word[i : i + max_length]
+                            for i in range(0, len(word), max_length)
+                        )
+                        continue
 
                 if temp_line:
                     temp_line += " " + word
