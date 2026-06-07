@@ -1,0 +1,13 @@
+{
+  "agent_id": "tfmem@default",
+  "team_name": "default",
+  "status": "queued",
+  "progress": {
+    "status": "queued",
+    "event": "spawned"
+  },
+  "progress_file": "/home/dan/repos/taskflows/.codigote/swarm/default/tfmem_default/progress.json",
+  "state_file": "/home/dan/repos/taskflows/.codigote/swarm/default/tfmem_default/state.json",
+  "resumable": true,
+  "updated_at": "2026-05-31T15:36:22.867468+00:00"
+}

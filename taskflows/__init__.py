@@ -9,6 +9,7 @@ from .constraints import (
     SystemLoadConstraint,
 )
 from .docker import ContainerLimits, DockerContainer, DockerImage, Ulimit, Volume
+from .dashboard import Dashboard, LogsCountPlot, LogsPanelConfig, LogsTextSearch
 from .entrypoints import async_entrypoint, get_shutdown_handler
 from .schedule import Calendar, Periodic
 from .service import Service, ServiceRegistry, Venv
@@ -22,10 +23,14 @@ __all__ = [
     "ContainerLimits",
     "DockerContainer",
     "DockerImage",
+    "Dashboard",
     "HardwareConstraint",
     "IOPressure",
     "Memory",
     "MemoryPressure",
+    "LogsCountPlot",
+    "LogsPanelConfig",
+    "LogsTextSearch",
     "Periodic",
     "Service",
     "ServiceRegistry",

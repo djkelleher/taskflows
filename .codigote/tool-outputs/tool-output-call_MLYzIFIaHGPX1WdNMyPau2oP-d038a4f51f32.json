@@ -1,0 +1,3102 @@
+{
+  "artifact_id": "tool-output-call_MLYzIFIaHGPX1WdNMyPau2oP-d038a4f51f32",
+  "ended_at": "2026-06-01T14:03:07.950035",
+  "error": null,
+  "metadata": {
+    "bytes_read": 24063,
+    "hook_permission_config": {
+      "diagnostics": [],
+      "hooks": [],
+      "permission_rules": [],
+      "shadowed_rules": [],
+      "source_refs": []
+    },
+    "line_numbers": true,
+    "permission_decision": {
+      "allowed": true,
+      "behavior": "allow",
+      "classifier_confidence": 0.86,
+      "classifier_label": "low-risk-tool",
+      "explanation": "read is a low-risk tool. Classifier label `low-risk-tool` assessed command `{\"cell_limit\": 0, \"cell_offset\": 0, \"include_data\": false, \"include_outputs\": false, \"limit\": 760, \"line_numbers\": true, \"max_bytes\": 60000, \"offset\": 260, \"page_limit\": 0, \"page_offset\": 0, \"path\": \"taskflows/serialization.py\", \"render\": \"text\"}`.",
+      "hook_results": [],
+      "matched_rule_ids": [],
+      "message": "Tool `read` is allowed.",
+      "requires_approval": false,
+      "updated_input": {
+        "cell_limit": 0,
+        "cell_offset": 0,
+        "include_data": false,
+        "include_outputs": false,
+        "limit": 760,
+        "line_numbers": true,
+        "max_bytes": 60000,
+        "offset": 260,
+        "page_limit": 0,
+        "page_offset": 0,
+        "path": "taskflows/serialization.py",
+        "render": "text"
+      }
+    },
+    "post_hook_results": [],
+    "selected_line_count": 760
+  },
+  "output": {
+    "content": "        return int(value)\n\n    if not isinstance(value, str):\n        raise ValueError(\n            f\"Cannot parse time duration from {type(value).__name__}: {value}\"\n        )\n\n    match = _TIME_PATTERN.match(value)\n    if not match:\n        raise ValueError(f\"Invalid time duration format: {value}\")\n\n    number_str, unit = match.groups()\n    number = float(number_str)\n\n    if unit is None:\n        # No unit specified, assume seconds\n        return int(number)\n\n    unit_lower = unit.lower()\n    if unit_lower not in _TIME_UNITS:\n        raise ValueError(\n            f\"Unknown time unit '{unit}'. Valid units: {', '.join(sorted(set(_TIME_UNITS.keys())))}\"\n        )\n\n    return int(number * _TIME_UNITS[unit_lower])\n\n\ndef parse_percent(value: Any) -> int:\n    \"\"\"Parse a whole percentage value, accepting forms like 60, \"60\", and \"60%\".\"\"\"\n    if isinstance(value, bool):\n        raise ValueError(\"Percent must be a number\")\n    if isinstance(value, int):\n        return value\n    if isinstance(value, float):\n        if not value.is_integer():\n            raise ValueError(\"Percent must be a whole number\")\n        return int(value)\n    if not isinstance(value, str):\n        raise ValueError(f\"Cannot parse percent from {type(value).__name__}: {value}\")\n\n    match = _PERCENT_PATTERN.match(value)\n    if not match:\n        raise ValueError(f\"Invalid percent format: {value}\")\n    number = float(match.group(1))\n    if not number.is_integer():\n        raise ValueError(\"Percent must be a whole number\")\n    return int(number)\n\n\ndef _maybe_parse_value(value: Any, field_name: str) -> Any:\n    \"\"\"Parse a value if it matches a known field that needs conversion.\n\n    Args:\n        value: The raw value.\n        field_name: The field name for context.\n\n    Returns:\n        Parsed value, or original if no parsing needed.\n    \"\"\"\n    if value is None:\n        return None\n\n    # Check if this field should be parsed as memory\n    if field_name in _MEMORY_FIELDS:\n        try:\n            return parse_memory_size(value)\n        except (ValueError, TypeError):\n            # If parsing fails, return original value\n            # (it might already be an int, or might be something else)\n            return value\n\n    # Check if this field should be parsed as time\n    if field_name in _TIME_FIELDS:\n        try:\n            return parse_time_duration(value)\n        except (ValueError, TypeError):\n            return value\n\n    if field_name in _PERCENT_FIELDS:\n        try:\n            return parse_percent(value)\n        except (ValueError, TypeError):\n            return value\n\n    return value\n\n\nT = TypeVar(\"T\")\n\n\n# Type registry for polymorphic deserialization\n_TYPE_REGISTRY: Dict[str, Type] = {}\n\n# Field name to type mapping for automatic inference\n_FIELD_TYPE_MAP: Dict[str, str] = {\n    \"restart_policy\": \"RestartPolicy\",\n    \"cgroup_config\": \"CgroupConfig\",\n    \"container_limits\": \"ContainerLimits\",\n    \"start_schedule\": \"Schedule\",\n    \"stop_schedule\": \"Schedule\",\n    \"restart_schedule\": \"Schedule\",\n    \"ulimits\": \"Ulimit\",\n    \"volumes\": \"Volume\",\n}\n\n# Keys that uniquely identify a type (for content-based inference)\n_TYPE_SIGNATURE_KEYS: Dict[frozenset, str] = {\n    # Venv: has env_name\n    frozenset([\"env_name\"]): \"Venv\",\n    # DockerContainer: has image\n    frozenset([\"image\"]): \"DockerContainer\",\n    # DockerImage: has tag/path\n    frozenset([\"tag\", \"path\"]): \"DockerImage\",\n    frozenset([\"tag\"]): \"DockerImage\",\n    # ContainerLimits: Docker build resource controls\n    frozenset([\"memory\", \"memswap\"]): \"ContainerLimits\",\n    frozenset([\"cpushares\"]): \"ContainerLimits\",\n    frozenset([\"cpusetcpus\"]): \"ContainerLimits\",\n    # Calendar: has schedule (string pattern)\n    frozenset([\"schedule\"]): \"Calendar\",\n    # Periodic: has period and start_on\n    frozenset([\"period\", \"start_on\"]): \"Periodic\",\n    frozenset([\"period\"]): \"Periodic\",\n    # Volume: has host_path and container_path\n    frozenset([\"host_path\", \"container_path\"]): \"Volume\",\n    # RestartPolicy: has condition (when it's a dict)\n    frozenset([\"condition\"]): \"RestartPolicy\",\n    # Memory constraint\n    frozenset([\"amount\", \"constraint\"]): \"Memory\",\n    # CPUPressure constraint\n    frozenset([\"max_percent\", \"timespan\"]): \"CPUPressure\",\n    frozenset([\"max_percent\"]): \"CPUPressure\",\n    # CgroupConfig: has memory_limit or cpu_quota (common cgroup fields)\n    frozenset([\"memory_limit\"]): \"CgroupConfig\",\n    frozenset([\"cpu_quota\"]): \"CgroupConfig\",\n    frozenset([\"cpu_shares\"]): \"CgroupConfig\",\n    frozenset([\"pids_limit\"]): \"CgroupConfig\",\n    frozenset([\"oom_policy\"]): \"CgroupConfig\",\n    frozenset([\"managed_oom_swap\"]): \"CgroupConfig\",\n    frozenset([\"managed_oom_memory_pressure\"]): \"CgroupConfig\",\n    frozenset([\"managed_oom_memory_pressure_limit\"]): \"CgroupConfig\",\n    frozenset([\"managed_oom_preference\"]): \"CgroupConfig\",\n}\n\n\ndef _infer_type_from_content(\n    data: Dict[str, Any], field_name: Optional[str] = None\n) -> Optional[str]:\n    \"\"\"Infer the type from dict content based on its keys.\n\n    Args:\n        data: The dictionary to analyze.\n        field_name: Optional field name for context.\n\n    Returns:\n        The inferred type name, or None if can't be determined.\n    \"\"\"\n    if not isinstance(data, dict):\n        return None\n\n    keys = set(data.keys()) - {\"type\"}  # Exclude type key itself\n\n    # Check for signature keys (most specific first - larger sets)\n    for signature_keys, type_name in sorted(\n        _TYPE_SIGNATURE_KEYS.items(), key=lambda x: -len(x[0])\n    ):\n        if signature_keys <= keys:\n            return type_name\n\n    # Use field name to infer type if content-based inference fails\n    if field_name and field_name in _FIELD_TYPE_MAP:\n        return _FIELD_TYPE_MAP[field_name]\n\n    return None\n\n\ndef _infer_schedule_type(value: Any) -> Optional[str]:\n    \"\"\"Infer schedule type from value.\n\n    - String with day/time pattern -> Calendar\n    - Dict with 'schedule' key -> Calendar\n    - Dict with 'period' key -> Periodic\n    \"\"\"\n    if isinstance(value, str):\n        # A string schedule is always Calendar format\n        return \"Calendar\"\n\n    if isinstance(value, dict):\n        if \"schedule\" in value:\n            return \"Calendar\"\n        if \"period\" in value:\n            return \"Periodic\"\n\n    return None\n\n\ndef register_type(cls: Type) -> Type:\n    \"\"\"Register a type for polymorphic deserialization.\n\n    Args:\n        cls: The class to register.\n\n    Returns:\n        The same class (allows use as decorator).\n    \"\"\"\n    _TYPE_REGISTRY[cls.__name__] = cls\n    return cls\n\n\ndef get_registered_type(name: str) -> Optional[Type]:\n    \"\"\"Get a registered type by name.\n\n    Args:\n        name: The class name.\n\n    Returns:\n        The registered class, or None if not found.\n    \"\"\"\n    return _TYPE_REGISTRY.get(name)\n\n\ndef _get_type_name(obj: Any) -> str:\n    \"\"\"Get the type name for an object.\"\"\"\n    return type(obj).__name__\n\n\ndef _is_pydantic_model(cls: Type) -> bool:\n    \"\"\"Check if a class is a Pydantic BaseModel.\"\"\"\n    try:\n        return issubclass(cls, BaseModel)\n    except TypeError:\n        return False\n\n\ndef _is_union_type(annotation: Any) -> bool:\n    \"\"\"Return True for both typing.Union and PEP 604 unions.\"\"\"\n    return get_origin(annotation) in (Union, UnionType)\n\n\ndef _sequence_element_type(annotation: Any) -> Optional[Type]:\n    \"\"\"Return the item type for list-like annotations when available.\"\"\"\n    origin = get_origin(annotation)\n    if origin in (Union, UnionType):\n        for arg in get_args(annotation):\n            element_type = _sequence_element_type(arg)\n            if element_type:\n                return element_type\n    if origin in (list, List, tuple, Sequence, ABCSequence):\n        args = get_args(annotation)\n        if args:\n            return args[0]\n    return None\n\n\ndef _resolve_union_type(annotation: Any, value: Any) -> Any:\n    \"\"\"Choose a concrete type from a union annotation when the data identifies one.\"\"\"\n    if not _is_union_type(annotation):\n        return annotation\n\n    union_args = [arg for arg in get_args(annotation) if arg is not NoneType]\n    if value is None:\n        return NoneType\n    if len(union_args) == 1:\n        return union_args[0]\n\n    if isinstance(value, dict):\n        type_name = value.get(\"type\") or _infer_type_from_content(value)\n        if type_name:\n            for arg in union_args:\n                if getattr(arg, \"__name__\", None) == type_name:\n                    return arg\n        non_primitive_args = [\n            arg\n            for arg in union_args\n            if arg not in (str, int, float, bool, dict, list, Path)\n            and get_origin(arg) is None\n        ]\n        if len(non_primitive_args) == 1:\n            return non_primitive_args[0]\n\n    return annotation\n\n\ndef _serialize_value(value: Any, include_none: bool = False) -> Any:\n    \"\"\"Serialize a single value to a JSON-compatible type.\n\n    Args:\n        value: The value to serialize.\n        include_none: Whether to include None values in dicts.\n\n    Returns:\n        A JSON-compatible representation of the value.\n    \"\"\"\n    if value is None:\n        return None\n\n    # Handle datetime\n    if isinstance(value, datetime):\n        return {\"type\": \"datetime\", \"value\": value.isoformat()}\n\n    # Handle Path\n    if isinstance(value, Path):\n        return str(value)\n\n    # Handle Pydantic models\n    if isinstance(value, BaseModel):\n        data = value.model_dump(mode=\"json\")\n        data[\"type\"] = _get_type_name(value)\n        return _filter_none(data, include_none)\n\n    # Handle dataclasses\n    if is_dataclass(value) and not isinstance(value, type):\n        data = {}\n        data[\"type\"] = _get_type_name(value)\n        for field in fields(value):\n            field_value = getattr(value, field.name)\n            serialized = _serialize_value(field_value, include_none)\n            if include_none or serialized is not None:\n                data[field.name] = serialized\n        return data\n\n    # Handle callables (functions) - store reference only, not actual function\n    if callable(value) and not isinstance(value, type):\n        # We can't serialize arbitrary functions, but we can note their presence\n        return {\"type\": \"callable\", \"name\": getattr(value, \"__name__\", \"<lambda>\")}\n\n    # Handle sequences (but not strings)\n    if isinstance(value, (list, tuple)):\n        return [_serialize_value(v, include_none) for v in value]\n\n    # Handle dicts\n    if isinstance(value, dict):\n        return {k: _serialize_value(v, include_none) for k, v in value.items()}\n\n    # Handle sets\n    if isinstance(value, set):\n        return {\"type\": \"set\", \"values\": list(value)}\n\n    # Primitive types pass through\n    return value\n\n\ndef _filter_none(data: Dict[str, Any], include_none: bool) -> Dict[str, Any]:\n    \"\"\"Filter out None values from a dict if include_none is False.\"\"\"\n    if include_none:\n        return data\n    return {k: v for k, v in data.items() if v is not None}\n\n\ndef _parse_volume_string(value: str) -> Any:\n    \"\"\"Parse a volume string like '/host:/container' or '/host:/container:ro'.\n\n    Supports formats:\n        - \"/host:/container\" -> Volume(host_path=\"/host\", container_path=\"/container\")\n        - \"/host:/container:ro\" -> Volume(host_path=\"/host\", container_path=\"/container\", read_only=True)\n        - \"/host:/container:rw\" -> Volume(host_path=\"/host\", container_path=\"/container\", read_only=False)\n    \"\"\"\n    volume_cls = get_registered_type(\"Volume\")\n    if not volume_cls:\n        return value\n\n    parts = value.rsplit(\":\", 2)\n\n    if len(parts) == 3 and parts[2] in (\"ro\", \"rw\"):\n        # Format: /host:/container:ro or /host:/container:rw\n        host_path = parts[0]\n        container_path = parts[1]\n        read_only = parts[2] == \"ro\"\n    elif len(parts) == 2:\n        # Format: /host:/container\n        host_path = parts[0]\n        container_path = parts[1]\n        read_only = False\n    else:\n        # Can't parse, return as-is\n        return value\n\n    return volume_cls(\n        host_path=host_path, container_path=container_path, read_only=read_only\n    )\n\n\ndef _deserialize_value(\n    value: Any, target_type: Optional[Type] = None, field_name: Optional[str] = None\n) -> Any:\n    \"\"\"Deserialize a value from JSON-compatible format.\n\n    Args:\n        value: The value to deserialize.\n        target_type: Optional type hint for the expected type.\n        field_name: Optional field name for context-based inference.\n\n    Returns:\n        The deserialized Python object.\n    \"\"\"\n    if value is None:\n        return None\n\n    # Handle string values that might need conversion based on field name\n    if isinstance(value, str):\n        # Schedule fields with string values are Calendar schedules\n        if field_name in (\"start_schedule\", \"stop_schedule\", \"restart_schedule\"):\n            calendar_cls = get_registered_type(\"Calendar\")\n            if calendar_cls:\n                return calendar_cls(schedule=value)\n\n        # Volume strings in format \"/host:/container\" or \"/host:/container:ro\"\n        if field_name == \"volumes\" and \":\" in value:\n            volume_cls = get_registered_type(\"Volume\")\n            if volume_cls:\n                return _parse_volume_string(value)\n        # restart_policy as string is just a string, not RestartPolicy object\n        return value\n\n    # Handle dicts\n    if isinstance(value, dict):\n        # Check for explicit type first\n        if \"type\" in value:\n            type_name = value[\"type\"]\n\n            # Handle datetime\n            if type_name == \"datetime\":\n                return datetime.fromisoformat(value[\"value\"])\n\n            # Handle set\n            if type_name == \"set\":\n                return set(value[\"values\"])\n\n            # Handle callable placeholder\n            if type_name == \"callable\":\n                logger.warning(\n                    f\"Cannot deserialize callable '{value.get('name', 'unknown')}'. \"\n                    \"Callables must be provided at runtime.\"\n                )\n                return None\n\n            # Look up in type registry\n            registered_cls = get_registered_type(type_name)\n            if registered_cls:\n                data = {k: v for k, v in value.items() if k != \"type\"}\n                return from_dict(data, registered_cls)\n\n            # If we have a target type hint, try to use it\n            if target_type:\n                target_type = _resolve_union_type(target_type, value)\n                data = {k: v for k, v in value.items() if k != \"type\"}\n                if not _is_union_type(target_type):\n                    return from_dict(data, target_type)\n\n            # Return the dict as-is if we can't resolve the type\n            logger.warning(f\"Unknown type '{type_name}' during deserialization\")\n            return {k: v for k, v in value.items() if k != \"type\"}\n\n        # No explicit type - try to infer from content\n        inferred_type = _infer_type_from_content(value, field_name)\n\n        # Special handling for schedule fields\n        if (\n            field_name in (\"start_schedule\", \"stop_schedule\", \"restart_schedule\")\n            and not inferred_type\n        ):\n            inferred_type = _infer_schedule_type(value)\n\n        if inferred_type:\n            registered_cls = get_registered_type(inferred_type)\n            if registered_cls:\n                return from_dict(value, registered_cls)\n\n        # If we have a target type hint, use it\n        if target_type and target_type is not NoneType:\n            target_type = _resolve_union_type(target_type, value)\n            # Don't try to instantiate Union types directly\n            if not _is_union_type(target_type):\n                try:\n                    return from_dict(value, target_type)\n                except (TypeError, ValueError):\n                    pass\n\n        # Return as plain dict with recursively deserialized values\n        return {k: _deserialize_value(v) for k, v in value.items()}\n\n    # Handle lists\n    if isinstance(value, list):\n        # Get element type from target_type if available\n        element_type = _sequence_element_type(target_type) if target_type else None\n\n        # For schedule and volume lists, pass field_name for type inference\n        if field_name in (\n            \"start_schedule\",\n            \"stop_schedule\",\n            \"restart_schedule\",\n            \"volumes\",\n            \"ulimits\",\n        ):\n            return [_deserialize_value(v, element_type, field_name) for v in value]\n\n        return [_deserialize_value(v, element_type) for v in value]\n\n    # Primitives pass through\n    return value\n\n\ndef _get_field_type(cls: Type, field_name: str) -> Optional[Type]:\n    \"\"\"Get the type annotation for a field on a class.\"\"\"\n    if is_dataclass(cls):\n        for field in fields(cls):\n            if field.name == field_name:\n                return field.type\n    elif _is_pydantic_model(cls):\n        model_fields = cls.model_fields\n        if field_name in model_fields:\n            return model_fields[field_name].annotation\n    return None\n\n\ndef to_dict(obj: Any, include_none: bool = False) -> Dict[str, Any]:\n    \"\"\"Convert an object to a dictionary representation.\n\n    Args:\n        obj: The object to serialize.\n        include_none: Whether to include None values.\n\n    Returns:\n        A dictionary representation of the object.\n    \"\"\"\n    return _serialize_value(obj, include_none)\n\n\ndef from_dict(data: Dict[str, Any], cls: Type[T]) -> T:\n    \"\"\"Create an object from a dictionary representation.\n\n    Args:\n        data: The dictionary data.\n        cls: The class to instantiate.\n\n    Returns:\n        An instance of the specified class.\n    \"\"\"\n    if not isinstance(data, dict):\n        raise TypeError(f\"Expected dict, got {type(data).__name__}\")\n\n    # Remove type if present (already used for type dispatch)\n    data = {k: v for k, v in data.items() if k != \"type\"}\n\n    # Handle Pydantic models\n    if _is_pydantic_model(cls):\n        # Deserialize nested values based on field types\n        processed_data = {}\n        for key, value in data.items():\n            field_type = _get_field_type(cls, key)\n            # Apply human-readable parsing first (memory sizes, time durations)\n            value = _maybe_parse_value(value, key)\n            processed_data[key] = _deserialize_value(value, field_type, field_name=key)\n        return cls(**processed_data)\n\n    # Handle dataclasses\n    if is_dataclass(cls):\n        field_names = {field.name for field in fields(cls)}\n        unknown_fields = sorted(set(data) - field_names)\n        if unknown_fields:\n            unknown = \", \".join(unknown_fields)\n            raise ValueError(f\"Unknown field(s) for {cls.__name__}: {unknown}\")\n\n        processed_data = {}\n        for field in fields(cls):\n            if field.name in data:\n                value = data[field.name]\n                field_type = field.type\n\n                # Apply human-readable parsing first (memory sizes, time durations)\n                value = _maybe_parse_value(value, field.name)\n\n                field_type = _resolve_union_type(field_type, value)\n\n                processed_data[field.name] = _deserialize_value(\n                    value, field_type, field_name=field.name\n                )\n            elif field.default is not MISSING or field.default_factory is not MISSING:\n                # Let the dataclass constructor apply defaults.\n                continue\n\n        return cls(**processed_data)\n\n    # For regular classes, just pass the data\n    return cls(**data)\n\n\ndef serialize(\n    obj: Any,\n    format: Literal[\"json\", \"yaml\"] = \"json\",\n    indent: int = 2,\n    include_none: bool = False,\n) -> str:\n    \"\"\"Serialize an object to JSON or YAML string.\n\n    Args:\n        obj: The object to serialize.\n        format: Output format (\"json\" or \"yaml\").\n        indent: Indentation level for pretty printing.\n        include_none: Whether to include None values.\n\n    Returns:\n        The serialized string.\n\n    Raises:\n        ValueError: If an unknown format is specified.\n    \"\"\"\n    data = to_dict(obj, include_none)\n\n    if format == \"json\":\n        return json.dumps(data, indent=indent, default=str)\n    elif format == \"yaml\":\n        return yaml.dump(\n            data, default_flow_style=False, allow_unicode=True, sort_keys=False\n        )\n    else:\n        raise ValueError(f\"Unknown format: {format}\")\n\n\ndef deserialize(data: str, cls: Type[T], format: Literal[\"json\", \"yaml\"] = \"json\") -> T:\n    \"\"\"Deserialize a JSON or YAML string to an object.\n\n    Args:\n        data: The serialized string.\n        cls: The class to deserialize to.\n        format: Input format (\"json\" or \"yaml\").\n\n    Returns:\n        An instance of the specified class.\n\n    Raises:\n        ValueError: If an unknown format is specified.\n    \"\"\"\n    if format == \"json\":\n        parsed = json.loads(data)\n    elif format == \"yaml\":\n        parsed = yaml.safe_load(data)\n    else:\n        raise ValueError(f\"Unknown format: {format}\")\n\n    if not isinstance(parsed, Mapping):\n        raise ValueError(\n            f\"Serialized {cls.__name__} payload must be a mapping, got {type(parsed).__name__}\"\n        )\n\n    return from_dict(parsed, cls)\n\n\ndef serialize_to_file(\n    obj: Any,\n    path: Union[str, Path],\n    format: Optional[Literal[\"json\", \"yaml\"]] = None,\n    indent: int = 2,\n    include_none: bool = False,\n) -> None:\n    \"\"\"Serialize an object to a file.\n\n    Args:\n        obj: The object to serialize.\n        path: The file path.\n        format: Output format. If None, inferred from file extension.\n        indent: Indentation level for pretty printing.\n        include_none: Whether to include None values.\n    \"\"\"\n    path = Path(path)\n\n    if format is None:\n        if path.suffix in (\".yaml\", \".yml\"):\n            format = \"yaml\"\n        else:\n            format = \"json\"\n\n    content = serialize(obj, format=format, indent=indent, include_none=include_none)\n    secure_write_text(path, content)\n\n\ndef deserialize_from_file(\n    path: Union[str, Path],\n    cls: Type[T],\n    format: Optional[Literal[\"json\", \"yaml\"]] = None,\n) -> T:\n    \"\"\"Deserialize an object from a file.\n\n    Args:\n        path: The file path.\n        cls: The class to deserialize to.\n        format: Input format. If None, inferred from file extension.\n\n    Returns:\n        An instance of the specified class.\n    \"\"\"\n    path = Path(path)\n\n    if format is None:\n        if path.suffix in (\".yaml\", \".yml\"):\n            format = \"yaml\"\n        else:\n            format = \"json\"\n\n    content = path.read_text()\n    return deserialize(content, cls, format=format)\n\n\n# Register all taskflows types for polymorphic deserialization\ndef _register_taskflows_types():\n    \"\"\"Register all taskflows types in the type registry.\"\"\"\n    # Import here to avoid circular imports\n    from taskflows.service import Venv, Service, RestartPolicy\n    from taskflows.docker import (\n        DockerContainer,\n        DockerImage,\n        Volume,\n        Ulimit,\n        ContainerLimits,\n    )\n    from taskflows.schedule import Calendar, Periodic\n    from taskflows.constraints import (\n        CgroupConfig,\n        HardwareConstraint,\n        Memory,\n        CPUs,\n        SystemLoadConstraint,\n        MemoryPressure,\n        CPUPressure,\n        IOPressure,\n    )\n\n    # Service types\n    register_type(Venv)\n    register_type(Service)\n    register_type(RestartPolicy)\n\n    # Docker types\n    register_type(DockerContainer)\n    register_type(DockerImage)\n    register_type(Volume)\n    register_type(Ulimit)\n    register_type(ContainerLimits)\n\n    # Schedule types\n    register_type(Calendar)\n    register_type(Periodic)\n\n    # Constraint types\n    register_type(CgroupConfig)\n    register_type(HardwareConstraint)\n    register_type(Memory)\n    register_type(CPUs)\n    register_type(SystemLoadConstraint)\n    register_type(MemoryPressure)\n    register_type(CPUPressure)\n    register_type(IOPressure)\n\n\n# Register types on import\n_register_taskflows_types()\n\n\ndef load_services_from_yaml(path: Union[str, Path]) -> List[\"Service\"]:\n    \"\"\"Load multiple services from a YAML file.\n",
+    "end_line": 1019,
+    "kind": "text",
+    "line_limit": 760,
+    "line_offset": 260,
+    "lines": [
+      {
+        "line": 260,
+        "text": "        return int(value)"
+      },
+      {
+        "line": 261,
+        "text": ""
+      },
+      {
+        "line": 262,
+        "text": "    if not isinstance(value, str):"
+      },
+      {
+        "line": 263,
+        "text": "        raise ValueError("
+      },
+      {
+        "line": 264,
+        "text": "            f\"Cannot parse time duration from {type(value).__name__}: {value}\""
+      },
+      {
+        "line": 265,
+        "text": "        )"
+      },
+      {
+        "line": 266,
+        "text": ""
+      },
+      {
+        "line": 267,
+        "text": "    match = _TIME_PATTERN.match(value)"
+      },
+      {
+        "line": 268,
+        "text": "    if not match:"
+      },
+      {
+        "line": 269,
+        "text": "        raise ValueError(f\"Invalid time duration format: {value}\")"
+      },
+      {
+        "line": 270,
+        "text": ""
+      },
+      {
+        "line": 271,
+        "text": "    number_str, unit = match.groups()"
+      },
+      {
+        "line": 272,
+        "text": "    number = float(number_str)"
+      },
+      {
+        "line": 273,
+        "text": ""
+      },
+      {
+        "line": 274,
+        "text": "    if unit is None:"
+      },
+      {
+        "line": 275,
+        "text": "        # No unit specified, assume seconds"
+      },
+      {
+        "line": 276,
+        "text": "        return int(number)"
+      },
+      {
+        "line": 277,
+        "text": ""
+      },
+      {
+        "line": 278,
+        "text": "    unit_lower = unit.lower()"
+      },
+      {
+        "line": 279,
+        "text": "    if unit_lower not in _TIME_UNITS:"
+      },
+      {
+        "line": 280,
+        "text": "        raise ValueError("
+      },
+      {
+        "line": 281,
+        "text": "            f\"Unknown time unit '{unit}'. Valid units: {', '.join(sorted(set(_TIME_UNITS.keys())))}\""
+      },
+      {
+        "line": 282,
+        "text": "        )"
+      },
+      {
+        "line": 283,
+        "text": ""
+      },
+      {
+        "line": 284,
+        "text": "    return int(number * _TIME_UNITS[unit_lower])"
+      },
+      {
+        "line": 285,
+        "text": ""
+      },
+      {
+        "line": 286,
+        "text": ""
+      },
+      {
+        "line": 287,
+        "text": "def parse_percent(value: Any) -> int:"
+      },
+      {
+        "line": 288,
+        "text": "    \"\"\"Parse a whole percentage value, accepting forms like 60, \"60\", and \"60%\".\"\"\""
+      },
+      {
+        "line": 289,
+        "text": "    if isinstance(value, bool):"
+      },
+      {
+        "line": 290,
+        "text": "        raise ValueError(\"Percent must be a number\")"
+      },
+      {
+        "line": 291,
+        "text": "    if isinstance(value, int):"
+      },
+      {
+        "line": 292,
+        "text": "        return value"
+      },
+      {
+        "line": 293,
+        "text": "    if isinstance(value, float):"
+      },
+      {
+        "line": 294,
+        "text": "        if not value.is_integer():"
+      },
+      {
+        "line": 295,
+        "text": "            raise ValueError(\"Percent must be a whole number\")"
+      },
+      {
+        "line": 296,
+        "text": "        return int(value)"
+      },
+      {
+        "line": 297,
+        "text": "    if not isinstance(value, str):"
+      },
+      {
+        "line": 298,
+        "text": "        raise ValueError(f\"Cannot parse percent from {type(value).__name__}: {value}\")"
+      },
+      {
+        "line": 299,
+        "text": ""
+      },
+      {
+        "line": 300,
+        "text": "    match = _PERCENT_PATTERN.match(value)"
+      },
+      {
+        "line": 301,
+        "text": "    if not match:"
+      },
+      {
+        "line": 302,
+        "text": "        raise ValueError(f\"Invalid percent format: {value}\")"
+      },
+      {
+        "line": 303,
+        "text": "    number = float(match.group(1))"
+      },
+      {
+        "line": 304,
+        "text": "    if not number.is_integer():"
+      },
+      {
+        "line": 305,
+        "text": "        raise ValueError(\"Percent must be a whole number\")"
+      },
+      {
+        "line": 306,
+        "text": "    return int(number)"
+      },
+      {
+        "line": 307,
+        "text": ""
+      },
+      {
+        "line": 308,
+        "text": ""
+      },
+      {
+        "line": 309,
+        "text": "def _maybe_parse_value(value: Any, field_name: str) -> Any:"
+      },
+      {
+        "line": 310,
+        "text": "    \"\"\"Parse a value if it matches a known field that needs conversion."
+      },
+      {
+        "line": 311,
+        "text": ""
+      },
+      {
+        "line": 312,
+        "text": "    Args:"
+      },
+      {
+        "line": 313,
+        "text": "        value: The raw value."
+      },
+      {
+        "line": 314,
+        "text": "        field_name: The field name for context."
+      },
+      {
+        "line": 315,
+        "text": ""
+      },
+      {
+        "line": 316,
+        "text": "    Returns:"
+      },
+      {
+        "line": 317,
+        "text": "        Parsed value, or original if no parsing needed."
+      },
+      {
+        "line": 318,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 319,
+        "text": "    if value is None:"
+      },
+      {
+        "line": 320,
+        "text": "        return None"
+      },
+      {
+        "line": 321,
+        "text": ""
+      },
+      {
+        "line": 322,
+        "text": "    # Check if this field should be parsed as memory"
+      },
+      {
+        "line": 323,
+        "text": "    if field_name in _MEMORY_FIELDS:"
+      },
+      {
+        "line": 324,
+        "text": "        try:"
+      },
+      {
+        "line": 325,
+        "text": "            return parse_memory_size(value)"
+      },
+      {
+        "line": 326,
+        "text": "        except (ValueError, TypeError):"
+      },
+      {
+        "line": 327,
+        "text": "            # If parsing fails, return original value"
+      },
+      {
+        "line": 328,
+        "text": "            # (it might already be an int, or might be something else)"
+      },
+      {
+        "line": 329,
+        "text": "            return value"
+      },
+      {
+        "line": 330,
+        "text": ""
+      },
+      {
+        "line": 331,
+        "text": "    # Check if this field should be parsed as time"
+      },
+      {
+        "line": 332,
+        "text": "    if field_name in _TIME_FIELDS:"
+      },
+      {
+        "line": 333,
+        "text": "        try:"
+      },
+      {
+        "line": 334,
+        "text": "            return parse_time_duration(value)"
+      },
+      {
+        "line": 335,
+        "text": "        except (ValueError, TypeError):"
+      },
+      {
+        "line": 336,
+        "text": "            return value"
+      },
+      {
+        "line": 337,
+        "text": ""
+      },
+      {
+        "line": 338,
+        "text": "    if field_name in _PERCENT_FIELDS:"
+      },
+      {
+        "line": 339,
+        "text": "        try:"
+      },
+      {
+        "line": 340,
+        "text": "            return parse_percent(value)"
+      },
+      {
+        "line": 341,
+        "text": "        except (ValueError, TypeError):"
+      },
+      {
+        "line": 342,
+        "text": "            return value"
+      },
+      {
+        "line": 343,
+        "text": ""
+      },
+      {
+        "line": 344,
+        "text": "    return value"
+      },
+      {
+        "line": 345,
+        "text": ""
+      },
+      {
+        "line": 346,
+        "text": ""
+      },
+      {
+        "line": 347,
+        "text": "T = TypeVar(\"T\")"
+      },
+      {
+        "line": 348,
+        "text": ""
+      },
+      {
+        "line": 349,
+        "text": ""
+      },
+      {
+        "line": 350,
+        "text": "# Type registry for polymorphic deserialization"
+      },
+      {
+        "line": 351,
+        "text": "_TYPE_REGISTRY: Dict[str, Type] = {}"
+      },
+      {
+        "line": 352,
+        "text": ""
+      },
+      {
+        "line": 353,
+        "text": "# Field name to type mapping for automatic inference"
+      },
+      {
+        "line": 354,
+        "text": "_FIELD_TYPE_MAP: Dict[str, str] = {"
+      },
+      {
+        "line": 355,
+        "text": "    \"restart_policy\": \"RestartPolicy\","
+      },
+      {
+        "line": 356,
+        "text": "    \"cgroup_config\": \"CgroupConfig\","
+      },
+      {
+        "line": 357,
+        "text": "    \"container_limits\": \"ContainerLimits\","
+      },
+      {
+        "line": 358,
+        "text": "    \"start_schedule\": \"Schedule\","
+      },
+      {
+        "line": 359,
+        "text": "    \"stop_schedule\": \"Schedule\","
+      },
+      {
+        "line": 360,
+        "text": "    \"restart_schedule\": \"Schedule\","
+      },
+      {
+        "line": 361,
+        "text": "    \"ulimits\": \"Ulimit\","
+      },
+      {
+        "line": 362,
+        "text": "    \"volumes\": \"Volume\","
+      },
+      {
+        "line": 363,
+        "text": "}"
+      },
+      {
+        "line": 364,
+        "text": ""
+      },
+      {
+        "line": 365,
+        "text": "# Keys that uniquely identify a type (for content-based inference)"
+      },
+      {
+        "line": 366,
+        "text": "_TYPE_SIGNATURE_KEYS: Dict[frozenset, str] = {"
+      },
+      {
+        "line": 367,
+        "text": "    # Venv: has env_name"
+      },
+      {
+        "line": 368,
+        "text": "    frozenset([\"env_name\"]): \"Venv\","
+      },
+      {
+        "line": 369,
+        "text": "    # DockerContainer: has image"
+      },
+      {
+        "line": 370,
+        "text": "    frozenset([\"image\"]): \"DockerContainer\","
+      },
+      {
+        "line": 371,
+        "text": "    # DockerImage: has tag/path"
+      },
+      {
+        "line": 372,
+        "text": "    frozenset([\"tag\", \"path\"]): \"DockerImage\","
+      },
+      {
+        "line": 373,
+        "text": "    frozenset([\"tag\"]): \"DockerImage\","
+      },
+      {
+        "line": 374,
+        "text": "    # ContainerLimits: Docker build resource controls"
+      },
+      {
+        "line": 375,
+        "text": "    frozenset([\"memory\", \"memswap\"]): \"ContainerLimits\","
+      },
+      {
+        "line": 376,
+        "text": "    frozenset([\"cpushares\"]): \"ContainerLimits\","
+      },
+      {
+        "line": 377,
+        "text": "    frozenset([\"cpusetcpus\"]): \"ContainerLimits\","
+      },
+      {
+        "line": 378,
+        "text": "    # Calendar: has schedule (string pattern)"
+      },
+      {
+        "line": 379,
+        "text": "    frozenset([\"schedule\"]): \"Calendar\","
+      },
+      {
+        "line": 380,
+        "text": "    # Periodic: has period and start_on"
+      },
+      {
+        "line": 381,
+        "text": "    frozenset([\"period\", \"start_on\"]): \"Periodic\","
+      },
+      {
+        "line": 382,
+        "text": "    frozenset([\"period\"]): \"Periodic\","
+      },
+      {
+        "line": 383,
+        "text": "    # Volume: has host_path and container_path"
+      },
+      {
+        "line": 384,
+        "text": "    frozenset([\"host_path\", \"container_path\"]): \"Volume\","
+      },
+      {
+        "line": 385,
+        "text": "    # RestartPolicy: has condition (when it's a dict)"
+      },
+      {
+        "line": 386,
+        "text": "    frozenset([\"condition\"]): \"RestartPolicy\","
+      },
+      {
+        "line": 387,
+        "text": "    # Memory constraint"
+      },
+      {
+        "line": 388,
+        "text": "    frozenset([\"amount\", \"constraint\"]): \"Memory\","
+      },
+      {
+        "line": 389,
+        "text": "    # CPUPressure constraint"
+      },
+      {
+        "line": 390,
+        "text": "    frozenset([\"max_percent\", \"timespan\"]): \"CPUPressure\","
+      },
+      {
+        "line": 391,
+        "text": "    frozenset([\"max_percent\"]): \"CPUPressure\","
+      },
+      {
+        "line": 392,
+        "text": "    # CgroupConfig: has memory_limit or cpu_quota (common cgroup fields)"
+      },
+      {
+        "line": 393,
+        "text": "    frozenset([\"memory_limit\"]): \"CgroupConfig\","
+      },
+      {
+        "line": 394,
+        "text": "    frozenset([\"cpu_quota\"]): \"CgroupConfig\","
+      },
+      {
+        "line": 395,
+        "text": "    frozenset([\"cpu_shares\"]): \"CgroupConfig\","
+      },
+      {
+        "line": 396,
+        "text": "    frozenset([\"pids_limit\"]): \"CgroupConfig\","
+      },
+      {
+        "line": 397,
+        "text": "    frozenset([\"oom_policy\"]): \"CgroupConfig\","
+      },
+      {
+        "line": 398,
+        "text": "    frozenset([\"managed_oom_swap\"]): \"CgroupConfig\","
+      },
+      {
+        "line": 399,
+        "text": "    frozenset([\"managed_oom_memory_pressure\"]): \"CgroupConfig\","
+      },
+      {
+        "line": 400,
+        "text": "    frozenset([\"managed_oom_memory_pressure_limit\"]): \"CgroupConfig\","
+      },
+      {
+        "line": 401,
+        "text": "    frozenset([\"managed_oom_preference\"]): \"CgroupConfig\","
+      },
+      {
+        "line": 402,
+        "text": "}"
+      },
+      {
+        "line": 403,
+        "text": ""
+      },
+      {
+        "line": 404,
+        "text": ""
+      },
+      {
+        "line": 405,
+        "text": "def _infer_type_from_content("
+      },
+      {
+        "line": 406,
+        "text": "    data: Dict[str, Any], field_name: Optional[str] = None"
+      },
+      {
+        "line": 407,
+        "text": ") -> Optional[str]:"
+      },
+      {
+        "line": 408,
+        "text": "    \"\"\"Infer the type from dict content based on its keys."
+      },
+      {
+        "line": 409,
+        "text": ""
+      },
+      {
+        "line": 410,
+        "text": "    Args:"
+      },
+      {
+        "line": 411,
+        "text": "        data: The dictionary to analyze."
+      },
+      {
+        "line": 412,
+        "text": "        field_name: Optional field name for context."
+      },
+      {
+        "line": 413,
+        "text": ""
+      },
+      {
+        "line": 414,
+        "text": "    Returns:"
+      },
+      {
+        "line": 415,
+        "text": "        The inferred type name, or None if can't be determined."
+      },
+      {
+        "line": 416,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 417,
+        "text": "    if not isinstance(data, dict):"
+      },
+      {
+        "line": 418,
+        "text": "        return None"
+      },
+      {
+        "line": 419,
+        "text": ""
+      },
+      {
+        "line": 420,
+        "text": "    keys = set(data.keys()) - {\"type\"}  # Exclude type key itself"
+      },
+      {
+        "line": 421,
+        "text": ""
+      },
+      {
+        "line": 422,
+        "text": "    # Check for signature keys (most specific first - larger sets)"
+      },
+      {
+        "line": 423,
+        "text": "    for signature_keys, type_name in sorted("
+      },
+      {
+        "line": 424,
+        "text": "        _TYPE_SIGNATURE_KEYS.items(), key=lambda x: -len(x[0])"
+      },
+      {
+        "line": 425,
+        "text": "    ):"
+      },
+      {
+        "line": 426,
+        "text": "        if signature_keys <= keys:"
+      },
+      {
+        "line": 427,
+        "text": "            return type_name"
+      },
+      {
+        "line": 428,
+        "text": ""
+      },
+      {
+        "line": 429,
+        "text": "    # Use field name to infer type if content-based inference fails"
+      },
+      {
+        "line": 430,
+        "text": "    if field_name and field_name in _FIELD_TYPE_MAP:"
+      },
+      {
+        "line": 431,
+        "text": "        return _FIELD_TYPE_MAP[field_name]"
+      },
+      {
+        "line": 432,
+        "text": ""
+      },
+      {
+        "line": 433,
+        "text": "    return None"
+      },
+      {
+        "line": 434,
+        "text": ""
+      },
+      {
+        "line": 435,
+        "text": ""
+      },
+      {
+        "line": 436,
+        "text": "def _infer_schedule_type(value: Any) -> Optional[str]:"
+      },
+      {
+        "line": 437,
+        "text": "    \"\"\"Infer schedule type from value."
+      },
+      {
+        "line": 438,
+        "text": ""
+      },
+      {
+        "line": 439,
+        "text": "    - String with day/time pattern -> Calendar"
+      },
+      {
+        "line": 440,
+        "text": "    - Dict with 'schedule' key -> Calendar"
+      },
+      {
+        "line": 441,
+        "text": "    - Dict with 'period' key -> Periodic"
+      },
+      {
+        "line": 442,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 443,
+        "text": "    if isinstance(value, str):"
+      },
+      {
+        "line": 444,
+        "text": "        # A string schedule is always Calendar format"
+      },
+      {
+        "line": 445,
+        "text": "        return \"Calendar\""
+      },
+      {
+        "line": 446,
+        "text": ""
+      },
+      {
+        "line": 447,
+        "text": "    if isinstance(value, dict):"
+      },
+      {
+        "line": 448,
+        "text": "        if \"schedule\" in value:"
+      },
+      {
+        "line": 449,
+        "text": "            return \"Calendar\""
+      },
+      {
+        "line": 450,
+        "text": "        if \"period\" in value:"
+      },
+      {
+        "line": 451,
+        "text": "            return \"Periodic\""
+      },
+      {
+        "line": 452,
+        "text": ""
+      },
+      {
+        "line": 453,
+        "text": "    return None"
+      },
+      {
+        "line": 454,
+        "text": ""
+      },
+      {
+        "line": 455,
+        "text": ""
+      },
+      {
+        "line": 456,
+        "text": "def register_type(cls: Type) -> Type:"
+      },
+      {
+        "line": 457,
+        "text": "    \"\"\"Register a type for polymorphic deserialization."
+      },
+      {
+        "line": 458,
+        "text": ""
+      },
+      {
+        "line": 459,
+        "text": "    Args:"
+      },
+      {
+        "line": 460,
+        "text": "        cls: The class to register."
+      },
+      {
+        "line": 461,
+        "text": ""
+      },
+      {
+        "line": 462,
+        "text": "    Returns:"
+      },
+      {
+        "line": 463,
+        "text": "        The same class (allows use as decorator)."
+      },
+      {
+        "line": 464,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 465,
+        "text": "    _TYPE_REGISTRY[cls.__name__] = cls"
+      },
+      {
+        "line": 466,
+        "text": "    return cls"
+      },
+      {
+        "line": 467,
+        "text": ""
+      },
+      {
+        "line": 468,
+        "text": ""
+      },
+      {
+        "line": 469,
+        "text": "def get_registered_type(name: str) -> Optional[Type]:"
+      },
+      {
+        "line": 470,
+        "text": "    \"\"\"Get a registered type by name."
+      },
+      {
+        "line": 471,
+        "text": ""
+      },
+      {
+        "line": 472,
+        "text": "    Args:"
+      },
+      {
+        "line": 473,
+        "text": "        name: The class name."
+      },
+      {
+        "line": 474,
+        "text": ""
+      },
+      {
+        "line": 475,
+        "text": "    Returns:"
+      },
+      {
+        "line": 476,
+        "text": "        The registered class, or None if not found."
+      },
+      {
+        "line": 477,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 478,
+        "text": "    return _TYPE_REGISTRY.get(name)"
+      },
+      {
+        "line": 479,
+        "text": ""
+      },
+      {
+        "line": 480,
+        "text": ""
+      },
+      {
+        "line": 481,
+        "text": "def _get_type_name(obj: Any) -> str:"
+      },
+      {
+        "line": 482,
+        "text": "    \"\"\"Get the type name for an object.\"\"\""
+      },
+      {
+        "line": 483,
+        "text": "    return type(obj).__name__"
+      },
+      {
+        "line": 484,
+        "text": ""
+      },
+      {
+        "line": 485,
+        "text": ""
+      },
+      {
+        "line": 486,
+        "text": "def _is_pydantic_model(cls: Type) -> bool:"
+      },
+      {
+        "line": 487,
+        "text": "    \"\"\"Check if a class is a Pydantic BaseModel.\"\"\""
+      },
+      {
+        "line": 488,
+        "text": "    try:"
+      },
+      {
+        "line": 489,
+        "text": "        return issubclass(cls, BaseModel)"
+      },
+      {
+        "line": 490,
+        "text": "    except TypeError:"
+      },
+      {
+        "line": 491,
+        "text": "        return False"
+      },
+      {
+        "line": 492,
+        "text": ""
+      },
+      {
+        "line": 493,
+        "text": ""
+      },
+      {
+        "line": 494,
+        "text": "def _is_union_type(annotation: Any) -> bool:"
+      },
+      {
+        "line": 495,
+        "text": "    \"\"\"Return True for both typing.Union and PEP 604 unions.\"\"\""
+      },
+      {
+        "line": 496,
+        "text": "    return get_origin(annotation) in (Union, UnionType)"
+      },
+      {
+        "line": 497,
+        "text": ""
+      },
+      {
+        "line": 498,
+        "text": ""
+      },
+      {
+        "line": 499,
+        "text": "def _sequence_element_type(annotation: Any) -> Optional[Type]:"
+      },
+      {
+        "line": 500,
+        "text": "    \"\"\"Return the item type for list-like annotations when available.\"\"\""
+      },
+      {
+        "line": 501,
+        "text": "    origin = get_origin(annotation)"
+      },
+      {
+        "line": 502,
+        "text": "    if origin in (Union, UnionType):"
+      },
+      {
+        "line": 503,
+        "text": "        for arg in get_args(annotation):"
+      },
+      {
+        "line": 504,
+        "text": "            element_type = _sequence_element_type(arg)"
+      },
+      {
+        "line": 505,
+        "text": "            if element_type:"
+      },
+      {
+        "line": 506,
+        "text": "                return element_type"
+      },
+      {
+        "line": 507,
+        "text": "    if origin in (list, List, tuple, Sequence, ABCSequence):"
+      },
+      {
+        "line": 508,
+        "text": "        args = get_args(annotation)"
+      },
+      {
+        "line": 509,
+        "text": "        if args:"
+      },
+      {
+        "line": 510,
+        "text": "            return args[0]"
+      },
+      {
+        "line": 511,
+        "text": "    return None"
+      },
+      {
+        "line": 512,
+        "text": ""
+      },
+      {
+        "line": 513,
+        "text": ""
+      },
+      {
+        "line": 514,
+        "text": "def _resolve_union_type(annotation: Any, value: Any) -> Any:"
+      },
+      {
+        "line": 515,
+        "text": "    \"\"\"Choose a concrete type from a union annotation when the data identifies one.\"\"\""
+      },
+      {
+        "line": 516,
+        "text": "    if not _is_union_type(annotation):"
+      },
+      {
+        "line": 517,
+        "text": "        return annotation"
+      },
+      {
+        "line": 518,
+        "text": ""
+      },
+      {
+        "line": 519,
+        "text": "    union_args = [arg for arg in get_args(annotation) if arg is not NoneType]"
+      },
+      {
+        "line": 520,
+        "text": "    if value is None:"
+      },
+      {
+        "line": 521,
+        "text": "        return NoneType"
+      },
+      {
+        "line": 522,
+        "text": "    if len(union_args) == 1:"
+      },
+      {
+        "line": 523,
+        "text": "        return union_args[0]"
+      },
+      {
+        "line": 524,
+        "text": ""
+      },
+      {
+        "line": 525,
+        "text": "    if isinstance(value, dict):"
+      },
+      {
+        "line": 526,
+        "text": "        type_name = value.get(\"type\") or _infer_type_from_content(value)"
+      },
+      {
+        "line": 527,
+        "text": "        if type_name:"
+      },
+      {
+        "line": 528,
+        "text": "            for arg in union_args:"
+      },
+      {
+        "line": 529,
+        "text": "                if getattr(arg, \"__name__\", None) == type_name:"
+      },
+      {
+        "line": 530,
+        "text": "                    return arg"
+      },
+      {
+        "line": 531,
+        "text": "        non_primitive_args = ["
+      },
+      {
+        "line": 532,
+        "text": "            arg"
+      },
+      {
+        "line": 533,
+        "text": "            for arg in union_args"
+      },
+      {
+        "line": 534,
+        "text": "            if arg not in (str, int, float, bool, dict, list, Path)"
+      },
+      {
+        "line": 535,
+        "text": "            and get_origin(arg) is None"
+      },
+      {
+        "line": 536,
+        "text": "        ]"
+      },
+      {
+        "line": 537,
+        "text": "        if len(non_primitive_args) == 1:"
+      },
+      {
+        "line": 538,
+        "text": "            return non_primitive_args[0]"
+      },
+      {
+        "line": 539,
+        "text": ""
+      },
+      {
+        "line": 540,
+        "text": "    return annotation"
+      },
+      {
+        "line": 541,
+        "text": ""
+      },
+      {
+        "line": 542,
+        "text": ""
+      },
+      {
+        "line": 543,
+        "text": "def _serialize_value(value: Any, include_none: bool = False) -> Any:"
+      },
+      {
+        "line": 544,
+        "text": "    \"\"\"Serialize a single value to a JSON-compatible type."
+      },
+      {
+        "line": 545,
+        "text": ""
+      },
+      {
+        "line": 546,
+        "text": "    Args:"
+      },
+      {
+        "line": 547,
+        "text": "        value: The value to serialize."
+      },
+      {
+        "line": 548,
+        "text": "        include_none: Whether to include None values in dicts."
+      },
+      {
+        "line": 549,
+        "text": ""
+      },
+      {
+        "line": 550,
+        "text": "    Returns:"
+      },
+      {
+        "line": 551,
+        "text": "        A JSON-compatible representation of the value."
+      },
+      {
+        "line": 552,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 553,
+        "text": "    if value is None:"
+      },
+      {
+        "line": 554,
+        "text": "        return None"
+      },
+      {
+        "line": 555,
+        "text": ""
+      },
+      {
+        "line": 556,
+        "text": "    # Handle datetime"
+      },
+      {
+        "line": 557,
+        "text": "    if isinstance(value, datetime):"
+      },
+      {
+        "line": 558,
+        "text": "        return {\"type\": \"datetime\", \"value\": value.isoformat()}"
+      },
+      {
+        "line": 559,
+        "text": ""
+      },
+      {
+        "line": 560,
+        "text": "    # Handle Path"
+      },
+      {
+        "line": 561,
+        "text": "    if isinstance(value, Path):"
+      },
+      {
+        "line": 562,
+        "text": "        return str(value)"
+      },
+      {
+        "line": 563,
+        "text": ""
+      },
+      {
+        "line": 564,
+        "text": "    # Handle Pydantic models"
+      },
+      {
+        "line": 565,
+        "text": "    if isinstance(value, BaseModel):"
+      },
+      {
+        "line": 566,
+        "text": "        data = value.model_dump(mode=\"json\")"
+      },
+      {
+        "line": 567,
+        "text": "        data[\"type\"] = _get_type_name(value)"
+      },
+      {
+        "line": 568,
+        "text": "        return _filter_none(data, include_none)"
+      },
+      {
+        "line": 569,
+        "text": ""
+      },
+      {
+        "line": 570,
+        "text": "    # Handle dataclasses"
+      },
+      {
+        "line": 571,
+        "text": "    if is_dataclass(value) and not isinstance(value, type):"
+      },
+      {
+        "line": 572,
+        "text": "        data = {}"
+      },
+      {
+        "line": 573,
+        "text": "        data[\"type\"] = _get_type_name(value)"
+      },
+      {
+        "line": 574,
+        "text": "        for field in fields(value):"
+      },
+      {
+        "line": 575,
+        "text": "            field_value = getattr(value, field.name)"
+      },
+      {
+        "line": 576,
+        "text": "            serialized = _serialize_value(field_value, include_none)"
+      },
+      {
+        "line": 577,
+        "text": "            if include_none or serialized is not None:"
+      },
+      {
+        "line": 578,
+        "text": "                data[field.name] = serialized"
+      },
+      {
+        "line": 579,
+        "text": "        return data"
+      },
+      {
+        "line": 580,
+        "text": ""
+      },
+      {
+        "line": 581,
+        "text": "    # Handle callables (functions) - store reference only, not actual function"
+      },
+      {
+        "line": 582,
+        "text": "    if callable(value) and not isinstance(value, type):"
+      },
+      {
+        "line": 583,
+        "text": "        # We can't serialize arbitrary functions, but we can note their presence"
+      },
+      {
+        "line": 584,
+        "text": "        return {\"type\": \"callable\", \"name\": getattr(value, \"__name__\", \"<lambda>\")}"
+      },
+      {
+        "line": 585,
+        "text": ""
+      },
+      {
+        "line": 586,
+        "text": "    # Handle sequences (but not strings)"
+      },
+      {
+        "line": 587,
+        "text": "    if isinstance(value, (list, tuple)):"
+      },
+      {
+        "line": 588,
+        "text": "        return [_serialize_value(v, include_none) for v in value]"
+      },
+      {
+        "line": 589,
+        "text": ""
+      },
+      {
+        "line": 590,
+        "text": "    # Handle dicts"
+      },
+      {
+        "line": 591,
+        "text": "    if isinstance(value, dict):"
+      },
+      {
+        "line": 592,
+        "text": "        return {k: _serialize_value(v, include_none) for k, v in value.items()}"
+      },
+      {
+        "line": 593,
+        "text": ""
+      },
+      {
+        "line": 594,
+        "text": "    # Handle sets"
+      },
+      {
+        "line": 595,
+        "text": "    if isinstance(value, set):"
+      },
+      {
+        "line": 596,
+        "text": "        return {\"type\": \"set\", \"values\": list(value)}"
+      },
+      {
+        "line": 597,
+        "text": ""
+      },
+      {
+        "line": 598,
+        "text": "    # Primitive types pass through"
+      },
+      {
+        "line": 599,
+        "text": "    return value"
+      },
+      {
+        "line": 600,
+        "text": ""
+      },
+      {
+        "line": 601,
+        "text": ""
+      },
+      {
+        "line": 602,
+        "text": "def _filter_none(data: Dict[str, Any], include_none: bool) -> Dict[str, Any]:"
+      },
+      {
+        "line": 603,
+        "text": "    \"\"\"Filter out None values from a dict if include_none is False.\"\"\""
+      },
+      {
+        "line": 604,
+        "text": "    if include_none:"
+      },
+      {
+        "line": 605,
+        "text": "        return data"
+      },
+      {
+        "line": 606,
+        "text": "    return {k: v for k, v in data.items() if v is not None}"
+      },
+      {
+        "line": 607,
+        "text": ""
+      },
+      {
+        "line": 608,
+        "text": ""
+      },
+      {
+        "line": 609,
+        "text": "def _parse_volume_string(value: str) -> Any:"
+      },
+      {
+        "line": 610,
+        "text": "    \"\"\"Parse a volume string like '/host:/container' or '/host:/container:ro'."
+      },
+      {
+        "line": 611,
+        "text": ""
+      },
+      {
+        "line": 612,
+        "text": "    Supports formats:"
+      },
+      {
+        "line": 613,
+        "text": "        - \"/host:/container\" -> Volume(host_path=\"/host\", container_path=\"/container\")"
+      },
+      {
+        "line": 614,
+        "text": "        - \"/host:/container:ro\" -> Volume(host_path=\"/host\", container_path=\"/container\", read_only=True)"
+      },
+      {
+        "line": 615,
+        "text": "        - \"/host:/container:rw\" -> Volume(host_path=\"/host\", container_path=\"/container\", read_only=False)"
+      },
+      {
+        "line": 616,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 617,
+        "text": "    volume_cls = get_registered_type(\"Volume\")"
+      },
+      {
+        "line": 618,
+        "text": "    if not volume_cls:"
+      },
+      {
+        "line": 619,
+        "text": "        return value"
+      },
+      {
+        "line": 620,
+        "text": ""
+      },
+      {
+        "line": 621,
+        "text": "    parts = value.rsplit(\":\", 2)"
+      },
+      {
+        "line": 622,
+        "text": ""
+      },
+      {
+        "line": 623,
+        "text": "    if len(parts) == 3 and parts[2] in (\"ro\", \"rw\"):"
+      },
+      {
+        "line": 624,
+        "text": "        # Format: /host:/container:ro or /host:/container:rw"
+      },
+      {
+        "line": 625,
+        "text": "        host_path = parts[0]"
+      },
+      {
+        "line": 626,
+        "text": "        container_path = parts[1]"
+      },
+      {
+        "line": 627,
+        "text": "        read_only = parts[2] == \"ro\""
+      },
+      {
+        "line": 628,
+        "text": "    elif len(parts) == 2:"
+      },
+      {
+        "line": 629,
+        "text": "        # Format: /host:/container"
+      },
+      {
+        "line": 630,
+        "text": "        host_path = parts[0]"
+      },
+      {
+        "line": 631,
+        "text": "        container_path = parts[1]"
+      },
+      {
+        "line": 632,
+        "text": "        read_only = False"
+      },
+      {
+        "line": 633,
+        "text": "    else:"
+      },
+      {
+        "line": 634,
+        "text": "        # Can't parse, return as-is"
+      },
+      {
+        "line": 635,
+        "text": "        return value"
+      },
+      {
+        "line": 636,
+        "text": ""
+      },
+      {
+        "line": 637,
+        "text": "    return volume_cls("
+      },
+      {
+        "line": 638,
+        "text": "        host_path=host_path, container_path=container_path, read_only=read_only"
+      },
+      {
+        "line": 639,
+        "text": "    )"
+      },
+      {
+        "line": 640,
+        "text": ""
+      },
+      {
+        "line": 641,
+        "text": ""
+      },
+      {
+        "line": 642,
+        "text": "def _deserialize_value("
+      },
+      {
+        "line": 643,
+        "text": "    value: Any, target_type: Optional[Type] = None, field_name: Optional[str] = None"
+      },
+      {
+        "line": 644,
+        "text": ") -> Any:"
+      },
+      {
+        "line": 645,
+        "text": "    \"\"\"Deserialize a value from JSON-compatible format."
+      },
+      {
+        "line": 646,
+        "text": ""
+      },
+      {
+        "line": 647,
+        "text": "    Args:"
+      },
+      {
+        "line": 648,
+        "text": "        value: The value to deserialize."
+      },
+      {
+        "line": 649,
+        "text": "        target_type: Optional type hint for the expected type."
+      },
+      {
+        "line": 650,
+        "text": "        field_name: Optional field name for context-based inference."
+      },
+      {
+        "line": 651,
+        "text": ""
+      },
+      {
+        "line": 652,
+        "text": "    Returns:"
+      },
+      {
+        "line": 653,
+        "text": "        The deserialized Python object."
+      },
+      {
+        "line": 654,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 655,
+        "text": "    if value is None:"
+      },
+      {
+        "line": 656,
+        "text": "        return None"
+      },
+      {
+        "line": 657,
+        "text": ""
+      },
+      {
+        "line": 658,
+        "text": "    # Handle string values that might need conversion based on field name"
+      },
+      {
+        "line": 659,
+        "text": "    if isinstance(value, str):"
+      },
+      {
+        "line": 660,
+        "text": "        # Schedule fields with string values are Calendar schedules"
+      },
+      {
+        "line": 661,
+        "text": "        if field_name in (\"start_schedule\", \"stop_schedule\", \"restart_schedule\"):"
+      },
+      {
+        "line": 662,
+        "text": "            calendar_cls = get_registered_type(\"Calendar\")"
+      },
+      {
+        "line": 663,
+        "text": "            if calendar_cls:"
+      },
+      {
+        "line": 664,
+        "text": "                return calendar_cls(schedule=value)"
+      },
+      {
+        "line": 665,
+        "text": ""
+      },
+      {
+        "line": 666,
+        "text": "        # Volume strings in format \"/host:/container\" or \"/host:/container:ro\""
+      },
+      {
+        "line": 667,
+        "text": "        if field_name == \"volumes\" and \":\" in value:"
+      },
+      {
+        "line": 668,
+        "text": "            volume_cls = get_registered_type(\"Volume\")"
+      },
+      {
+        "line": 669,
+        "text": "            if volume_cls:"
+      },
+      {
+        "line": 670,
+        "text": "                return _parse_volume_string(value)"
+      },
+      {
+        "line": 671,
+        "text": "        # restart_policy as string is just a string, not RestartPolicy object"
+      },
+      {
+        "line": 672,
+        "text": "        return value"
+      },
+      {
+        "line": 673,
+        "text": ""
+      },
+      {
+        "line": 674,
+        "text": "    # Handle dicts"
+      },
+      {
+        "line": 675,
+        "text": "    if isinstance(value, dict):"
+      },
+      {
+        "line": 676,
+        "text": "        # Check for explicit type first"
+      },
+      {
+        "line": 677,
+        "text": "        if \"type\" in value:"
+      },
+      {
+        "line": 678,
+        "text": "            type_name = value[\"type\"]"
+      },
+      {
+        "line": 679,
+        "text": ""
+      },
+      {
+        "line": 680,
+        "text": "            # Handle datetime"
+      },
+      {
+        "line": 681,
+        "text": "            if type_name == \"datetime\":"
+      },
+      {
+        "line": 682,
+        "text": "                return datetime.fromisoformat(value[\"value\"])"
+      },
+      {
+        "line": 683,
+        "text": ""
+      },
+      {
+        "line": 684,
+        "text": "            # Handle set"
+      },
+      {
+        "line": 685,
+        "text": "            if type_name == \"set\":"
+      },
+      {
+        "line": 686,
+        "text": "                return set(value[\"values\"])"
+      },
+      {
+        "line": 687,
+        "text": ""
+      },
+      {
+        "line": 688,
+        "text": "            # Handle callable placeholder"
+      },
+      {
+        "line": 689,
+        "text": "            if type_name == \"callable\":"
+      },
+      {
+        "line": 690,
+        "text": "                logger.warning("
+      },
+      {
+        "line": 691,
+        "text": "                    f\"Cannot deserialize callable '{value.get('name', 'unknown')}'. \""
+      },
+      {
+        "line": 692,
+        "text": "                    \"Callables must be provided at runtime.\""
+      },
+      {
+        "line": 693,
+        "text": "                )"
+      },
+      {
+        "line": 694,
+        "text": "                return None"
+      },
+      {
+        "line": 695,
+        "text": ""
+      },
+      {
+        "line": 696,
+        "text": "            # Look up in type registry"
+      },
+      {
+        "line": 697,
+        "text": "            registered_cls = get_registered_type(type_name)"
+      },
+      {
+        "line": 698,
+        "text": "            if registered_cls:"
+      },
+      {
+        "line": 699,
+        "text": "                data = {k: v for k, v in value.items() if k != \"type\"}"
+      },
+      {
+        "line": 700,
+        "text": "                return from_dict(data, registered_cls)"
+      },
+      {
+        "line": 701,
+        "text": ""
+      },
+      {
+        "line": 702,
+        "text": "            # If we have a target type hint, try to use it"
+      },
+      {
+        "line": 703,
+        "text": "            if target_type:"
+      },
+      {
+        "line": 704,
+        "text": "                target_type = _resolve_union_type(target_type, value)"
+      },
+      {
+        "line": 705,
+        "text": "                data = {k: v for k, v in value.items() if k != \"type\"}"
+      },
+      {
+        "line": 706,
+        "text": "                if not _is_union_type(target_type):"
+      },
+      {
+        "line": 707,
+        "text": "                    return from_dict(data, target_type)"
+      },
+      {
+        "line": 708,
+        "text": ""
+      },
+      {
+        "line": 709,
+        "text": "            # Return the dict as-is if we can't resolve the type"
+      },
+      {
+        "line": 710,
+        "text": "            logger.warning(f\"Unknown type '{type_name}' during deserialization\")"
+      },
+      {
+        "line": 711,
+        "text": "            return {k: v for k, v in value.items() if k != \"type\"}"
+      },
+      {
+        "line": 712,
+        "text": ""
+      },
+      {
+        "line": 713,
+        "text": "        # No explicit type - try to infer from content"
+      },
+      {
+        "line": 714,
+        "text": "        inferred_type = _infer_type_from_content(value, field_name)"
+      },
+      {
+        "line": 715,
+        "text": ""
+      },
+      {
+        "line": 716,
+        "text": "        # Special handling for schedule fields"
+      },
+      {
+        "line": 717,
+        "text": "        if ("
+      },
+      {
+        "line": 718,
+        "text": "            field_name in (\"start_schedule\", \"stop_schedule\", \"restart_schedule\")"
+      },
+      {
+        "line": 719,
+        "text": "            and not inferred_type"
+      },
+      {
+        "line": 720,
+        "text": "        ):"
+      },
+      {
+        "line": 721,
+        "text": "            inferred_type = _infer_schedule_type(value)"
+      },
+      {
+        "line": 722,
+        "text": ""
+      },
+      {
+        "line": 723,
+        "text": "        if inferred_type:"
+      },
+      {
+        "line": 724,
+        "text": "            registered_cls = get_registered_type(inferred_type)"
+      },
+      {
+        "line": 725,
+        "text": "            if registered_cls:"
+      },
+      {
+        "line": 726,
+        "text": "                return from_dict(value, registered_cls)"
+      },
+      {
+        "line": 727,
+        "text": ""
+      },
+      {
+        "line": 728,
+        "text": "        # If we have a target type hint, use it"
+      },
+      {
+        "line": 729,
+        "text": "        if target_type and target_type is not NoneType:"
+      },
+      {
+        "line": 730,
+        "text": "            target_type = _resolve_union_type(target_type, value)"
+      },
+      {
+        "line": 731,
+        "text": "            # Don't try to instantiate Union types directly"
+      },
+      {
+        "line": 732,
+        "text": "            if not _is_union_type(target_type):"
+      },
+      {
+        "line": 733,
+        "text": "                try:"
+      },
+      {
+        "line": 734,
+        "text": "                    return from_dict(value, target_type)"
+      },
+      {
+        "line": 735,
+        "text": "                except (TypeError, ValueError):"
+      },
+      {
+        "line": 736,
+        "text": "                    pass"
+      },
+      {
+        "line": 737,
+        "text": ""
+      },
+      {
+        "line": 738,
+        "text": "        # Return as plain dict with recursively deserialized values"
+      },
+      {
+        "line": 739,
+        "text": "        return {k: _deserialize_value(v) for k, v in value.items()}"
+      },
+      {
+        "line": 740,
+        "text": ""
+      },
+      {
+        "line": 741,
+        "text": "    # Handle lists"
+      },
+      {
+        "line": 742,
+        "text": "    if isinstance(value, list):"
+      },
+      {
+        "line": 743,
+        "text": "        # Get element type from target_type if available"
+      },
+      {
+        "line": 744,
+        "text": "        element_type = _sequence_element_type(target_type) if target_type else None"
+      },
+      {
+        "line": 745,
+        "text": ""
+      },
+      {
+        "line": 746,
+        "text": "        # For schedule and volume lists, pass field_name for type inference"
+      },
+      {
+        "line": 747,
+        "text": "        if field_name in ("
+      },
+      {
+        "line": 748,
+        "text": "            \"start_schedule\","
+      },
+      {
+        "line": 749,
+        "text": "            \"stop_schedule\","
+      },
+      {
+        "line": 750,
+        "text": "            \"restart_schedule\","
+      },
+      {
+        "line": 751,
+        "text": "            \"volumes\","
+      },
+      {
+        "line": 752,
+        "text": "            \"ulimits\","
+      },
+      {
+        "line": 753,
+        "text": "        ):"
+      },
+      {
+        "line": 754,
+        "text": "            return [_deserialize_value(v, element_type, field_name) for v in value]"
+      },
+      {
+        "line": 755,
+        "text": ""
+      },
+      {
+        "line": 756,
+        "text": "        return [_deserialize_value(v, element_type) for v in value]"
+      },
+      {
+        "line": 757,
+        "text": ""
+      },
+      {
+        "line": 758,
+        "text": "    # Primitives pass through"
+      },
+      {
+        "line": 759,
+        "text": "    return value"
+      },
+      {
+        "line": 760,
+        "text": ""
+      },
+      {
+        "line": 761,
+        "text": ""
+      },
+      {
+        "line": 762,
+        "text": "def _get_field_type(cls: Type, field_name: str) -> Optional[Type]:"
+      },
+      {
+        "line": 763,
+        "text": "    \"\"\"Get the type annotation for a field on a class.\"\"\""
+      },
+      {
+        "line": 764,
+        "text": "    if is_dataclass(cls):"
+      },
+      {
+        "line": 765,
+        "text": "        for field in fields(cls):"
+      },
+      {
+        "line": 766,
+        "text": "            if field.name == field_name:"
+      },
+      {
+        "line": 767,
+        "text": "                return field.type"
+      },
+      {
+        "line": 768,
+        "text": "    elif _is_pydantic_model(cls):"
+      },
+      {
+        "line": 769,
+        "text": "        model_fields = cls.model_fields"
+      },
+      {
+        "line": 770,
+        "text": "        if field_name in model_fields:"
+      },
+      {
+        "line": 771,
+        "text": "            return model_fields[field_name].annotation"
+      },
+      {
+        "line": 772,
+        "text": "    return None"
+      },
+      {
+        "line": 773,
+        "text": ""
+      },
+      {
+        "line": 774,
+        "text": ""
+      },
+      {
+        "line": 775,
+        "text": "def to_dict(obj: Any, include_none: bool = False) -> Dict[str, Any]:"
+      },
+      {
+        "line": 776,
+        "text": "    \"\"\"Convert an object to a dictionary representation."
+      },
+      {
+        "line": 777,
+        "text": ""
+      },
+      {
+        "line": 778,
+        "text": "    Args:"
+      },
+      {
+        "line": 779,
+        "text": "        obj: The object to serialize."
+      },
+      {
+        "line": 780,
+        "text": "        include_none: Whether to include None values."
+      },
+      {
+        "line": 781,
+        "text": ""
+      },
+      {
+        "line": 782,
+        "text": "    Returns:"
+      },
+      {
+        "line": 783,
+        "text": "        A dictionary representation of the object."
+      },
+      {
+        "line": 784,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 785,
+        "text": "    return _serialize_value(obj, include_none)"
+      },
+      {
+        "line": 786,
+        "text": ""
+      },
+      {
+        "line": 787,
+        "text": ""
+      },
+      {
+        "line": 788,
+        "text": "def from_dict(data: Dict[str, Any], cls: Type[T]) -> T:"
+      },
+      {
+        "line": 789,
+        "text": "    \"\"\"Create an object from a dictionary representation."
+      },
+      {
+        "line": 790,
+        "text": ""
+      },
+      {
+        "line": 791,
+        "text": "    Args:"
+      },
+      {
+        "line": 792,
+        "text": "        data: The dictionary data."
+      },
+      {
+        "line": 793,
+        "text": "        cls: The class to instantiate."
+      },
+      {
+        "line": 794,
+        "text": ""
+      },
+      {
+        "line": 795,
+        "text": "    Returns:"
+      },
+      {
+        "line": 796,
+        "text": "        An instance of the specified class."
+      },
+      {
+        "line": 797,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 798,
+        "text": "    if not isinstance(data, dict):"
+      },
+      {
+        "line": 799,
+        "text": "        raise TypeError(f\"Expected dict, got {type(data).__name__}\")"
+      },
+      {
+        "line": 800,
+        "text": ""
+      },
+      {
+        "line": 801,
+        "text": "    # Remove type if present (already used for type dispatch)"
+      },
+      {
+        "line": 802,
+        "text": "    data = {k: v for k, v in data.items() if k != \"type\"}"
+      },
+      {
+        "line": 803,
+        "text": ""
+      },
+      {
+        "line": 804,
+        "text": "    # Handle Pydantic models"
+      },
+      {
+        "line": 805,
+        "text": "    if _is_pydantic_model(cls):"
+      },
+      {
+        "line": 806,
+        "text": "        # Deserialize nested values based on field types"
+      },
+      {
+        "line": 807,
+        "text": "        processed_data = {}"
+      },
+      {
+        "line": 808,
+        "text": "        for key, value in data.items():"
+      },
+      {
+        "line": 809,
+        "text": "            field_type = _get_field_type(cls, key)"
+      },
+      {
+        "line": 810,
+        "text": "            # Apply human-readable parsing first (memory sizes, time durations)"
+      },
+      {
+        "line": 811,
+        "text": "            value = _maybe_parse_value(value, key)"
+      },
+      {
+        "line": 812,
+        "text": "            processed_data[key] = _deserialize_value(value, field_type, field_name=key)"
+      },
+      {
+        "line": 813,
+        "text": "        return cls(**processed_data)"
+      },
+      {
+        "line": 814,
+        "text": ""
+      },
+      {
+        "line": 815,
+        "text": "    # Handle dataclasses"
+      },
+      {
+        "line": 816,
+        "text": "    if is_dataclass(cls):"
+      },
+      {
+        "line": 817,
+        "text": "        field_names = {field.name for field in fields(cls)}"
+      },
+      {
+        "line": 818,
+        "text": "        unknown_fields = sorted(set(data) - field_names)"
+      },
+      {
+        "line": 819,
+        "text": "        if unknown_fields:"
+      },
+      {
+        "line": 820,
+        "text": "            unknown = \", \".join(unknown_fields)"
+      },
+      {
+        "line": 821,
+        "text": "            raise ValueError(f\"Unknown field(s) for {cls.__name__}: {unknown}\")"
+      },
+      {
+        "line": 822,
+        "text": ""
+      },
+      {
+        "line": 823,
+        "text": "        processed_data = {}"
+      },
+      {
+        "line": 824,
+        "text": "        for field in fields(cls):"
+      },
+      {
+        "line": 825,
+        "text": "            if field.name in data:"
+      },
+      {
+        "line": 826,
+        "text": "                value = data[field.name]"
+      },
+      {
+        "line": 827,
+        "text": "                field_type = field.type"
+      },
+      {
+        "line": 828,
+        "text": ""
+      },
+      {
+        "line": 829,
+        "text": "                # Apply human-readable parsing first (memory sizes, time durations)"
+      },
+      {
+        "line": 830,
+        "text": "                value = _maybe_parse_value(value, field.name)"
+      },
+      {
+        "line": 831,
+        "text": ""
+      },
+      {
+        "line": 832,
+        "text": "                field_type = _resolve_union_type(field_type, value)"
+      },
+      {
+        "line": 833,
+        "text": ""
+      },
+      {
+        "line": 834,
+        "text": "                processed_data[field.name] = _deserialize_value("
+      },
+      {
+        "line": 835,
+        "text": "                    value, field_type, field_name=field.name"
+      },
+      {
+        "line": 836,
+        "text": "                )"
+      },
+      {
+        "line": 837,
+        "text": "            elif field.default is not MISSING or field.default_factory is not MISSING:"
+      },
+      {
+        "line": 838,
+        "text": "                # Let the dataclass constructor apply defaults."
+      },
+      {
+        "line": 839,
+        "text": "                continue"
+      },
+      {
+        "line": 840,
+        "text": ""
+      },
+      {
+        "line": 841,
+        "text": "        return cls(**processed_data)"
+      },
+      {
+        "line": 842,
+        "text": ""
+      },
+      {
+        "line": 843,
+        "text": "    # For regular classes, just pass the data"
+      },
+      {
+        "line": 844,
+        "text": "    return cls(**data)"
+      },
+      {
+        "line": 845,
+        "text": ""
+      },
+      {
+        "line": 846,
+        "text": ""
+      },
+      {
+        "line": 847,
+        "text": "def serialize("
+      },
+      {
+        "line": 848,
+        "text": "    obj: Any,"
+      },
+      {
+        "line": 849,
+        "text": "    format: Literal[\"json\", \"yaml\"] = \"json\","
+      },
+      {
+        "line": 850,
+        "text": "    indent: int = 2,"
+      },
+      {
+        "line": 851,
+        "text": "    include_none: bool = False,"
+      },
+      {
+        "line": 852,
+        "text": ") -> str:"
+      },
+      {
+        "line": 853,
+        "text": "    \"\"\"Serialize an object to JSON or YAML string."
+      },
+      {
+        "line": 854,
+        "text": ""
+      },
+      {
+        "line": 855,
+        "text": "    Args:"
+      },
+      {
+        "line": 856,
+        "text": "        obj: The object to serialize."
+      },
+      {
+        "line": 857,
+        "text": "        format: Output format (\"json\" or \"yaml\")."
+      },
+      {
+        "line": 858,
+        "text": "        indent: Indentation level for pretty printing."
+      },
+      {
+        "line": 859,
+        "text": "        include_none: Whether to include None values."
+      },
+      {
+        "line": 860,
+        "text": ""
+      },
+      {
+        "line": 861,
+        "text": "    Returns:"
+      },
+      {
+        "line": 862,
+        "text": "        The serialized string."
+      },
+      {
+        "line": 863,
+        "text": ""
+      },
+      {
+        "line": 864,
+        "text": "    Raises:"
+      },
+      {
+        "line": 865,
+        "text": "        ValueError: If an unknown format is specified."
+      },
+      {
+        "line": 866,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 867,
+        "text": "    data = to_dict(obj, include_none)"
+      },
+      {
+        "line": 868,
+        "text": ""
+      },
+      {
+        "line": 869,
+        "text": "    if format == \"json\":"
+      },
+      {
+        "line": 870,
+        "text": "        return json.dumps(data, indent=indent, default=str)"
+      },
+      {
+        "line": 871,
+        "text": "    elif format == \"yaml\":"
+      },
+      {
+        "line": 872,
+        "text": "        return yaml.dump("
+      },
+      {
+        "line": 873,
+        "text": "            data, default_flow_style=False, allow_unicode=True, sort_keys=False"
+      },
+      {
+        "line": 874,
+        "text": "        )"
+      },
+      {
+        "line": 875,
+        "text": "    else:"
+      },
+      {
+        "line": 876,
+        "text": "        raise ValueError(f\"Unknown format: {format}\")"
+      },
+      {
+        "line": 877,
+        "text": ""
+      },
+      {
+        "line": 878,
+        "text": ""
+      },
+      {
+        "line": 879,
+        "text": "def deserialize(data: str, cls: Type[T], format: Literal[\"json\", \"yaml\"] = \"json\") -> T:"
+      },
+      {
+        "line": 880,
+        "text": "    \"\"\"Deserialize a JSON or YAML string to an object."
+      },
+      {
+        "line": 881,
+        "text": ""
+      },
+      {
+        "line": 882,
+        "text": "    Args:"
+      },
+      {
+        "line": 883,
+        "text": "        data: The serialized string."
+      },
+      {
+        "line": 884,
+        "text": "        cls: The class to deserialize to."
+      },
+      {
+        "line": 885,
+        "text": "        format: Input format (\"json\" or \"yaml\")."
+      },
+      {
+        "line": 886,
+        "text": ""
+      },
+      {
+        "line": 887,
+        "text": "    Returns:"
+      },
+      {
+        "line": 888,
+        "text": "        An instance of the specified class."
+      },
+      {
+        "line": 889,
+        "text": ""
+      },
+      {
+        "line": 890,
+        "text": "    Raises:"
+      },
+      {
+        "line": 891,
+        "text": "        ValueError: If an unknown format is specified."
+      },
+      {
+        "line": 892,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 893,
+        "text": "    if format == \"json\":"
+      },
+      {
+        "line": 894,
+        "text": "        parsed = json.loads(data)"
+      },
+      {
+        "line": 895,
+        "text": "    elif format == \"yaml\":"
+      },
+      {
+        "line": 896,
+        "text": "        parsed = yaml.safe_load(data)"
+      },
+      {
+        "line": 897,
+        "text": "    else:"
+      },
+      {
+        "line": 898,
+        "text": "        raise ValueError(f\"Unknown format: {format}\")"
+      },
+      {
+        "line": 899,
+        "text": ""
+      },
+      {
+        "line": 900,
+        "text": "    if not isinstance(parsed, Mapping):"
+      },
+      {
+        "line": 901,
+        "text": "        raise ValueError("
+      },
+      {
+        "line": 902,
+        "text": "            f\"Serialized {cls.__name__} payload must be a mapping, got {type(parsed).__name__}\""
+      },
+      {
+        "line": 903,
+        "text": "        )"
+      },
+      {
+        "line": 904,
+        "text": ""
+      },
+      {
+        "line": 905,
+        "text": "    return from_dict(parsed, cls)"
+      },
+      {
+        "line": 906,
+        "text": ""
+      },
+      {
+        "line": 907,
+        "text": ""
+      },
+      {
+        "line": 908,
+        "text": "def serialize_to_file("
+      },
+      {
+        "line": 909,
+        "text": "    obj: Any,"
+      },
+      {
+        "line": 910,
+        "text": "    path: Union[str, Path],"
+      },
+      {
+        "line": 911,
+        "text": "    format: Optional[Literal[\"json\", \"yaml\"]] = None,"
+      },
+      {
+        "line": 912,
+        "text": "    indent: int = 2,"
+      },
+      {
+        "line": 913,
+        "text": "    include_none: bool = False,"
+      },
+      {
+        "line": 914,
+        "text": ") -> None:"
+      },
+      {
+        "line": 915,
+        "text": "    \"\"\"Serialize an object to a file."
+      },
+      {
+        "line": 916,
+        "text": ""
+      },
+      {
+        "line": 917,
+        "text": "    Args:"
+      },
+      {
+        "line": 918,
+        "text": "        obj: The object to serialize."
+      },
+      {
+        "line": 919,
+        "text": "        path: The file path."
+      },
+      {
+        "line": 920,
+        "text": "        format: Output format. If None, inferred from file extension."
+      },
+      {
+        "line": 921,
+        "text": "        indent: Indentation level for pretty printing."
+      },
+      {
+        "line": 922,
+        "text": "        include_none: Whether to include None values."
+      },
+      {
+        "line": 923,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 924,
+        "text": "    path = Path(path)"
+      },
+      {
+        "line": 925,
+        "text": ""
+      },
+      {
+        "line": 926,
+        "text": "    if format is None:"
+      },
+      {
+        "line": 927,
+        "text": "        if path.suffix in (\".yaml\", \".yml\"):"
+      },
+      {
+        "line": 928,
+        "text": "            format = \"yaml\""
+      },
+      {
+        "line": 929,
+        "text": "        else:"
+      },
+      {
+        "line": 930,
+        "text": "            format = \"json\""
+      },
+      {
+        "line": 931,
+        "text": ""
+      },
+      {
+        "line": 932,
+        "text": "    content = serialize(obj, format=format, indent=indent, include_none=include_none)"
+      },
+      {
+        "line": 933,
+        "text": "    secure_write_text(path, content)"
+      },
+      {
+        "line": 934,
+        "text": ""
+      },
+      {
+        "line": 935,
+        "text": ""
+      },
+      {
+        "line": 936,
+        "text": "def deserialize_from_file("
+      },
+      {
+        "line": 937,
+        "text": "    path: Union[str, Path],"
+      },
+      {
+        "line": 938,
+        "text": "    cls: Type[T],"
+      },
+      {
+        "line": 939,
+        "text": "    format: Optional[Literal[\"json\", \"yaml\"]] = None,"
+      },
+      {
+        "line": 940,
+        "text": ") -> T:"
+      },
+      {
+        "line": 941,
+        "text": "    \"\"\"Deserialize an object from a file."
+      },
+      {
+        "line": 942,
+        "text": ""
+      },
+      {
+        "line": 943,
+        "text": "    Args:"
+      },
+      {
+        "line": 944,
+        "text": "        path: The file path."
+      },
+      {
+        "line": 945,
+        "text": "        cls: The class to deserialize to."
+      },
+      {
+        "line": 946,
+        "text": "        format: Input format. If None, inferred from file extension."
+      },
+      {
+        "line": 947,
+        "text": ""
+      },
+      {
+        "line": 948,
+        "text": "    Returns:"
+      },
+      {
+        "line": 949,
+        "text": "        An instance of the specified class."
+      },
+      {
+        "line": 950,
+        "text": "    \"\"\""
+      },
+      {
+        "line": 951,
+        "text": "    path = Path(path)"
+      },
+      {
+        "line": 952,
+        "text": ""
+      },
+      {
+        "line": 953,
+        "text": "    if format is None:"
+      },
+      {
+        "line": 954,
+        "text": "        if path.suffix in (\".yaml\", \".yml\"):"
+      },
+      {
+        "line": 955,
+        "text": "            format = \"yaml\""
+      },
+      {
+        "line": 956,
+        "text": "        else:"
+      },
+      {
+        "line": 957,
+        "text": "            format = \"json\""
+      },
+      {
+        "line": 958,
+        "text": ""
+      },
+      {
+        "line": 959,
+        "text": "    content = path.read_text()"
+      },
+      {
+        "line": 960,
+        "text": "    return deserialize(content, cls, format=format)"
+      },
+      {
+        "line": 961,
+        "text": ""
+      },
+      {
+        "line": 962,
+        "text": ""
+      },
+      {
+        "line": 963,
+        "text": "# Register all taskflows types for polymorphic deserialization"
+      },
+      {
+        "line": 964,
+        "text": "def _register_taskflows_types():"
+      },
+      {
+        "line": 965,
+        "text": "    \"\"\"Register all taskflows types in the type registry.\"\"\""
+      },
+      {
+        "line": 966,
+        "text": "    # Import here to avoid circular imports"
+      },
+      {
+        "line": 967,
+        "text": "    from taskflows.service import Venv, Service, RestartPolicy"
+      },
+      {
+        "line": 968,
+        "text": "    from taskflows.docker import ("
+      },
+      {
+        "line": 969,
+        "text": "        DockerContainer,"
+      },
+      {
+        "line": 970,
+        "text": "        DockerImage,"
+      },
+      {
+        "line": 971,
+        "text": "        Volume,"
+      },
+      {
+        "line": 972,
+        "text": "        Ulimit,"
+      },
+      {
+        "line": 973,
+        "text": "        ContainerLimits,"
+      },
+      {
+        "line": 974,
+        "text": "    )"
+      },
+      {
+        "line": 975,
+        "text": "    from taskflows.schedule import Calendar, Periodic"
+      },
+      {
+        "line": 976,
+        "text": "    from taskflows.constraints import ("
+      },
+      {
+        "line": 977,
+        "text": "        CgroupConfig,"
+      },
+      {
+        "line": 978,
+        "text": "        HardwareConstraint,"
+      },
+      {
+        "line": 979,
+        "text": "        Memory,"
+      },
+      {
+        "line": 980,
+        "text": "        CPUs,"
+      },
+      {
+        "line": 981,
+        "text": "        SystemLoadConstraint,"
+      },
+      {
+        "line": 982,
+        "text": "        MemoryPressure,"
+      },
+      {
+        "line": 983,
+        "text": "        CPUPressure,"
+      },
+      {
+        "line": 984,
+        "text": "        IOPressure,"
+      },
+      {
+        "line": 985,
+        "text": "    )"
+      },
+      {
+        "line": 986,
+        "text": ""
+      },
+      {
+        "line": 987,
+        "text": "    # Service types"
+      },
+      {
+        "line": 988,
+        "text": "    register_type(Venv)"
+      },
+      {
+        "line": 989,
+        "text": "    register_type(Service)"
+      },
+      {
+        "line": 990,
+        "text": "    register_type(RestartPolicy)"
+      },
+      {
+        "line": 991,
+        "text": ""
+      },
+      {
+        "line": 992,
+        "text": "    # Docker types"
+      },
+      {
+        "line": 993,
+        "text": "    register_type(DockerContainer)"
+      },
+      {
+        "line": 994,
+        "text": "    register_type(DockerImage)"
+      },
+      {
+        "line": 995,
+        "text": "    register_type(Volume)"
+      },
+      {
+        "line": 996,
+        "text": "    register_type(Ulimit)"
+      },
+      {
+        "line": 997,
+        "text": "    register_type(ContainerLimits)"
+      },
+      {
+        "line": 998,
+        "text": ""
+      },
+      {
+        "line": 999,
+        "text": "    # Schedule types"
+      },
+      {
+        "line": 1000,
+        "text": "    register_type(Calendar)"
+      },
+      {
+        "line": 1001,
+        "text": "    register_type(Periodic)"
+      },
+      {
+        "line": 1002,
+        "text": ""
+      },
+      {
+        "line": 1003,
+        "text": "    # Constraint types"
+      },
+      {
+        "line": 1004,
+        "text": "    register_type(CgroupConfig)"
+      },
+      {
+        "line": 1005,
+        "text": "    register_type(HardwareConstraint)"
+      },
+      {
+        "line": 1006,
+        "text": "    register_type(Memory)"
+      },
+      {
+        "line": 1007,
+        "text": "    register_type(CPUs)"
+      },
+      {
+        "line": 1008,
+        "text": "    register_type(SystemLoadConstraint)"
+      },
+      {
+        "line": 1009,
+        "text": "    register_type(MemoryPressure)"
+      },
+      {
+        "line": 1010,
+        "text": "    register_type(CPUPressure)"
+      },
+      {
+        "line": 1011,
+        "text": "    register_type(IOPressure)"
+      },
+      {
+        "line": 1012,
+        "text": ""
+      },
+      {
+        "line": 1013,
+        "text": ""
+      },
+      {
+        "line": 1014,
+        "text": "# Register types on import"
+      },
+      {
+        "line": 1015,
+        "text": "_register_taskflows_types()"
+      },
+      {
+        "line": 1016,
+        "text": ""
+      },
+      {
+        "line": 1017,
+        "text": ""
+      },
+      {
+        "line": 1018,
+        "text": "def load_services_from_yaml(path: Union[str, Path]) -> List[\"Service\"]:"
+      },
+      {
+        "line": 1019,
+        "text": "    \"\"\"Load multiple services from a YAML file."
+      }
+    ],
+    "mime_type": "text/x-python",
+    "numbered_content": "260\t        return int(value)\n261\t\n262\t    if not isinstance(value, str):\n263\t        raise ValueError(\n264\t            f\"Cannot parse time duration from {type(value).__name__}: {value}\"\n265\t        )\n266\t\n267\t    match = _TIME_PATTERN.match(value)\n268\t    if not match:\n269\t        raise ValueError(f\"Invalid time duration format: {value}\")\n270\t\n271\t    number_str, unit = match.groups()\n272\t    number = float(number_str)\n273\t\n274\t    if unit is None:\n275\t        # No unit specified, assume seconds\n276\t        return int(number)\n277\t\n278\t    unit_lower = unit.lower()\n279\t    if unit_lower not in _TIME_UNITS:\n280\t        raise ValueError(\n281\t            f\"Unknown time unit '{unit}'. Valid units: {', '.join(sorted(set(_TIME_UNITS.keys())))}\"\n282\t        )\n283\t\n284\t    return int(number * _TIME_UNITS[unit_lower])\n285\t\n286\t\n287\tdef parse_percent(value: Any) -> int:\n288\t    \"\"\"Parse a whole percentage value, accepting forms like 60, \"60\", and \"60%\".\"\"\"\n289\t    if isinstance(value, bool):\n290\t        raise ValueError(\"Percent must be a number\")\n291\t    if isinstance(value, int):\n292\t        return value\n293\t    if isinstance(value, float):\n294\t        if not value.is_integer():\n295\t            raise ValueError(\"Percent must be a whole number\")\n296\t        return int(value)\n297\t    if not isinstance(value, str):\n298\t        raise ValueError(f\"Cannot parse percent from {type(value).__name__}: {value}\")\n299\t\n300\t    match = _PERCENT_PATTERN.match(value)\n301\t    if not match:\n302\t        raise ValueError(f\"Invalid percent format: {value}\")\n303\t    number = float(match.group(1))\n304\t    if not number.is_integer():\n305\t        raise ValueError(\"Percent must be a whole number\")\n306\t    return int(number)\n307\t\n308\t\n309\tdef _maybe_parse_value(value: Any, field_name: str) -> Any:\n310\t    \"\"\"Parse a value if it matches a known field that needs conversion.\n311\t\n312\t    Args:\n313\t        value: The raw value.\n314\t        field_name: The field name for context.\n315\t\n316\t    Returns:\n317\t        Parsed value, or original if no parsing needed.\n318\t    \"\"\"\n319\t    if value is None:\n320\t        return None\n321\t\n322\t    # Check if this field should be parsed as memory\n323\t    if field_name in _MEMORY_FIELDS:\n324\t        try:\n325\t            return parse_memory_size(value)\n326\t        except (ValueError, TypeError):\n327\t            # If parsing fails, return original value\n328\t            # (it might already be an int, or might be something else)\n329\t            return value\n330\t\n331\t    # Check if this field should be parsed as time\n332\t    if field_name in _TIME_FIELDS:\n333\t        try:\n334\t            return parse_time_duration(value)\n335\t        except (ValueError, TypeError):\n336\t            return value\n337\t\n338\t    if field_name in _PERCENT_FIELDS:\n339\t        try:\n340\t            return parse_percent(value)\n341\t        except (ValueError, TypeError):\n342\t            return value\n343\t\n344\t    return value\n345\t\n346\t\n347\tT = TypeVar(\"T\")\n348\t\n349\t\n350\t# Type registry for polymorphic deserialization\n351\t_TYPE_REGISTRY: Dict[str, Type] = {}\n352\t\n353\t# Field name to type mapping for automatic inference\n354\t_FIELD_TYPE_MAP: Dict[str, str] = {\n355\t    \"restart_policy\": \"RestartPolicy\",\n356\t    \"cgroup_config\": \"CgroupConfig\",\n357\t    \"container_limits\": \"ContainerLimits\",\n358\t    \"start_schedule\": \"Schedule\",\n359\t    \"stop_schedule\": \"Schedule\",\n360\t    \"restart_schedule\": \"Schedule\",\n361\t    \"ulimits\": \"Ulimit\",\n362\t    \"volumes\": \"Volume\",\n363\t}\n364\t\n365\t# Keys that uniquely identify a type (for content-based inference)\n366\t_TYPE_SIGNATURE_KEYS: Dict[frozenset, str] = {\n367\t    # Venv: has env_name\n368\t    frozenset([\"env_name\"]): \"Venv\",\n369\t    # DockerContainer: has image\n370\t    frozenset([\"image\"]): \"DockerContainer\",\n371\t    # DockerImage: has tag/path\n372\t    frozenset([\"tag\", \"path\"]): \"DockerImage\",\n373\t    frozenset([\"tag\"]): \"DockerImage\",\n374\t    # ContainerLimits: Docker build resource controls\n375\t    frozenset([\"memory\", \"memswap\"]): \"ContainerLimits\",\n376\t    frozenset([\"cpushares\"]): \"ContainerLimits\",\n377\t    frozenset([\"cpusetcpus\"]): \"ContainerLimits\",\n378\t    # Calendar: has schedule (string pattern)\n379\t    frozenset([\"schedule\"]): \"Calendar\",\n380\t    # Periodic: has period and start_on\n381\t    frozenset([\"period\", \"start_on\"]): \"Periodic\",\n382\t    frozenset([\"period\"]): \"Periodic\",\n383\t    # Volume: has host_path and container_path\n384\t    frozenset([\"host_path\", \"container_path\"]): \"Volume\",\n385\t    # RestartPolicy: has condition (when it's a dict)\n386\t    frozenset([\"condition\"]): \"RestartPolicy\",\n387\t    # Memory constraint\n388\t    frozenset([\"amount\", \"constraint\"]): \"Memory\",\n389\t    # CPUPressure constraint\n390\t    frozenset([\"max_percent\", \"timespan\"]): \"CPUPressure\",\n391\t    frozenset([\"max_percent\"]): \"CPUPressure\",\n392\t    # CgroupConfig: has memory_limit or cpu_quota (common cgroup fields)\n393\t    frozenset([\"memory_limit\"]): \"CgroupConfig\",\n394\t    frozenset([\"cpu_quota\"]): \"CgroupConfig\",\n395\t    frozenset([\"cpu_shares\"]): \"CgroupConfig\",\n396\t    frozenset([\"pids_limit\"]): \"CgroupConfig\",\n397\t    frozenset([\"oom_policy\"]): \"CgroupConfig\",\n398\t    frozenset([\"managed_oom_swap\"]): \"CgroupConfig\",\n399\t    frozenset([\"managed_oom_memory_pressure\"]): \"CgroupConfig\",\n400\t    frozenset([\"managed_oom_memory_pressure_limit\"]): \"CgroupConfig\",\n401\t    frozenset([\"managed_oom_preference\"]): \"CgroupConfig\",\n402\t}\n403\t\n404\t\n405\tdef _infer_type_from_content(\n406\t    data: Dict[str, Any], field_name: Optional[str] = None\n407\t) -> Optional[str]:\n408\t    \"\"\"Infer the type from dict content based on its keys.\n409\t\n410\t    Args:\n411\t        data: The dictionary to analyze.\n412\t        field_name: Optional field name for context.\n413\t\n414\t    Returns:\n415\t        The inferred type name, or None if can't be determined.\n416\t    \"\"\"\n417\t    if not isinstance(data, dict):\n418\t        return None\n419\t\n420\t    keys = set(data.keys()) - {\"type\"}  # Exclude type key itself\n421\t\n422\t    # Check for signature keys (most specific first - larger sets)\n423\t    for signature_keys, type_name in sorted(\n424\t        _TYPE_SIGNATURE_KEYS.items(), key=lambda x: -len(x[0])\n425\t    ):\n426\t        if signature_keys <= keys:\n427\t            return type_name\n428\t\n429\t    # Use field name to infer type if content-based inference fails\n430\t    if field_name and field_name in _FIELD_TYPE_MAP:\n431\t        return _FIELD_TYPE_MAP[field_name]\n432\t\n433\t    return None\n434\t\n435\t\n436\tdef _infer_schedule_type(value: Any) -> Optional[str]:\n437\t    \"\"\"Infer schedule type from value.\n438\t\n439\t    - String with day/time pattern -> Calendar\n440\t    - Dict with 'schedule' key -> Calendar\n441\t    - Dict with 'period' key -> Periodic\n442\t    \"\"\"\n443\t    if isinstance(value, str):\n444\t        # A string schedule is always Calendar format\n445\t        return \"Calendar\"\n446\t\n447\t    if isinstance(value, dict):\n448\t        if \"schedule\" in value:\n449\t            return \"Calendar\"\n450\t        if \"period\" in value:\n451\t            return \"Periodic\"\n452\t\n453\t    return None\n454\t\n455\t\n456\tdef register_type(cls: Type) -> Type:\n457\t    \"\"\"Register a type for polymorphic deserialization.\n458\t\n459\t    Args:\n460\t        cls: The class to register.\n461\t\n462\t    Returns:\n463\t        The same class (allows use as decorator).\n464\t    \"\"\"\n465\t    _TYPE_REGISTRY[cls.__name__] = cls\n466\t    return cls\n467\t\n468\t\n469\tdef get_registered_type(name: str) -> Optional[Type]:\n470\t    \"\"\"Get a registered type by name.\n471\t\n472\t    Args:\n473\t        name: The class name.\n474\t\n475\t    Returns:\n476\t        The registered class, or None if not found.\n477\t    \"\"\"\n478\t    return _TYPE_REGISTRY.get(name)\n479\t\n480\t\n481\tdef _get_type_name(obj: Any) -> str:\n482\t    \"\"\"Get the type name for an object.\"\"\"\n483\t    return type(obj).__name__\n484\t\n485\t\n486\tdef _is_pydantic_model(cls: Type) -> bool:\n487\t    \"\"\"Check if a class is a Pydantic BaseModel.\"\"\"\n488\t    try:\n489\t        return issubclass(cls, BaseModel)\n490\t    except TypeError:\n491\t        return False\n492\t\n493\t\n494\tdef _is_union_type(annotation: Any) -> bool:\n495\t    \"\"\"Return True for both typing.Union and PEP 604 unions.\"\"\"\n496\t    return get_origin(annotation) in (Union, UnionType)\n497\t\n498\t\n499\tdef _sequence_element_type(annotation: Any) -> Optional[Type]:\n500\t    \"\"\"Return the item type for list-like annotations when available.\"\"\"\n501\t    origin = get_origin(annotation)\n502\t    if origin in (Union, UnionType):\n503\t        for arg in get_args(annotation):\n504\t            element_type = _sequence_element_type(arg)\n505\t            if element_type:\n506\t                return element_type\n507\t    if origin in (list, List, tuple, Sequence, ABCSequence):\n508\t        args = get_args(annotation)\n509\t        if args:\n510\t            return args[0]\n511\t    return None\n512\t\n513\t\n514\tdef _resolve_union_type(annotation: Any, value: Any) -> Any:\n515\t    \"\"\"Choose a concrete type from a union annotation when the data identifies one.\"\"\"\n516\t    if not _is_union_type(annotation):\n517\t        return annotation\n518\t\n519\t    union_args = [arg for arg in get_args(annotation) if arg is not NoneType]\n520\t    if value is None:\n521\t        return NoneType\n522\t    if len(union_args) == 1:\n523\t        return union_args[0]\n524\t\n525\t    if isinstance(value, dict):\n526\t        type_name = value.get(\"type\") or _infer_type_from_content(value)\n527\t        if type_name:\n528\t            for arg in union_args:\n529\t                if getattr(arg, \"__name__\", None) == type_name:\n530\t                    return arg\n531\t        non_primitive_args = [\n532\t            arg\n533\t            for arg in union_args\n534\t            if arg not in (str, int, float, bool, dict, list, Path)\n535\t            and get_origin(arg) is None\n536\t        ]\n537\t        if len(non_primitive_args) == 1:\n538\t            return non_primitive_args[0]\n539\t\n540\t    return annotation\n541\t\n542\t\n543\tdef _serialize_value(value: Any, include_none: bool = False) -> Any:\n544\t    \"\"\"Serialize a single value to a JSON-compatible type.\n545\t\n546\t    Args:\n547\t        value: The value to serialize.\n548\t        include_none: Whether to include None values in dicts.\n549\t\n550\t    Returns:\n551\t        A JSON-compatible representation of the value.\n552\t    \"\"\"\n553\t    if value is None:\n554\t        return None\n555\t\n556\t    # Handle datetime\n557\t    if isinstance(value, datetime):\n558\t        return {\"type\": \"datetime\", \"value\": value.isoformat()}\n559\t\n560\t    # Handle Path\n561\t    if isinstance(value, Path):\n562\t        return str(value)\n563\t\n564\t    # Handle Pydantic models\n565\t    if isinstance(value, BaseModel):\n566\t        data = value.model_dump(mode=\"json\")\n567\t        data[\"type\"] = _get_type_name(value)\n568\t        return _filter_none(data, include_none)\n569\t\n570\t    # Handle dataclasses\n571\t    if is_dataclass(value) and not isinstance(value, type):\n572\t        data = {}\n573\t        data[\"type\"] = _get_type_name(value)\n574\t        for field in fields(value):\n575\t            field_value = getattr(value, field.name)\n576\t            serialized = _serialize_value(field_value, include_none)\n577\t            if include_none or serialized is not None:\n578\t                data[field.name] = serialized\n579\t        return data\n580\t\n581\t    # Handle callables (functions) - store reference only, not actual function\n582\t    if callable(value) and not isinstance(value, type):\n583\t        # We can't serialize arbitrary functions, but we can note their presence\n584\t        return {\"type\": \"callable\", \"name\": getattr(value, \"__name__\", \"<lambda>\")}\n585\t\n586\t    # Handle sequences (but not strings)\n587\t    if isinstance(value, (list, tuple)):\n588\t        return [_serialize_value(v, include_none) for v in value]\n589\t\n590\t    # Handle dicts\n591\t    if isinstance(value, dict):\n592\t        return {k: _serialize_value(v, include_none) for k, v in value.items()}\n593\t\n594\t    # Handle sets\n595\t    if isinstance(value, set):\n596\t        return {\"type\": \"set\", \"values\": list(value)}\n597\t\n598\t    # Primitive types pass through\n599\t    return value\n600\t\n601\t\n602\tdef _filter_none(data: Dict[str, Any], include_none: bool) -> Dict[str, Any]:\n603\t    \"\"\"Filter out None values from a dict if include_none is False.\"\"\"\n604\t    if include_none:\n605\t        return data\n606\t    return {k: v for k, v in data.items() if v is not None}\n607\t\n608\t\n609\tdef _parse_volume_string(value: str) -> Any:\n610\t    \"\"\"Parse a volume string like '/host:/container' or '/host:/container:ro'.\n611\t\n612\t    Supports formats:\n613\t        - \"/host:/container\" -> Volume(host_path=\"/host\", container_path=\"/container\")\n614\t        - \"/host:/container:ro\" -> Volume(host_path=\"/host\", container_path=\"/container\", read_only=True)\n615\t        - \"/host:/container:rw\" -> Volume(host_path=\"/host\", container_path=\"/container\", read_only=False)\n616\t    \"\"\"\n617\t    volume_cls = get_registered_type(\"Volume\")\n618\t    if not volume_cls:\n619\t        return value\n620\t\n621\t    parts = value.rsplit(\":\", 2)\n622\t\n623\t    if len(parts) == 3 and parts[2] in (\"ro\", \"rw\"):\n624\t        # Format: /host:/container:ro or /host:/container:rw\n625\t        host_path = parts[0]\n626\t        container_path = parts[1]\n627\t        read_only = parts[2] == \"ro\"\n628\t    elif len(parts) == 2:\n629\t        # Format: /host:/container\n630\t        host_path = parts[0]\n631\t        container_path = parts[1]\n632\t        read_only = False\n633\t    else:\n634\t        # Can't parse, return as-is\n635\t        return value\n636\t\n637\t    return volume_cls(\n638\t        host_path=host_path, container_path=container_path, read_only=read_only\n639\t    )\n640\t\n641\t\n642\tdef _deserialize_value(\n643\t    value: Any, target_type: Optional[Type] = None, field_name: Optional[str] = None\n644\t) -> Any:\n645\t    \"\"\"Deserialize a value from JSON-compatible format.\n646\t\n647\t    Args:\n648\t        value: The value to deserialize.\n649\t        target_type: Optional type hint for the expected type.\n650\t        field_name: Optional field name for context-based inference.\n651\t\n652\t    Returns:\n653\t        The deserialized Python object.\n654\t    \"\"\"\n655\t    if value is None:\n656\t        return None\n657\t\n658\t    # Handle string values that might need conversion based on field name\n659\t    if isinstance(value, str):\n660\t        # Schedule fields with string values are Calendar schedules\n661\t        if field_name in (\"start_schedule\", \"stop_schedule\", \"restart_schedule\"):\n662\t            calendar_cls = get_registered_type(\"Calendar\")\n663\t            if calendar_cls:\n664\t                return calendar_cls(schedule=value)\n665\t\n666\t        # Volume strings in format \"/host:/container\" or \"/host:/container:ro\"\n667\t        if field_name == \"volumes\" and \":\" in value:\n668\t            volume_cls = get_registered_type(\"Volume\")\n669\t            if volume_cls:\n670\t                return _parse_volume_string(value)\n671\t        # restart_policy as string is just a string, not RestartPolicy object\n672\t        return value\n673\t\n674\t    # Handle dicts\n675\t    if isinstance(value, dict):\n676\t        # Check for explicit type first\n677\t        if \"type\" in value:\n678\t            type_name = value[\"type\"]\n679\t\n680\t            # Handle datetime\n681\t            if type_name == \"datetime\":\n682\t                return datetime.fromisoformat(value[\"value\"])\n683\t\n684\t            # Handle set\n685\t            if type_name == \"set\":\n686\t                return set(value[\"values\"])\n687\t\n688\t            # Handle callable placeholder\n689\t            if type_name == \"callable\":\n690\t                logger.warning(\n691\t                    f\"Cannot deserialize callable '{value.get('name', 'unknown')}'. \"\n692\t                    \"Callables must be provided at runtime.\"\n693\t                )\n694\t                return None\n695\t\n696\t            # Look up in type registry\n697\t            registered_cls = get_registered_type(type_name)\n698\t            if registered_cls:\n699\t                data = {k: v for k, v in value.items() if k != \"type\"}\n700\t                return from_dict(data, registered_cls)\n701\t\n702\t            # If we have a target type hint, try to use it\n703\t            if target_type:\n704\t                target_type = _resolve_union_type(target_type, value)\n705\t                data = {k: v for k, v in value.items() if k != \"type\"}\n706\t                if not _is_union_type(target_type):\n707\t                    return from_dict(data, target_type)\n708\t\n709\t            # Return the dict as-is if we can't resolve the type\n710\t            logger.warning(f\"Unknown type '{type_name}' during deserialization\")\n711\t            return {k: v for k, v in value.items() if k != \"type\"}\n712\t\n713\t        # No explicit type - try to infer from content\n714\t        inferred_type = _infer_type_from_content(value, field_name)\n715\t\n716\t        # Special handling for schedule fields\n717\t        if (\n718\t            field_name in (\"start_schedule\", \"stop_schedule\", \"restart_schedule\")\n719\t            and not inferred_type\n720\t        ):\n721\t            inferred_type = _infer_schedule_type(value)\n722\t\n723\t        if inferred_type:\n724\t            registered_cls = get_registered_type(inferred_type)\n725\t            if registered_cls:\n726\t                return from_dict(value, registered_cls)\n727\t\n728\t        # If we have a target type hint, use it\n729\t        if target_type and target_type is not NoneType:\n730\t            target_type = _resolve_union_type(target_type, value)\n731\t            # Don't try to instantiate Union types directly\n732\t            if not _is_union_type(target_type):\n733\t                try:\n734\t                    return from_dict(value, target_type)\n735\t                except (TypeError, ValueError):\n736\t                    pass\n737\t\n738\t        # Return as plain dict with recursively deserialized values\n739\t        return {k: _deserialize_value(v) for k, v in value.items()}\n740\t\n741\t    # Handle lists\n742\t    if isinstance(value, list):\n743\t        # Get element type from target_type if available\n744\t        element_type = _sequence_element_type(target_type) if target_type else None\n745\t\n746\t        # For schedule and volume lists, pass field_name for type inference\n747\t        if field_name in (\n748\t            \"start_schedule\",\n749\t            \"stop_schedule\",\n750\t            \"restart_schedule\",\n751\t            \"volumes\",\n752\t            \"ulimits\",\n753\t        ):\n754\t            return [_deserialize_value(v, element_type, field_name) for v in value]\n755\t\n756\t        return [_deserialize_value(v, element_type) for v in value]\n757\t\n758\t    # Primitives pass through\n759\t    return value\n760\t\n761\t\n762\tdef _get_field_type(cls: Type, field_name: str) -> Optional[Type]:\n763\t    \"\"\"Get the type annotation for a field on a class.\"\"\"\n764\t    if is_dataclass(cls):\n765\t        for field in fields(cls):\n766\t            if field.name == field_name:\n767\t                return field.type\n768\t    elif _is_pydantic_model(cls):\n769\t        model_fields = cls.model_fields\n770\t        if field_name in model_fields:\n771\t            return model_fields[field_name].annotation\n772\t    return None\n773\t\n774\t\n775\tdef to_dict(obj: Any, include_none: bool = False) -> Dict[str, Any]:\n776\t    \"\"\"Convert an object to a dictionary representation.\n777\t\n778\t    Args:\n779\t        obj: The object to serialize.\n780\t        include_none: Whether to include None values.\n781\t\n782\t    Returns:\n783\t        A dictionary representation of the object.\n784\t    \"\"\"\n785\t    return _serialize_value(obj, include_none)\n786\t\n787\t\n788\tdef from_dict(data: Dict[str, Any], cls: Type[T]) -> T:\n789\t    \"\"\"Create an object from a dictionary representation.\n790\t\n791\t    Args:\n792\t        data: The dictionary data.\n793\t        cls: The class to instantiate.\n794\t\n795\t    Returns:\n796\t        An instance of the specified class.\n797\t    \"\"\"\n798\t    if not isinstance(data, dict):\n799\t        raise TypeError(f\"Expected dict, got {type(data).__name__}\")\n800\t\n801\t    # Remove type if present (already used for type dispatch)\n802\t    data = {k: v for k, v in data.items() if k != \"type\"}\n803\t\n804\t    # Handle Pydantic models\n805\t    if _is_pydantic_model(cls):\n806\t        # Deserialize nested values based on field types\n807\t        processed_data = {}\n808\t        for key, value in data.items():\n809\t            field_type = _get_field_type(cls, key)\n810\t            # Apply human-readable parsing first (memory sizes, time durations)\n811\t            value = _maybe_parse_value(value, key)\n812\t            processed_data[key] = _deserialize_value(value, field_type, field_name=key)\n813\t        return cls(**processed_data)\n814\t\n815\t    # Handle dataclasses\n816\t    if is_dataclass(cls):\n817\t        field_names = {field.name for field in fields(cls)}\n818\t        unknown_fields = sorted(set(data) - field_names)\n819\t        if unknown_fields:\n820\t            unknown = \", \".join(unknown_fields)\n821\t            raise ValueError(f\"Unknown field(s) for {cls.__name__}: {unknown}\")\n822\t\n823\t        processed_data = {}\n824\t        for field in fields(cls):\n825\t            if field.name in data:\n826\t                value = data[field.name]\n827\t                field_type = field.type\n828\t\n829\t                # Apply human-readable parsing first (memory sizes, time durations)\n830\t                value = _maybe_parse_value(value, field.name)\n831\t\n832\t                field_type = _resolve_union_type(field_type, value)\n833\t\n834\t                processed_data[field.name] = _deserialize_value(\n835\t                    value, field_type, field_name=field.name\n836\t                )\n837\t            elif field.default is not MISSING or field.default_factory is not MISSING:\n838\t                # Let the dataclass constructor apply defaults.\n839\t                continue\n840\t\n841\t        return cls(**processed_data)\n842\t\n843\t    # For regular classes, just pass the data\n844\t    return cls(**data)\n845\t\n846\t\n847\tdef serialize(\n848\t    obj: Any,\n849\t    format: Literal[\"json\", \"yaml\"] = \"json\",\n850\t    indent: int = 2,\n851\t    include_none: bool = False,\n852\t) -> str:\n853\t    \"\"\"Serialize an object to JSON or YAML string.\n854\t\n855\t    Args:\n856\t        obj: The object to serialize.\n857\t        format: Output format (\"json\" or \"yaml\").\n858\t        indent: Indentation level for pretty printing.\n859\t        include_none: Whether to include None values.\n860\t\n861\t    Returns:\n862\t        The serialized string.\n863\t\n864\t    Raises:\n865\t        ValueError: If an unknown format is specified.\n866\t    \"\"\"\n867\t    data = to_dict(obj, include_none)\n868\t\n869\t    if format == \"json\":\n870\t        return json.dumps(data, indent=indent, default=str)\n871\t    elif format == \"yaml\":\n872\t        return yaml.dump(\n873\t            data, default_flow_style=False, allow_unicode=True, sort_keys=False\n874\t        )\n875\t    else:\n876\t        raise ValueError(f\"Unknown format: {format}\")\n877\t\n878\t\n879\tdef deserialize(data: str, cls: Type[T], format: Literal[\"json\", \"yaml\"] = \"json\") -> T:\n880\t    \"\"\"Deserialize a JSON or YAML string to an object.\n881\t\n882\t    Args:\n883\t        data: The serialized string.\n884\t        cls: The class to deserialize to.\n885\t        format: Input format (\"json\" or \"yaml\").\n886\t\n887\t    Returns:\n888\t        An instance of the specified class.\n889\t\n890\t    Raises:\n891\t        ValueError: If an unknown format is specified.\n892\t    \"\"\"\n893\t    if format == \"json\":\n894\t        parsed = json.loads(data)\n895\t    elif format == \"yaml\":\n896\t        parsed = yaml.safe_load(data)\n897\t    else:\n898\t        raise ValueError(f\"Unknown format: {format}\")\n899\t\n900\t    if not isinstance(parsed, Mapping):\n901\t        raise ValueError(\n902\t            f\"Serialized {cls.__name__} payload must be a mapping, got {type(parsed).__name__}\"\n903\t        )\n904\t\n905\t    return from_dict(parsed, cls)\n906\t\n907\t\n908\tdef serialize_to_file(\n909\t    obj: Any,\n910\t    path: Union[str, Path],\n911\t    format: Optional[Literal[\"json\", \"yaml\"]] = None,\n912\t    indent: int = 2,\n913\t    include_none: bool = False,\n914\t) -> None:\n915\t    \"\"\"Serialize an object to a file.\n916\t\n917\t    Args:\n918\t        obj: The object to serialize.\n919\t        path: The file path.\n920\t        format: Output format. If None, inferred from file extension.\n921\t        indent: Indentation level for pretty printing.\n922\t        include_none: Whether to include None values.\n923\t    \"\"\"\n924\t    path = Path(path)\n925\t\n926\t    if format is None:\n927\t        if path.suffix in (\".yaml\", \".yml\"):\n928\t            format = \"yaml\"\n929\t        else:\n930\t            format = \"json\"\n931\t\n932\t    content = serialize(obj, format=format, indent=indent, include_none=include_none)\n933\t    secure_write_text(path, content)\n934\t\n935\t\n936\tdef deserialize_from_file(\n937\t    path: Union[str, Path],\n938\t    cls: Type[T],\n939\t    format: Optional[Literal[\"json\", \"yaml\"]] = None,\n940\t) -> T:\n941\t    \"\"\"Deserialize an object from a file.\n942\t\n943\t    Args:\n944\t        path: The file path.\n945\t        cls: The class to deserialize to.\n946\t        format: Input format. If None, inferred from file extension.\n947\t\n948\t    Returns:\n949\t        An instance of the specified class.\n950\t    \"\"\"\n951\t    path = Path(path)\n952\t\n953\t    if format is None:\n954\t        if path.suffix in (\".yaml\", \".yml\"):\n955\t            format = \"yaml\"\n956\t        else:\n957\t            format = \"json\"\n958\t\n959\t    content = path.read_text()\n960\t    return deserialize(content, cls, format=format)\n961\t\n962\t\n963\t# Register all taskflows types for polymorphic deserialization\n964\tdef _register_taskflows_types():\n965\t    \"\"\"Register all taskflows types in the type registry.\"\"\"\n966\t    # Import here to avoid circular imports\n967\t    from taskflows.service import Venv, Service, RestartPolicy\n968\t    from taskflows.docker import (\n969\t        DockerContainer,\n970\t        DockerImage,\n971\t        Volume,\n972\t        Ulimit,\n973\t        ContainerLimits,\n974\t    )\n975\t    from taskflows.schedule import Calendar, Periodic\n976\t    from taskflows.constraints import (\n977\t        CgroupConfig,\n978\t        HardwareConstraint,\n979\t        Memory,\n980\t        CPUs,\n981\t        SystemLoadConstraint,\n982\t        MemoryPressure,\n983\t        CPUPressure,\n984\t        IOPressure,\n985\t    )\n986\t\n987\t    # Service types\n988\t    register_type(Venv)\n989\t    register_type(Service)\n990\t    register_type(RestartPolicy)\n991\t\n992\t    # Docker types\n993\t    register_type(DockerContainer)\n994\t    register_type(DockerImage)\n995\t    register_type(Volume)\n996\t    register_type(Ulimit)\n997\t    register_type(ContainerLimits)\n998\t\n999\t    # Schedule types\n1000\t    register_type(Calendar)\n1001\t    register_type(Periodic)\n1002\t\n1003\t    # Constraint types\n1004\t    register_type(CgroupConfig)\n1005\t    register_type(HardwareConstraint)\n1006\t    register_type(Memory)\n1007\t    register_type(CPUs)\n1008\t    register_type(SystemLoadConstraint)\n1009\t    register_type(MemoryPressure)\n1010\t    register_type(CPUPressure)\n1011\t    register_type(IOPressure)\n1012\t\n1013\t\n1014\t# Register types on import\n1015\t_register_taskflows_types()\n1016\t\n1017\t\n1018\tdef load_services_from_yaml(path: Union[str, Path]) -> List[\"Service\"]:\n1019\t    \"\"\"Load multiple services from a YAML file.",
+    "path": "/home/dan/repos/taskflows/taskflows/serialization.py",
+    "start_line": 260,
+    "total_lines": 1110,
+    "truncated": true
+  },
+  "started_at": "2026-06-01T14:03:07.949454",
+  "status": "completed",
+  "tool_call_id": "call_MLYzIFIaHGPX1WdNMyPau2oP",
+  "tool_name": "read"
+}

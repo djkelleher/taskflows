@@ -1,6 +1,7 @@
 import json
 import uuid
-from typing import List, Literal, Optional
+from pathlib import Path
+from typing import List, Literal, Optional, Union
 from urllib.parse import urljoin
 
 import requests
@@ -60,6 +61,25 @@ class Dashboard:
     def __init__(
         self, title: str, panels_grid: List[LogsPanelConfig | List[LogsPanelConfig]]
     ):
+        """Create a dashboard definition.
+
+        Dashboards can be defined directly in Python or loaded from YAML with
+        :meth:`from_yaml` / :meth:`from_file`. YAML panels use the same panel
+        classes as Python definitions via a ``type`` field, for example::
+
+            title: Worker logs
+            panels_grid:
+              - - type: LogsPanelConfig
+                  service:
+                    name: worker
+                    start_command: python worker.py
+                - type: LogsTextSearch
+                  service:
+                    name: api
+                    start_command: uvicorn app:app
+                  text: ERROR
+
+        """
         # Validate panels_grid structure
         for panels_row in panels_grid:
             if isinstance(panels_row, LogsPanelConfig):
@@ -74,6 +94,53 @@ class Dashboard:
         self.panels_grid = panels_grid
         # generate a unique (and repeatable) id from the title.
         self.uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, title))
+
+    def to_yaml(self, include_none: bool = False) -> str:
+        """Serialize this dashboard to a YAML string."""
+        from .serialization import serialize
+
+        return serialize(self, format="yaml", include_none=include_none)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Dashboard":
+        """Create a dashboard from a dictionary."""
+        from .serialization import from_dict
+
+        return from_dict(data, cls)
+
+    @classmethod
+    def from_json(cls, data: str) -> "Dashboard":
+        """Create a dashboard from a JSON string."""
+        from .serialization import deserialize
+
+        return deserialize(data, cls, format="json")
+
+    @classmethod
+    def from_yaml(cls, data: str) -> "Dashboard":
+        """Create a dashboard from a YAML string."""
+        from .serialization import deserialize
+
+        return deserialize(data, cls, format="yaml")
+
+    def to_file(
+        self,
+        path: Union[str, Path],
+        format: Optional[Literal["json", "yaml"]] = None,
+        include_none: bool = False,
+    ) -> None:
+        """Serialize this dashboard to a file."""
+        from .serialization import serialize_to_file
+
+        serialize_to_file(self, path, format=format, include_none=include_none)
+
+    @classmethod
+    def from_file(
+        cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None
+    ) -> "Dashboard":
+        """Create a dashboard from a JSON or YAML file."""
+        from .serialization import deserialize_from_file
+
+        return deserialize_from_file(path, cls, format=format)
 
     @classmethod
     def from_service_registries(

@@ -35,6 +35,7 @@ from .constraints import (
 import docker.errors
 from .docker import (
     DockerContainer,
+    DockerImage,
     Volume,
     delete_docker_container,
     get_docker_client,
@@ -294,15 +295,50 @@ class Venv:
     env_name: str
     custom_path: Optional[str | Path] = None
 
+    @staticmethod
+    def _run_command(exe: Path, env_name: str, command: str) -> str:
+        runner = shlex.quote(str(exe))
+        quoted_env_name = shlex.quote(env_name)
+        live_output_flag = Venv._live_output_flag(exe)
+        executable_separator = "--"
+        live_output_part = f" {live_output_flag}" if live_output_flag else ""
+
+        return (
+            f"{runner} run -n {quoted_env_name}{live_output_part} "
+            f"{executable_separator} {command}"
+        )
+
+    @staticmethod
+    def _live_output_flag(exe: Path) -> str:
+        try:
+            completed = subprocess.run(
+                [str(exe), "run", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            help_text = f"{completed.stdout}\n{completed.stderr}"
+        except (OSError, subprocess.SubprocessError):
+            help_text = ""
+
+        if "--attach" in help_text:
+            return "-a ''"
+        if "--no-capture-output" in help_text:
+            return "--no-capture-output"
+        if "--live-stream" in help_text:
+            return "--live-stream"
+        if exe.name in {"mamba", "micromamba"}:
+            return ""
+        return "--no-capture-output"
+
     def create_env_command(self, command: str) -> str:
-        env_name = shlex.quote(self.env_name)
         # If custom path is provided, use it directly
         if self.custom_path:
             exe = Path(self.custom_path)
             if not exe.is_file():
                 raise FileNotFoundError(f"Custom executable not found: {exe}")
-            runner = shlex.quote(str(exe))
-            return f"{runner} run -n {env_name} --no-capture-output {command}"
+            return self._run_command(exe, self.env_name, command)
 
         home = Path.home()
         exes = (
@@ -330,11 +366,7 @@ class Venv:
         )
         for exe in exes:
             if exe.is_file():
-                # Use stdbuf to force line buffering on stdout and stderr and ensure
-                # PYTHONUNBUFFERED=1 is set for the executed process (journald streaming)
-                # Note: env assignment must precede the command it applies to.
-                runner = shlex.quote(str(exe))
-                return f"{runner} run -n {env_name} --no-capture-output {command}"
+                return self._run_command(exe, self.env_name, command)
         raise FileNotFoundError(f"Virtualenv not found! Checked: {exes}")
 
 
@@ -821,6 +853,8 @@ class Service:
                         logger.info(
                             f"Persisted Docker container already exists: {container.name}"
                         )
+                elif isinstance(container.image, DockerImage):
+                    container.image.build()
                 # For run services, no need to do anything here since
                 # the docker run command is directly in the systemd service file
 

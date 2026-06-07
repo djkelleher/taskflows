@@ -202,6 +202,15 @@ class TestMemoryLimitCalculations:
 
         assert effective_swap == expected_swap
 
+    def test_zero_memory_swap_max_disables_systemd_unit_swap(self):
+        """Test that memory_swap_max=0 is preserved as an explicit systemd directive."""
+        config = CgroupConfig(memory_limit=1024 * 1024 * 1024, memory_swap_max=0)
+
+        directives = config.to_systemd_directives()
+
+        assert directives["MemorySwapMax"] == "0"
+        assert config._calculate_effective_swap_limit() == 1024 * 1024 * 1024
+
     @given(
         memory_high=st.integers(min_value=1024, max_value=2**39),
         memory_low=st.integers(min_value=512, max_value=2**38),
@@ -347,6 +356,27 @@ class TestOOMScoreAdj:
         directives = config.to_systemd_directives()
         assert "OOMScoreAdjust" in directives
         assert int(directives["OOMScoreAdjust"]) == oom_score
+
+
+class TestOOMPolicy:
+    """Tests for systemd OOM and systemd-oomd directives."""
+
+    def test_oom_policy_directives(self):
+        config = CgroupConfig(
+            oom_policy="kill",
+            managed_oom_swap="kill",
+            managed_oom_memory_pressure="kill",
+            managed_oom_memory_pressure_limit=60,
+            managed_oom_preference="avoid",
+        )
+
+        directives = config.to_systemd_directives()
+
+        assert directives["OOMPolicy"] == "kill"
+        assert directives["ManagedOOMSwap"] == "kill"
+        assert directives["ManagedOOMMemoryPressure"] == "kill"
+        assert directives["ManagedOOMMemoryPressureLimit"] == "60%"
+        assert directives["ManagedOOMPreference"] == "avoid"
 
 
 class TestMemorySwappiness:

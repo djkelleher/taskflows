@@ -1,0 +1,2814 @@
+{
+  "artifact_id": "tool-output-call_B3XJvgo9uIyTy1ev9juNQbv3-79c8be95fd72",
+  "ended_at": "2026-06-07T17:17:30.741267",
+  "error": null,
+  "metadata": {
+    "bytes_read": 31055,
+    "hook_permission_config": {
+      "diagnostics": [],
+      "hooks": [],
+      "permission_rules": [],
+      "shadowed_rules": [],
+      "source_refs": []
+    },
+    "line_numbers": true,
+    "permission_decision": {
+      "allowed": true,
+      "behavior": "allow",
+      "classifier_confidence": 0.86,
+      "classifier_label": "low-risk-tool",
+      "explanation": "read is a low-risk tool. Classifier label `low-risk-tool` assessed command `{\"cell_limit\": 0, \"cell_offset\": 0, \"include_data\": false, \"include_outputs\": false, \"limit\": 1000, \"line_numbers\": true, \"max_bytes\": 60000, \"offset\": 0, \"page_limit\": 0, \"page_offset\": 0, \"path\": \"/home/dan/repos/codigote/docs/planning/claude_harness_concepts_gap_analysis.md\", \"render\": \"text\"}`.",
+      "hook_results": [],
+      "matched_rule_ids": [],
+      "message": "Tool `read` is allowed.",
+      "requires_approval": false,
+      "updated_input": {
+        "cell_limit": 0,
+        "cell_offset": 0,
+        "include_data": false,
+        "include_outputs": false,
+        "limit": 1000,
+        "line_numbers": true,
+        "max_bytes": 60000,
+        "offset": 0,
+        "page_limit": 0,
+        "page_offset": 0,
+        "path": "/home/dan/repos/codigote/docs/planning/claude_harness_concepts_gap_analysis.md",
+        "render": "text"
+      }
+    },
+    "post_hook_results": [],
+    "selected_line_count": 688
+  },
+  "output": {
+    "content": "# Claude Harness Concepts Gap Analysis\n\nDate: 2026-05-11\n\nThis document reviews the Claude-harness ideas discussed from\n`claude_from_scratch.pdf` against the current Codigote codebase. The article is best\nunderstood as a harness design article, not a description of Claude model internals. The relevant\nquestion for Codigote is whether its provider-neutral harness already has equivalent runtime\ncontracts, where those contracts are advisory, and which pieces should become first-class product\nsurface.\n\n## Executive Summary\n\nCodigote already has substantial coverage for most of these ideas:\n\n- Completion is not just \"Claude stopped calling tools.\" `src/completion/decision.py` uses runtime\n  lifecycle signals, structured `<task-status>` blocks, optional classifiers, optional LLM judges,\n  and text/git heuristics.\n- Queue automation already converts incomplete work into follow-up queue entries, and it has a\n  quality scoring guardrail. However, queue items are marked `completed` before follow-ups are\n  generated, so the current system is a continuation engine rather than a strict trust gate.\n- Subagents are real delegated model/tool loops with configurable tool policies and durable task\n  descriptors. They are not just \"explore a folder\" helpers. The current gap is output discipline:\n  Codigote does not consistently enforce that parent context receives only a bounded summary while\n  detailed transcripts stay in artifacts.\n- The plan-tree runtime already supports dynamic plan mutation, blocked tasks with reasons,\n  dependency updates, research completion, discovered execution unknowns, and rollback on failed\n  mutations. The gap is integration: queue/runtime execution and persistent tasks do not share one\n  unified task-DAG mutation model.\n- Verification exists in multiple forms: deterministic validation profiles, targeted test tools,\n  a built-in verification agent, trace-level verification inference, and prompt optimization\n  scoring. The gap is that verification is not a single hard \"trusted complete\" gate.\n- Cache-aware context exists through context source hashes, retention modes, and prompt cache hint\n  metadata. Tool schema stability is partially addressed through `ToolSelectionRuntime`, but the\n  prompt-cache hints are not yet wired deeply enough into provider requests, and dynamic agent/tool\n  catalogs can still churn schemas.\n- Persistent terminal processes already exist for app-control clients. Normal model `bash` and\n  `shell` tools are still one-shot subprocesses. A persistent sandbox/session execution feature\n  should reuse the terminal runtime and memory/plugin surfaces rather than inventing a second\n  process manager.\n\nThe recommended direction is not a rewrite. The best next work is to connect existing primitives\ninto explicit contracts with persisted evidence and clear trust states.\n\n## Source Map\n\nPrimary Codigote files reviewed:\n\n- Completion and done decisions: `src/completion/decision.py`,\n  `src/dsl/queue/automation.py`,\n  `src/frontends/slack/handlers/workflows/queue/runtime_engine.py`.\n- Scoring and verification quality: `src/learned_harness/scoring.py`,\n  `src/governance/validation_loop.py`, `src/governance/services.py`,\n  `src/tools/coding_tools.py`, `src/trace/service.py`.\n- Runtime contracts and task intent: `src/runtime/contracts.py`, `src/runtime/facade.py`,\n  `src/features/`.\n- Agents and subagents: `src/tools/agent_tools.py`, `src/agents/executor.py`,\n  `src/agents/models.py`, `src/agents/registry.py`, `src/agents/tool_policy.py`,\n  `src/agents/builtin/definitions.py`, `src/agents/swarm_runtime.py`.\n- Planning and queue DAGs: `src/planning/runtime/plan_tree/engine.py`,\n  `src/dsl/queue/compiler.py`, `src/dsl/queue/materializer.py`,\n  `src/tasks/persistent_runtime.py`.\n- Cache and context: `src/conversation/view.py`, `src/conversation/runtime.py`,\n  `src/conversation/sources.py`, `src/providers/semantics.py`,\n  `src/providers/llm_clients/executor.py`.\n- Sandbox/session execution: `src/tools/process_tools.py`, `src/tools/tool_helpers.py`,\n  `src/tools/terminal.py`, `src/backend/runtime_facets/tools_terminal.py`.\n- Claude Code reference: `/home/dan/dev-repos/code-sigmas-ref/claude-code/src/tools/AgentTool`.\n\n## 1. First-Class Definition of Done Contracts\n\n### What Codigote Already Has\n\nCodigote already has a more sophisticated completion model than a plain \"no pending tool calls\"\ncheck.\n\n`src/completion/decision.py` has a layered completion cascade:\n\n- Runtime lifecycle signals can force `needs_follow_up` when a provider follow-up is required,\n  tool calls are pending, a stop hook blocked completion, the turn did not complete, or no assistant\n  message was emitted.\n- Structured `<task-status>` blocks can authoritatively mark complete or incomplete and can list\n  original-plan items plus newly discovered issues by severity.\n- Optional classifiers and LLM judges can decide ambiguous cases.\n- Text/git heuristics are the fallback.\n- `finish_called` is treated as a completion lifecycle signal.\n\nThe queue automation path uses that decision in `src/dsl/queue/automation.py` and\n`src/frontends/slack/handlers/workflows/queue/runtime_engine.py`. It can enqueue review/check/fix\nfollow-ups when a task is probably incomplete.\n\nThere are also related but separate concepts:\n\n- `TaskIntentDraft.acceptance_criteria` in `src/runtime/contracts.py`.\n- `ValidationPlan` and `ValidationCheck` in `src/runtime/contracts.py`.\n- `ValidationProfileRuntime` in `src/governance/services.py`.\n- Deterministic quality scoring in `src/learned_harness/scoring.py`.\n- Trace-level `verification_status` inference in `src/trace/service.py`.\n\n### Gap\n\nThe current system does not have one persisted, executable Definition of Done contract that follows\na task from intake through execution, verification, completion, trace, and queue status.\n\nSpecific gaps:\n\n- `TaskIntentDraft.acceptance_criteria` are strings, not executable checks.\n- `src/runtime/facade.py` currently records empty acceptance criteria for harness runs.\n- Queue automation marks an item `completed` before it runs completion automation. Follow-up queue\n  entries may be created, but the queue item's state is not a strict \"verified done\" state.\n- Validation profiles are resolved separately from completion decisions and are often advisory\n  unless strict validation is enabled.\n- The existing quality score is useful, but it is a score, not a contract with explicit required\n  evidence.\n\n### Recommendation\n\nAdd a first-class `CompletionContract` layer that compiles existing acceptance criteria,\ntask-status requirements, validation profiles, and runtime lifecycle constraints into one persisted\ncontract.\n\nProposed contract fields:\n\n- `contract_id`\n- `subject_type`: `queue_item`, `plan_task`, `persistent_task`, `harness_run`\n- `subject_id`\n- `required_outcomes`: human-readable success criteria\n- `required_checks`: deterministic commands, schema checks, verifier-agent checks, and model-judge\n  checks\n- `blocking_checks`: subset that must pass for `verified_complete`\n- `evidence_refs`: trace run IDs, validation IDs, test command results, diff summaries, verifier\n  reports\n- `trust_state`: `reported_complete`, `verified_complete`, `incomplete`,\n  `verification_failed`, `verification_not_run`, `blocked`\n- `failure_reasons`\n- `created_from`: prompt, plan tree, queue metadata, user-supplied checklist, or plugin policy\n\nImplementation path:\n\n1. Add contract models in a narrow new module, likely `src/completion/contracts.py`.\n2. Compile contracts from current sources:\n   - `TaskIntentDraft.acceptance_criteria`\n   - `<task-status>` parsed output\n   - `ValidationProfileRuntime.resolve(...)`\n   - queue auto metadata and planned-not-done extraction\n   - plan-tree task state and readiness gates\n3. Persist contract snapshots and evaluation results in existing trace/queue metadata first. Add a\n   dedicated table only after the shape stabilizes.\n4. Add `evaluate_completion_contract(...)` that runs or consumes required evidence and returns a\n   trust-state decision.\n5. Keep queue item `completed` semantics for model-stop state, but add a separate\n   `verification_status` or `trust_state` field for \"trusted done.\"\n6. Render the contract result in Slack/web surfaces so users can distinguish \"the model stopped\"\n   from \"Codigote verified this.\"\n\nTest plan:\n\n- Unit tests for contract compilation from acceptance criteria, validation plans, and task-status\n  blocks.\n- Queue runtime test proving a task with failed blocking validation is not marked\n  `verified_complete`.\n- Trace test proving evidence refs and failure reasons are persisted.\n- Regression test proving existing non-auto queue behavior still completes.\n\n## 2. Stronger Subagent Output Discipline\n\n### What Subagents Are\n\nIn Codex, subagents are delegated model/tool loops launched by the parent agent. They may inherit\ncontext or receive a scoped prompt, can run in parallel, and can be read-only explorers or workers\nthat edit files. They are not just directory explorers. An explorer is one possible role; a worker\ncan implement changes within an assigned write scope.\n\nIn Claude Code, the local reference shows an Agent tool that launches specialized subprocess\nagents. Fresh specialized agents start without the parent conversation context, while forked agents\ninherit the parent context. The reference also emphasizes a \"do not peek\" discipline: the parent\nshould not read the child transcript mid-flight because doing so pulls noisy tool output into the\nparent context. It also has a cache-oriented design where dynamic agent listings can be attached as\nmessages instead of embedded in the tool schema.\n\nIn Codigote, subagents are:\n\n- Configurable `AgentConfig` records with source, tools, disallowed tools, model, permission mode,\n  skills, MCP servers, hooks, background mode, isolation, effort, and memory settings.\n- Spawned through `AgentTool` or Slack agent commands.\n- Executed by `AgentExecutor`, where each agent runs in its own backend session with its own\n  session ID and scoped tool policy.\n- Sometimes represented as durable task descriptors through `PersistentTaskRuntime` and\n  `SwarmRuntime`.\n\n### What Codigote Already Has\n\nCodigote already has meaningful subagent machinery:\n\n- Built-in agents include `general`, `verification`, `coordinator`, `research-planner`,\n  `claim-verifier`, `source-verifier`, and `experiment-verifier`.\n- Agent tool policy resolution enforces allowed and disallowed tools.\n- `AgentExecutor` executes each agent in a backend session such as `agent-{execution_id}`.\n- `SwarmRuntime` can create teammate descriptors with inbox/progress/state files.\n- `PersistentTaskRuntime` can create background `local_agent` tasks with dependencies and output\n  files.\n\nThe built-in verification agent already requires a structured final verdict shape. That is a good\npattern to generalize.\n\n### Gap\n\nThe runtime does not consistently enforce output isolation or final-answer contracts for all\nsubagents.\n\nSpecific gaps:\n\n- `AgentRunResult` includes both `output` and `detailed_output`.\n- Parent-visible paths can receive detailed text unless each caller manually truncates or formats\n  it.\n- Slack truncates some agent output for display, but that is UI behavior, not context discipline.\n- There is no cross-agent `SubagentOutputContract` that says what shape must be returned.\n- There is no durable distinction between:\n  - child transcript artifact\n  - final summary\n  - claims requiring parent verification\n  - files changed by the child\n  - confidence or blocker status\n\n### Recommendation\n\nIntroduce a `SubagentOutputContract` and make it the default for Agent tool results.\n\nProposed output modes:\n\n- `summary_only`: parent receives a bounded result summary and metadata.\n- `artifact_backed`: parent receives summary plus artifact refs for transcript, diff, logs, and\n  evidence.\n- `full_transcript_on_request`: transcript is available only when explicitly requested by the user\n  or a debug surface.\n\nProposed final schema for most coding subagents:\n\n- `status`: `completed`, `blocked`, `failed`, `partial`\n- `summary`: short final answer\n- `files_changed`: list of paths\n- `tests_run`: commands and pass/fail\n- `claims`: important findings that the parent may rely on\n- `blockers`: missing inputs or unresolved risks\n- `artifact_refs`: transcript, logs, diff, validation output\n\nImplementation path:\n\n1. Add an output contract module under `src/agents/`, probably `src/agents/output_contracts.py`.\n2. Extend `AgentConfig` with optional `output_contract` and `max_parent_output_chars`.\n3. Make `AgentExecutor` normalize every `AgentRunResult` through the contract.\n4. Persist full transcript/detailed output as artifacts or task outputs, and return artifact refs to\n   the parent.\n5. Update `AgentTool` to expose contract metadata and default to `summary_only`.\n6. Add stricter built-in contracts for verification and review agents.\n7. Add a debug/admin path to fetch full transcript when needed.\n\nTest plan:\n\n- Unit test that detailed output is stored but not returned to the parent in `summary_only` mode.\n- Agent tool test proving artifact refs are returned.\n- Slack formatting test proving display truncation is not the only enforcement mechanism.\n- Verification-agent test proving `VERDICT`-style output is parsed into structured contract fields.\n\n## 3. Task DAG Rollback And Replan\n\n### What Codigote Already Has\n\nCodigote has two separate graph-like systems:\n\n1. Queue DSL and queue runtime:\n   - `src/dsl/queue/compiler.py` parses and validates QDSL.\n   - `src/dsl/queue/materializer.py` expands prompts and persisted producers.\n   - Parallel prompt dependencies are resolved during materialization.\n   - Queue automation can dynamically append or insert follow-up queue entries.\n\n2. Markdown plan-tree runtime:\n   - `src/planning/runtime/plan_tree/engine.py` models a task tree with task IDs, statuses,\n     dependencies, soft dependencies, readiness gates, revision logs, and executable frontiers.\n   - Supported revision operations include `update_state`, `edit_content`, `add_task`,\n     `rename_task`, `drop_task`, `update_dependencies`, and `complete_research`.\n   - Blocked tasks require a blocker reference like `task:<id>` or `external:<reason>`.\n   - Research completion can leave a branch blocked with a concrete `blocked_by` reason.\n   - `record_plan_execution_unknown(...)` can add a research-gated branch for newly discovered\n     unknowns.\n   - Mutations snapshot affected files and restore snapshots on validation failure.\n\n`PersistentTaskRuntime` also has task dependency edges: `blocks` and `blocked_by`.\n\n### Gap\n\nCodigote has the right primitives, but they are not yet one unified task DAG rollback/replan system.\n\nSpecific gaps:\n\n- Queue follow-ups are generated as new queue entries; they do not necessarily mutate the plan tree.\n- Plan-tree operations are file-backed markdown revisions; persistent task records and queue items\n  are separate state models.\n- Rollback exists inside plan-tree mutation functions, but there is no high-level \"revert this task\n  DAG to revision X and requeue the affected frontier\" operation.\n- Completion automation records planned-not-done metadata, but that metadata is not always converted\n  into plan-tree `blocked`, `superseded`, `research`, or `add_task` operations.\n- `execution_impact` is already captured in revision operations, but the queue processor does not\n  treat it as a scheduling contract.\n\n### Recommendation\n\nCreate a bridge layer that makes queue/runtime events produce plan-tree or task-DAG mutations when a\nplan root is attached.\n\nProposed concepts:\n\n- `TaskGraphMutation`: provider-neutral record for `add`, `update_state`, `update_dependencies`,\n  `drop`, `supersede`, `research_unknown`, and `complete_research`.\n- `TaskGraphRevision`: durable mutation batch with parent revision, actor, evidence refs, and\n  execution impact.\n- `TaskGraphFrontierChange`: computed result that lists newly runnable, blocked, superseded, and\n  requeued tasks.\n- `TaskGraphRollback`: operation that restores a previous revision and emits a new revision noting\n  the rollback reason.\n\nImplementation path:\n\n1. Build an adapter around plan-tree functions rather than rewriting them.\n2. Add a queue metadata convention for attaching `plan_root` and `plan_task_id`.\n3. When completion says incomplete:\n   - If missing work maps to existing plan tasks, call `record_plan_task_state_updates(...)` or\n     `record_plan_task_dependencies(...)`.\n   - If new work is discovered, call `record_plan_task_addition(...)`.\n   - If a critical unknown blocks execution, call `record_plan_execution_unknown(...)`.\n4. When research finishes, call `record_plan_research_completion(...)` and use `impact_scope` plus\n   `execution_impact` to decide whether to recompile or requeue the frontier.\n5. Add a queue scheduler hook that consumes `ExecutableFrontier` and enqueues newly runnable leaves.\n6. Add rollback command/API support after mutation lineage is visible in the UI.\n\nTest plan:\n\n- Unit test mapping a `planned_not_done` item into a new plan-tree task.\n- Unit test mapping a critical unknown into a research branch with `blocked_by`.\n- Queue integration test where a failed verification updates plan state and requeues only affected\n  frontier leaves.\n- Rollback test proving task files, revision log, and queue entries remain consistent.\n\n## 4. Verification As A Trust Gate\n\n### What Codigote Already Has\n\nVerification exists in several layers:\n\n- `ValidationLoopRuntime` runs deterministic command and JSON schema checks.\n- `ValidateProfileTool` and `RunTargetedTestsTool` expose validation to agents.\n- `ValidationProfileRuntime` resolves checks from task family and policy.\n- The built-in `verification` agent is read-only and has a final verdict convention.\n- `CompletionVerifier` in governance can reject final text with unresolved questions, failed\n  validation, or unfinished markers.\n- `compute_quality_score(...)` factors tests/build/lint/typecheck and code-risk signals into a\n  score.\n- `TraceSummaryBuilder._infer_verification_status(...)` infers pass/fail/unknown from run output.\n\n### Gap\n\nVerification is available, but it is not a uniform trust gate.\n\nSpecific gaps:\n\n- Different paths use different verification concepts and status values.\n- Queue completion can happen before automation-generated checks finish.\n- The trace-level status is inferred from text markers, not necessarily from explicit validation\n  evidence.\n- Validation plans can be advisory.\n- The verification agent's verdict is not yet normalized into the same trust state as deterministic\n  validation.\n\n### Recommendation\n\nAdd a single trust-gate state machine that consumes all verification sources.\n\nProposed trust states:\n\n- `not_checked`\n- `reported_complete`\n- `verification_running`\n- `verified_complete`\n- `verified_partial`\n- `verification_failed`\n- `blocked`\n\nRules:\n\n- Blocking deterministic checks outrank model claims.\n- A verifier-agent `PASS` can satisfy model-review checks but not deterministic test checks.\n- Unknown verification should never be displayed as verified.\n- Queue auto-followups can remain useful, but a user-facing task should expose its trust state.\n\nImplementation path:\n\n1. Add `VerificationGateResult` model and evaluator.\n2. Feed it validation loop results, targeted test tool results, verifier-agent verdicts, completion\n   decisions, and trace verification status.\n3. Persist the result alongside trace run metadata and queue item metadata.\n4. Update Slack/web rendering to show \"reported complete\" versus \"verified complete.\"\n5. Make strict profiles block `verified_complete`; leave non-strict profiles advisory.\n\nTest plan:\n\n- Deterministic failed test blocks `verified_complete`.\n- Verifier-agent `PASS` without tests yields `verified_partial` or `reported_complete`, depending\n  on contract policy.\n- Trace status `unknown` cannot promote a task.\n- Queue automation still enqueues followups when verification fails.\n\n## 5. Cache-Aware Prompt And Tool Schema Stability\n\n### What Codigote Already Has\n\nCodigote already models cacheable context:\n\n- `RegisteredContextSource` has `cache_eligible`, `stable_content_hash`, freshness keys, retention\n  modes, and stale behavior.\n- `ConversationView` emits `PromptCacheHint` records.\n- Provider semantics record whether a provider supports prompt cache hints.\n- `ConversationRuntime` tracks context bundle hashes and retention modes.\n- `ToolSelectionRuntime` limits selected tool declarations and records omitted tool refs plus\n  schema byte counts.\n\n### Gap\n\nThe cache model is incomplete at the provider-request and tool-schema level.\n\nSpecific gaps:\n\n- `ConversationRuntime` computes prompt cache hints but does not appear to place the actual hints\n  into `ModelRequest`; it currently records whether hints are enabled in routing constraints.\n- Dynamic tool lists, plugin commands, MCP tools, skills, and agent catalogs can change provider\n  visible tool schema text.\n- Claude Code's reference explicitly addresses this by moving dynamic agent listing out of the tool\n  description and into an attachment/message when needed. Codigote has `ToolSelectionRuntime`, but\n  not a full \"stable core schema plus dynamic catalog attachment\" policy.\n- Cache metrics such as cache creation/read savings are not visibly tied to prompt/tool schema\n  stability decisions.\n\n### Recommendation\n\nDefine a cache-stability policy for provider-visible prompt and tool surfaces.\n\nPolicy:\n\n- Keep core tool schemas stable and small.\n- Move dynamic catalogs into cacheable context sources or explicit catalog messages.\n- Use tool-search/deferred schema loading for long-tail tools.\n- Track schema fingerprints per request.\n- Emit diagnostics when a dynamic catalog changes the prompt or tool schema enough to bust cache.\n\nImplementation path:\n\n1. Add a `ToolSchemaFingerprint` helper that hashes selected tool declarations.\n2. Add `prompt_cache_hints` or equivalent metadata to `ModelRequest` if provider adapters can use\n   it.\n3. Split dynamic catalogs:\n   - static core Agent tool schema\n   - dynamic agent list as a context source or system reminder\n   - dynamic plugin/MCP/skill catalogs as cacheable context sources with freshness keys\n4. Extend `ToolSelectionRuntime` output with a schema fingerprint and stability diagnostics.\n5. Persist request-level cache diagnostics in the conversation request manifest.\n6. Add per-provider adapter support only where semantics say hints are supported.\n\nTest plan:\n\n- Unit test that dynamic agent list changes do not change the Agent tool schema fingerprint.\n- Unit test that a plugin catalog freshness-key change changes only the catalog context source hash.\n- Provider request test proving cache hints flow to supported providers and are omitted otherwise.\n- Metrics test proving request manifests include schema fingerprints.\n\n## 6. Persistent Sandbox And Session Execution\n\n### What Codigote Already Has\n\nThere are two relevant execution models:\n\n- Model-facing `bash`, `powershell`, and `shell` tools in `src/tools/process_tools.py` run one-shot\n  subprocesses through `_run_process_tool(...)`.\n- App-control terminal APIs in `src/tools/terminal.py` can start persistent background processes,\n  write stdin, read output, resize PTYs, terminate processes, and persist terminal records.\n\nThe one-shot process tools intentionally block interactive standalone commands like `python`,\n`bash`, `vim`, and `tail -f`. That is reasonable for safe model-facing tools, but it means agents\ndo not have a persistent Python/R/node/shell sandbox session as a first-class tool.\n\nCodigote also has memory and plugin surfaces that can host long-lived state:\n\n- Memory tools: session memory, memory scan/retrieve/write/update.\n- Plugin runtime: trusted plugin loading, cache invalidation, skill/plugin discovery.\n- Terminal runtime: process lifecycle and buffered output.\n\n### Gap\n\nPersistent execution exists for app-control clients, but it is not exposed as a governed\nmodel-facing sandbox/session tool with snapshots, state summaries, and memory integration.\n\nSpecific gaps:\n\n- No model-facing `sandbox.create`, `sandbox.exec`, `sandbox.read`, `sandbox.snapshot`, or\n  `sandbox.destroy` contract.\n- No first-class session state summary for a persistent REPL.\n- No snapshot/restore contract beyond terminal process records.\n- No trust boundary between persistent execution state and durable memory.\n- No expiration/cleanup policy for abandoned model-created sessions.\n\n### Recommendation\n\nBuild persistent sandbox/session execution as a plugin-backed first-class tool family that reuses\n`TerminalRuntime` internally.\n\nInitial tool family:\n\n- `sandbox_session_create`: create a named shell/Python/node session with cwd, env policy, timeout,\n  and persistence mode.\n- `sandbox_session_exec`: send input and optionally wait for prompt/output patterns.\n- `sandbox_session_read`: read buffered output since a cursor.\n- `sandbox_session_snapshot`: summarize cwd, command history, relevant variables/files, output\n  cursor, and artifact refs.\n- `sandbox_session_destroy`: terminate and clean up.\n\nWhy plugin-backed:\n\n- It fits the user's intuition that this could be a memory-system plugin.\n- It can be installed/disabled independently.\n- It can declare trust tier, permissions, retention, and cleanup policy.\n- It can integrate with session memory after explicit summarization instead of dumping raw terminal\n  transcripts into memory.\n\nImplementation path:\n\n1. Add a runtime wrapper around `TerminalRuntime` with stricter model-facing policy.\n2. Start with shell sessions only; add Python/node REPL helpers after cursor handling is reliable.\n3. Add database/session metadata: owner session, cwd, created_by tool call, TTL, status, output\n   cursor, memory mode.\n4. Add safety policy:\n   - no hidden daemon creation unless explicitly backgrounded\n   - TTL cleanup\n   - bounded output reads\n   - explicit env allowlist\n   - approval for high-risk commands\n5. Add snapshot summaries and optional session memory writes.\n6. Expose through plugin or first-class tools after governance tests pass.\n\nTest plan:\n\n- Create/write/read/destroy lifecycle test.\n- Cursor test proving reads do not duplicate output.\n- TTL cleanup test.\n- Policy test proving interactive sessions are denied unless created through sandbox tools.\n- Memory test proving only summaries, not full raw output, enter memory.\n\n## Prioritized Roadmap\n\n### Phase 0: Instrument Current Behavior\n\nGoal: make the current advisory systems visible before changing semantics.\n\nTasks:\n\n- Add request/trace metadata for completion decision source, verification source, and queue\n  automation action.\n- Add schema fingerprint metadata for selected tools.\n- Add documentation for current trust states and known limitations.\n\nExit criteria:\n\n- A trace can explain why a task was considered done.\n- A queue item can show whether it was merely completed or verified.\n- Tool schema churn can be observed.\n\n### Phase 1: Completion Contract And Verification Gate\n\nGoal: turn existing completion and validation primitives into one trusted completion contract.\n\nTasks:\n\n- Add `CompletionContract`.\n- Add `VerificationGateResult`.\n- Compile contracts from acceptance criteria, task status, validation plans, and plan-tree task\n  state.\n- Persist contract evaluations.\n- Render trust state in Slack/web.\n\nExit criteria:\n\n- \"Verified complete\" requires explicit evidence.\n- Failed blocking validation cannot silently become verified.\n- Existing completion automation still works.\n\n### Phase 2: Subagent Output Discipline\n\nGoal: keep parent context clean and make agent results reliable.\n\nTasks:\n\n- Add `SubagentOutputContract`.\n- Normalize `AgentRunResult`.\n- Store detailed transcripts as artifacts/task outputs.\n- Return bounded summaries and artifact refs to parents.\n- Add structured contracts for verification/review agents.\n\nExit criteria:\n\n- Parent context gets summary-only by default.\n- Full child transcript remains available through explicit artifact access.\n- Verification agent output is parsed into structured verdicts.\n\n### Phase 3: Plan-Tree And Queue DAG Integration\n\nGoal: make dynamic replanning update the plan/task DAG, not just append queue items.\n\nTasks:\n\n- Add a task graph adapter over existing plan-tree functions.\n- Attach `plan_root` and `plan_task_id` to queue items where available.\n- Convert completion failures and discovered unknowns into plan-tree mutations.\n- Recompute executable frontier and enqueue affected leaves.\n- Add rollback command/API after lineage is visible.\n\nExit criteria:\n\n- Incomplete work can become a plan mutation with reason and evidence.\n- Research-gated unknowns are first-class plan nodes.\n- Rollback restores plan files and queue frontier consistently.\n\n### Phase 4: Cache Stability\n\nGoal: reduce cache churn from dynamic schemas and catalogs.\n\nTasks:\n\n- Add schema fingerprints.\n- Move dynamic catalogs into cacheable context messages where possible.\n- Wire prompt cache hints into provider requests.\n- Add request manifest diagnostics for cache eligibility and schema churn.\n\nExit criteria:\n\n- Dynamic agent/plugin list changes do not unnecessarily change core tool schema.\n- Supported providers receive cache hints.\n- Cache-stability regressions are testable.\n\n### Phase 5: Persistent Sandbox Sessions\n\nGoal: expose durable execution sessions safely.\n\nTasks:\n\n- Build a governed sandbox session runtime on top of `TerminalRuntime`.\n- Add model-facing sandbox session tools behind plugin/feature policy.\n- Add TTL cleanup, bounded output reads, snapshots, and memory summaries.\n- Add frontend controls for viewing/terminating sessions.\n\nExit criteria:\n\n- Agents can reuse a persistent session without using unsafe standalone shells.\n- Raw output is bounded and summarized.\n- Sessions are visible, governable, and cleanly terminated.\n\n## Recommended First PR\n\nStart with Phase 0 plus the minimal data model for Phase 1:\n\n1. Add `src/completion/contracts.py` with dataclasses only.\n2. Add a compiler from current `CompletionDecision`, task-status blocks, and validation plan\n   results into a `CompletionContractEvaluation`.\n3. Add tests around compilation and trust-state precedence.\n4. Persist the evaluation in trace metadata without changing queue behavior yet.\n5. Add docs/UI labels for `reported_complete` versus `verified_complete`.\n\nThis gives Codigote a stable vocabulary and evidence shape before changing queue completion\nsemantics.\n\n## Main Design Principle\n\nCodigote already has the concepts. The next level is to make them explicit, persisted, and\ncomposable:\n\n- Completion should be a contract, not a guess.\n- Verification should be a gate, not just a useful tool.\n- Subagent output should be summary-first with artifact-backed detail.\n- Replanning should mutate a task graph with lineage, not only create more queue text.\n- Cache behavior should be observable and protected from dynamic schema churn.\n- Persistent sessions should reuse existing terminal/process governance and integrate with memory\n  through explicit summaries.\n",
+    "end_line": 688,
+    "kind": "text",
+    "line_limit": 1000,
+    "line_offset": 0,
+    "lines": [
+      {
+        "line": 1,
+        "text": "# Claude Harness Concepts Gap Analysis"
+      },
+      {
+        "line": 2,
+        "text": ""
+      },
+      {
+        "line": 3,
+        "text": "Date: 2026-05-11"
+      },
+      {
+        "line": 4,
+        "text": ""
+      },
+      {
+        "line": 5,
+        "text": "This document reviews the Claude-harness ideas discussed from"
+      },
+      {
+        "line": 6,
+        "text": "`claude_from_scratch.pdf` against the current Codigote codebase. The article is best"
+      },
+      {
+        "line": 7,
+        "text": "understood as a harness design article, not a description of Claude model internals. The relevant"
+      },
+      {
+        "line": 8,
+        "text": "question for Codigote is whether its provider-neutral harness already has equivalent runtime"
+      },
+      {
+        "line": 9,
+        "text": "contracts, where those contracts are advisory, and which pieces should become first-class product"
+      },
+      {
+        "line": 10,
+        "text": "surface."
+      },
+      {
+        "line": 11,
+        "text": ""
+      },
+      {
+        "line": 12,
+        "text": "## Executive Summary"
+      },
+      {
+        "line": 13,
+        "text": ""
+      },
+      {
+        "line": 14,
+        "text": "Codigote already has substantial coverage for most of these ideas:"
+      },
+      {
+        "line": 15,
+        "text": ""
+      },
+      {
+        "line": 16,
+        "text": "- Completion is not just \"Claude stopped calling tools.\" `src/completion/decision.py` uses runtime"
+      },
+      {
+        "line": 17,
+        "text": "  lifecycle signals, structured `<task-status>` blocks, optional classifiers, optional LLM judges,"
+      },
+      {
+        "line": 18,
+        "text": "  and text/git heuristics."
+      },
+      {
+        "line": 19,
+        "text": "- Queue automation already converts incomplete work into follow-up queue entries, and it has a"
+      },
+      {
+        "line": 20,
+        "text": "  quality scoring guardrail. However, queue items are marked `completed` before follow-ups are"
+      },
+      {
+        "line": 21,
+        "text": "  generated, so the current system is a continuation engine rather than a strict trust gate."
+      },
+      {
+        "line": 22,
+        "text": "- Subagents are real delegated model/tool loops with configurable tool policies and durable task"
+      },
+      {
+        "line": 23,
+        "text": "  descriptors. They are not just \"explore a folder\" helpers. The current gap is output discipline:"
+      },
+      {
+        "line": 24,
+        "text": "  Codigote does not consistently enforce that parent context receives only a bounded summary while"
+      },
+      {
+        "line": 25,
+        "text": "  detailed transcripts stay in artifacts."
+      },
+      {
+        "line": 26,
+        "text": "- The plan-tree runtime already supports dynamic plan mutation, blocked tasks with reasons,"
+      },
+      {
+        "line": 27,
+        "text": "  dependency updates, research completion, discovered execution unknowns, and rollback on failed"
+      },
+      {
+        "line": 28,
+        "text": "  mutations. The gap is integration: queue/runtime execution and persistent tasks do not share one"
+      },
+      {
+        "line": 29,
+        "text": "  unified task-DAG mutation model."
+      },
+      {
+        "line": 30,
+        "text": "- Verification exists in multiple forms: deterministic validation profiles, targeted test tools,"
+      },
+      {
+        "line": 31,
+        "text": "  a built-in verification agent, trace-level verification inference, and prompt optimization"
+      },
+      {
+        "line": 32,
+        "text": "  scoring. The gap is that verification is not a single hard \"trusted complete\" gate."
+      },
+      {
+        "line": 33,
+        "text": "- Cache-aware context exists through context source hashes, retention modes, and prompt cache hint"
+      },
+      {
+        "line": 34,
+        "text": "  metadata. Tool schema stability is partially addressed through `ToolSelectionRuntime`, but the"
+      },
+      {
+        "line": 35,
+        "text": "  prompt-cache hints are not yet wired deeply enough into provider requests, and dynamic agent/tool"
+      },
+      {
+        "line": 36,
+        "text": "  catalogs can still churn schemas."
+      },
+      {
+        "line": 37,
+        "text": "- Persistent terminal processes already exist for app-control clients. Normal model `bash` and"
+      },
+      {
+        "line": 38,
+        "text": "  `shell` tools are still one-shot subprocesses. A persistent sandbox/session execution feature"
+      },
+      {
+        "line": 39,
+        "text": "  should reuse the terminal runtime and memory/plugin surfaces rather than inventing a second"
+      },
+      {
+        "line": 40,
+        "text": "  process manager."
+      },
+      {
+        "line": 41,
+        "text": ""
+      },
+      {
+        "line": 42,
+        "text": "The recommended direction is not a rewrite. The best next work is to connect existing primitives"
+      },
+      {
+        "line": 43,
+        "text": "into explicit contracts with persisted evidence and clear trust states."
+      },
+      {
+        "line": 44,
+        "text": ""
+      },
+      {
+        "line": 45,
+        "text": "## Source Map"
+      },
+      {
+        "line": 46,
+        "text": ""
+      },
+      {
+        "line": 47,
+        "text": "Primary Codigote files reviewed:"
+      },
+      {
+        "line": 48,
+        "text": ""
+      },
+      {
+        "line": 49,
+        "text": "- Completion and done decisions: `src/completion/decision.py`,"
+      },
+      {
+        "line": 50,
+        "text": "  `src/dsl/queue/automation.py`,"
+      },
+      {
+        "line": 51,
+        "text": "  `src/frontends/slack/handlers/workflows/queue/runtime_engine.py`."
+      },
+      {
+        "line": 52,
+        "text": "- Scoring and verification quality: `src/learned_harness/scoring.py`,"
+      },
+      {
+        "line": 53,
+        "text": "  `src/governance/validation_loop.py`, `src/governance/services.py`,"
+      },
+      {
+        "line": 54,
+        "text": "  `src/tools/coding_tools.py`, `src/trace/service.py`."
+      },
+      {
+        "line": 55,
+        "text": "- Runtime contracts and task intent: `src/runtime/contracts.py`, `src/runtime/facade.py`,"
+      },
+      {
+        "line": 56,
+        "text": "  `src/features/`."
+      },
+      {
+        "line": 57,
+        "text": "- Agents and subagents: `src/tools/agent_tools.py`, `src/agents/executor.py`,"
+      },
+      {
+        "line": 58,
+        "text": "  `src/agents/models.py`, `src/agents/registry.py`, `src/agents/tool_policy.py`,"
+      },
+      {
+        "line": 59,
+        "text": "  `src/agents/builtin/definitions.py`, `src/agents/swarm_runtime.py`."
+      },
+      {
+        "line": 60,
+        "text": "- Planning and queue DAGs: `src/planning/runtime/plan_tree/engine.py`,"
+      },
+      {
+        "line": 61,
+        "text": "  `src/dsl/queue/compiler.py`, `src/dsl/queue/materializer.py`,"
+      },
+      {
+        "line": 62,
+        "text": "  `src/tasks/persistent_runtime.py`."
+      },
+      {
+        "line": 63,
+        "text": "- Cache and context: `src/conversation/view.py`, `src/conversation/runtime.py`,"
+      },
+      {
+        "line": 64,
+        "text": "  `src/conversation/sources.py`, `src/providers/semantics.py`,"
+      },
+      {
+        "line": 65,
+        "text": "  `src/providers/llm_clients/executor.py`."
+      },
+      {
+        "line": 66,
+        "text": "- Sandbox/session execution: `src/tools/process_tools.py`, `src/tools/tool_helpers.py`,"
+      },
+      {
+        "line": 67,
+        "text": "  `src/tools/terminal.py`, `src/backend/runtime_facets/tools_terminal.py`."
+      },
+      {
+        "line": 68,
+        "text": "- Claude Code reference: `/home/dan/dev-repos/code-sigmas-ref/claude-code/src/tools/AgentTool`."
+      },
+      {
+        "line": 69,
+        "text": ""
+      },
+      {
+        "line": 70,
+        "text": "## 1. First-Class Definition of Done Contracts"
+      },
+      {
+        "line": 71,
+        "text": ""
+      },
+      {
+        "line": 72,
+        "text": "### What Codigote Already Has"
+      },
+      {
+        "line": 73,
+        "text": ""
+      },
+      {
+        "line": 74,
+        "text": "Codigote already has a more sophisticated completion model than a plain \"no pending tool calls\""
+      },
+      {
+        "line": 75,
+        "text": "check."
+      },
+      {
+        "line": 76,
+        "text": ""
+      },
+      {
+        "line": 77,
+        "text": "`src/completion/decision.py` has a layered completion cascade:"
+      },
+      {
+        "line": 78,
+        "text": ""
+      },
+      {
+        "line": 79,
+        "text": "- Runtime lifecycle signals can force `needs_follow_up` when a provider follow-up is required,"
+      },
+      {
+        "line": 80,
+        "text": "  tool calls are pending, a stop hook blocked completion, the turn did not complete, or no assistant"
+      },
+      {
+        "line": 81,
+        "text": "  message was emitted."
+      },
+      {
+        "line": 82,
+        "text": "- Structured `<task-status>` blocks can authoritatively mark complete or incomplete and can list"
+      },
+      {
+        "line": 83,
+        "text": "  original-plan items plus newly discovered issues by severity."
+      },
+      {
+        "line": 84,
+        "text": "- Optional classifiers and LLM judges can decide ambiguous cases."
+      },
+      {
+        "line": 85,
+        "text": "- Text/git heuristics are the fallback."
+      },
+      {
+        "line": 86,
+        "text": "- `finish_called` is treated as a completion lifecycle signal."
+      },
+      {
+        "line": 87,
+        "text": ""
+      },
+      {
+        "line": 88,
+        "text": "The queue automation path uses that decision in `src/dsl/queue/automation.py` and"
+      },
+      {
+        "line": 89,
+        "text": "`src/frontends/slack/handlers/workflows/queue/runtime_engine.py`. It can enqueue review/check/fix"
+      },
+      {
+        "line": 90,
+        "text": "follow-ups when a task is probably incomplete."
+      },
+      {
+        "line": 91,
+        "text": ""
+      },
+      {
+        "line": 92,
+        "text": "There are also related but separate concepts:"
+      },
+      {
+        "line": 93,
+        "text": ""
+      },
+      {
+        "line": 94,
+        "text": "- `TaskIntentDraft.acceptance_criteria` in `src/runtime/contracts.py`."
+      },
+      {
+        "line": 95,
+        "text": "- `ValidationPlan` and `ValidationCheck` in `src/runtime/contracts.py`."
+      },
+      {
+        "line": 96,
+        "text": "- `ValidationProfileRuntime` in `src/governance/services.py`."
+      },
+      {
+        "line": 97,
+        "text": "- Deterministic quality scoring in `src/learned_harness/scoring.py`."
+      },
+      {
+        "line": 98,
+        "text": "- Trace-level `verification_status` inference in `src/trace/service.py`."
+      },
+      {
+        "line": 99,
+        "text": ""
+      },
+      {
+        "line": 100,
+        "text": "### Gap"
+      },
+      {
+        "line": 101,
+        "text": ""
+      },
+      {
+        "line": 102,
+        "text": "The current system does not have one persisted, executable Definition of Done contract that follows"
+      },
+      {
+        "line": 103,
+        "text": "a task from intake through execution, verification, completion, trace, and queue status."
+      },
+      {
+        "line": 104,
+        "text": ""
+      },
+      {
+        "line": 105,
+        "text": "Specific gaps:"
+      },
+      {
+        "line": 106,
+        "text": ""
+      },
+      {
+        "line": 107,
+        "text": "- `TaskIntentDraft.acceptance_criteria` are strings, not executable checks."
+      },
+      {
+        "line": 108,
+        "text": "- `src/runtime/facade.py` currently records empty acceptance criteria for harness runs."
+      },
+      {
+        "line": 109,
+        "text": "- Queue automation marks an item `completed` before it runs completion automation. Follow-up queue"
+      },
+      {
+        "line": 110,
+        "text": "  entries may be created, but the queue item's state is not a strict \"verified done\" state."
+      },
+      {
+        "line": 111,
+        "text": "- Validation profiles are resolved separately from completion decisions and are often advisory"
+      },
+      {
+        "line": 112,
+        "text": "  unless strict validation is enabled."
+      },
+      {
+        "line": 113,
+        "text": "- The existing quality score is useful, but it is a score, not a contract with explicit required"
+      },
+      {
+        "line": 114,
+        "text": "  evidence."
+      },
+      {
+        "line": 115,
+        "text": ""
+      },
+      {
+        "line": 116,
+        "text": "### Recommendation"
+      },
+      {
+        "line": 117,
+        "text": ""
+      },
+      {
+        "line": 118,
+        "text": "Add a first-class `CompletionContract` layer that compiles existing acceptance criteria,"
+      },
+      {
+        "line": 119,
+        "text": "task-status requirements, validation profiles, and runtime lifecycle constraints into one persisted"
+      },
+      {
+        "line": 120,
+        "text": "contract."
+      },
+      {
+        "line": 121,
+        "text": ""
+      },
+      {
+        "line": 122,
+        "text": "Proposed contract fields:"
+      },
+      {
+        "line": 123,
+        "text": ""
+      },
+      {
+        "line": 124,
+        "text": "- `contract_id`"
+      },
+      {
+        "line": 125,
+        "text": "- `subject_type`: `queue_item`, `plan_task`, `persistent_task`, `harness_run`"
+      },
+      {
+        "line": 126,
+        "text": "- `subject_id`"
+      },
+      {
+        "line": 127,
+        "text": "- `required_outcomes`: human-readable success criteria"
+      },
+      {
+        "line": 128,
+        "text": "- `required_checks`: deterministic commands, schema checks, verifier-agent checks, and model-judge"
+      },
+      {
+        "line": 129,
+        "text": "  checks"
+      },
+      {
+        "line": 130,
+        "text": "- `blocking_checks`: subset that must pass for `verified_complete`"
+      },
+      {
+        "line": 131,
+        "text": "- `evidence_refs`: trace run IDs, validation IDs, test command results, diff summaries, verifier"
+      },
+      {
+        "line": 132,
+        "text": "  reports"
+      },
+      {
+        "line": 133,
+        "text": "- `trust_state`: `reported_complete`, `verified_complete`, `incomplete`,"
+      },
+      {
+        "line": 134,
+        "text": "  `verification_failed`, `verification_not_run`, `blocked`"
+      },
+      {
+        "line": 135,
+        "text": "- `failure_reasons`"
+      },
+      {
+        "line": 136,
+        "text": "- `created_from`: prompt, plan tree, queue metadata, user-supplied checklist, or plugin policy"
+      },
+      {
+        "line": 137,
+        "text": ""
+      },
+      {
+        "line": 138,
+        "text": "Implementation path:"
+      },
+      {
+        "line": 139,
+        "text": ""
+      },
+      {
+        "line": 140,
+        "text": "1. Add contract models in a narrow new module, likely `src/completion/contracts.py`."
+      },
+      {
+        "line": 141,
+        "text": "2. Compile contracts from current sources:"
+      },
+      {
+        "line": 142,
+        "text": "   - `TaskIntentDraft.acceptance_criteria`"
+      },
+      {
+        "line": 143,
+        "text": "   - `<task-status>` parsed output"
+      },
+      {
+        "line": 144,
+        "text": "   - `ValidationProfileRuntime.resolve(...)`"
+      },
+      {
+        "line": 145,
+        "text": "   - queue auto metadata and planned-not-done extraction"
+      },
+      {
+        "line": 146,
+        "text": "   - plan-tree task state and readiness gates"
+      },
+      {
+        "line": 147,
+        "text": "3. Persist contract snapshots and evaluation results in existing trace/queue metadata first. Add a"
+      },
+      {
+        "line": 148,
+        "text": "   dedicated table only after the shape stabilizes."
+      },
+      {
+        "line": 149,
+        "text": "4. Add `evaluate_completion_contract(...)` that runs or consumes required evidence and returns a"
+      },
+      {
+        "line": 150,
+        "text": "   trust-state decision."
+      },
+      {
+        "line": 151,
+        "text": "5. Keep queue item `completed` semantics for model-stop state, but add a separate"
+      },
+      {
+        "line": 152,
+        "text": "   `verification_status` or `trust_state` field for \"trusted done.\""
+      },
+      {
+        "line": 153,
+        "text": "6. Render the contract result in Slack/web surfaces so users can distinguish \"the model stopped\""
+      },
+      {
+        "line": 154,
+        "text": "   from \"Codigote verified this.\""
+      },
+      {
+        "line": 155,
+        "text": ""
+      },
+      {
+        "line": 156,
+        "text": "Test plan:"
+      },
+      {
+        "line": 157,
+        "text": ""
+      },
+      {
+        "line": 158,
+        "text": "- Unit tests for contract compilation from acceptance criteria, validation plans, and task-status"
+      },
+      {
+        "line": 159,
+        "text": "  blocks."
+      },
+      {
+        "line": 160,
+        "text": "- Queue runtime test proving a task with failed blocking validation is not marked"
+      },
+      {
+        "line": 161,
+        "text": "  `verified_complete`."
+      },
+      {
+        "line": 162,
+        "text": "- Trace test proving evidence refs and failure reasons are persisted."
+      },
+      {
+        "line": 163,
+        "text": "- Regression test proving existing non-auto queue behavior still completes."
+      },
+      {
+        "line": 164,
+        "text": ""
+      },
+      {
+        "line": 165,
+        "text": "## 2. Stronger Subagent Output Discipline"
+      },
+      {
+        "line": 166,
+        "text": ""
+      },
+      {
+        "line": 167,
+        "text": "### What Subagents Are"
+      },
+      {
+        "line": 168,
+        "text": ""
+      },
+      {
+        "line": 169,
+        "text": "In Codex, subagents are delegated model/tool loops launched by the parent agent. They may inherit"
+      },
+      {
+        "line": 170,
+        "text": "context or receive a scoped prompt, can run in parallel, and can be read-only explorers or workers"
+      },
+      {
+        "line": 171,
+        "text": "that edit files. They are not just directory explorers. An explorer is one possible role; a worker"
+      },
+      {
+        "line": 172,
+        "text": "can implement changes within an assigned write scope."
+      },
+      {
+        "line": 173,
+        "text": ""
+      },
+      {
+        "line": 174,
+        "text": "In Claude Code, the local reference shows an Agent tool that launches specialized subprocess"
+      },
+      {
+        "line": 175,
+        "text": "agents. Fresh specialized agents start without the parent conversation context, while forked agents"
+      },
+      {
+        "line": 176,
+        "text": "inherit the parent context. The reference also emphasizes a \"do not peek\" discipline: the parent"
+      },
+      {
+        "line": 177,
+        "text": "should not read the child transcript mid-flight because doing so pulls noisy tool output into the"
+      },
+      {
+        "line": 178,
+        "text": "parent context. It also has a cache-oriented design where dynamic agent listings can be attached as"
+      },
+      {
+        "line": 179,
+        "text": "messages instead of embedded in the tool schema."
+      },
+      {
+        "line": 180,
+        "text": ""
+      },
+      {
+        "line": 181,
+        "text": "In Codigote, subagents are:"
+      },
+      {
+        "line": 182,
+        "text": ""
+      },
+      {
+        "line": 183,
+        "text": "- Configurable `AgentConfig` records with source, tools, disallowed tools, model, permission mode,"
+      },
+      {
+        "line": 184,
+        "text": "  skills, MCP servers, hooks, background mode, isolation, effort, and memory settings."
+      },
+      {
+        "line": 185,
+        "text": "- Spawned through `AgentTool` or Slack agent commands."
+      },
+      {
+        "line": 186,
+        "text": "- Executed by `AgentExecutor`, where each agent runs in its own backend session with its own"
+      },
+      {
+        "line": 187,
+        "text": "  session ID and scoped tool policy."
+      },
+      {
+        "line": 188,
+        "text": "- Sometimes represented as durable task descriptors through `PersistentTaskRuntime` and"
+      },
+      {
+        "line": 189,
+        "text": "  `SwarmRuntime`."
+      },
+      {
+        "line": 190,
+        "text": ""
+      },
+      {
+        "line": 191,
+        "text": "### What Codigote Already Has"
+      },
+      {
+        "line": 192,
+        "text": ""
+      },
+      {
+        "line": 193,
+        "text": "Codigote already has meaningful subagent machinery:"
+      },
+      {
+        "line": 194,
+        "text": ""
+      },
+      {
+        "line": 195,
+        "text": "- Built-in agents include `general`, `verification`, `coordinator`, `research-planner`,"
+      },
+      {
+        "line": 196,
+        "text": "  `claim-verifier`, `source-verifier`, and `experiment-verifier`."
+      },
+      {
+        "line": 197,
+        "text": "- Agent tool policy resolution enforces allowed and disallowed tools."
+      },
+      {
+        "line": 198,
+        "text": "- `AgentExecutor` executes each agent in a backend session such as `agent-{execution_id}`."
+      },
+      {
+        "line": 199,
+        "text": "- `SwarmRuntime` can create teammate descriptors with inbox/progress/state files."
+      },
+      {
+        "line": 200,
+        "text": "- `PersistentTaskRuntime` can create background `local_agent` tasks with dependencies and output"
+      },
+      {
+        "line": 201,
+        "text": "  files."
+      },
+      {
+        "line": 202,
+        "text": ""
+      },
+      {
+        "line": 203,
+        "text": "The built-in verification agent already requires a structured final verdict shape. That is a good"
+      },
+      {
+        "line": 204,
+        "text": "pattern to generalize."
+      },
+      {
+        "line": 205,
+        "text": ""
+      },
+      {
+        "line": 206,
+        "text": "### Gap"
+      },
+      {
+        "line": 207,
+        "text": ""
+      },
+      {
+        "line": 208,
+        "text": "The runtime does not consistently enforce output isolation or final-answer contracts for all"
+      },
+      {
+        "line": 209,
+        "text": "subagents."
+      },
+      {
+        "line": 210,
+        "text": ""
+      },
+      {
+        "line": 211,
+        "text": "Specific gaps:"
+      },
+      {
+        "line": 212,
+        "text": ""
+      },
+      {
+        "line": 213,
+        "text": "- `AgentRunResult` includes both `output` and `detailed_output`."
+      },
+      {
+        "line": 214,
+        "text": "- Parent-visible paths can receive detailed text unless each caller manually truncates or formats"
+      },
+      {
+        "line": 215,
+        "text": "  it."
+      },
+      {
+        "line": 216,
+        "text": "- Slack truncates some agent output for display, but that is UI behavior, not context discipline."
+      },
+      {
+        "line": 217,
+        "text": "- There is no cross-agent `SubagentOutputContract` that says what shape must be returned."
+      },
+      {
+        "line": 218,
+        "text": "- There is no durable distinction between:"
+      },
+      {
+        "line": 219,
+        "text": "  - child transcript artifact"
+      },
+      {
+        "line": 220,
+        "text": "  - final summary"
+      },
+      {
+        "line": 221,
+        "text": "  - claims requiring parent verification"
+      },
+      {
+        "line": 222,
+        "text": "  - files changed by the child"
+      },
+      {
+        "line": 223,
+        "text": "  - confidence or blocker status"
+      },
+      {
+        "line": 224,
+        "text": ""
+      },
+      {
+        "line": 225,
+        "text": "### Recommendation"
+      },
+      {
+        "line": 226,
+        "text": ""
+      },
+      {
+        "line": 227,
+        "text": "Introduce a `SubagentOutputContract` and make it the default for Agent tool results."
+      },
+      {
+        "line": 228,
+        "text": ""
+      },
+      {
+        "line": 229,
+        "text": "Proposed output modes:"
+      },
+      {
+        "line": 230,
+        "text": ""
+      },
+      {
+        "line": 231,
+        "text": "- `summary_only`: parent receives a bounded result summary and metadata."
+      },
+      {
+        "line": 232,
+        "text": "- `artifact_backed`: parent receives summary plus artifact refs for transcript, diff, logs, and"
+      },
+      {
+        "line": 233,
+        "text": "  evidence."
+      },
+      {
+        "line": 234,
+        "text": "- `full_transcript_on_request`: transcript is available only when explicitly requested by the user"
+      },
+      {
+        "line": 235,
+        "text": "  or a debug surface."
+      },
+      {
+        "line": 236,
+        "text": ""
+      },
+      {
+        "line": 237,
+        "text": "Proposed final schema for most coding subagents:"
+      },
+      {
+        "line": 238,
+        "text": ""
+      },
+      {
+        "line": 239,
+        "text": "- `status`: `completed`, `blocked`, `failed`, `partial`"
+      },
+      {
+        "line": 240,
+        "text": "- `summary`: short final answer"
+      },
+      {
+        "line": 241,
+        "text": "- `files_changed`: list of paths"
+      },
+      {
+        "line": 242,
+        "text": "- `tests_run`: commands and pass/fail"
+      },
+      {
+        "line": 243,
+        "text": "- `claims`: important findings that the parent may rely on"
+      },
+      {
+        "line": 244,
+        "text": "- `blockers`: missing inputs or unresolved risks"
+      },
+      {
+        "line": 245,
+        "text": "- `artifact_refs`: transcript, logs, diff, validation output"
+      },
+      {
+        "line": 246,
+        "text": ""
+      },
+      {
+        "line": 247,
+        "text": "Implementation path:"
+      },
+      {
+        "line": 248,
+        "text": ""
+      },
+      {
+        "line": 249,
+        "text": "1. Add an output contract module under `src/agents/`, probably `src/agents/output_contracts.py`."
+      },
+      {
+        "line": 250,
+        "text": "2. Extend `AgentConfig` with optional `output_contract` and `max_parent_output_chars`."
+      },
+      {
+        "line": 251,
+        "text": "3. Make `AgentExecutor` normalize every `AgentRunResult` through the contract."
+      },
+      {
+        "line": 252,
+        "text": "4. Persist full transcript/detailed output as artifacts or task outputs, and return artifact refs to"
+      },
+      {
+        "line": 253,
+        "text": "   the parent."
+      },
+      {
+        "line": 254,
+        "text": "5. Update `AgentTool` to expose contract metadata and default to `summary_only`."
+      },
+      {
+        "line": 255,
+        "text": "6. Add stricter built-in contracts for verification and review agents."
+      },
+      {
+        "line": 256,
+        "text": "7. Add a debug/admin path to fetch full transcript when needed."
+      },
+      {
+        "line": 257,
+        "text": ""
+      },
+      {
+        "line": 258,
+        "text": "Test plan:"
+      },
+      {
+        "line": 259,
+        "text": ""
+      },
+      {
+        "line": 260,
+        "text": "- Unit test that detailed output is stored but not returned to the parent in `summary_only` mode."
+      },
+      {
+        "line": 261,
+        "text": "- Agent tool test proving artifact refs are returned."
+      },
+      {
+        "line": 262,
+        "text": "- Slack formatting test proving display truncation is not the only enforcement mechanism."
+      },
+      {
+        "line": 263,
+        "text": "- Verification-agent test proving `VERDICT`-style output is parsed into structured contract fields."
+      },
+      {
+        "line": 264,
+        "text": ""
+      },
+      {
+        "line": 265,
+        "text": "## 3. Task DAG Rollback And Replan"
+      },
+      {
+        "line": 266,
+        "text": ""
+      },
+      {
+        "line": 267,
+        "text": "### What Codigote Already Has"
+      },
+      {
+        "line": 268,
+        "text": ""
+      },
+      {
+        "line": 269,
+        "text": "Codigote has two separate graph-like systems:"
+      },
+      {
+        "line": 270,
+        "text": ""
+      },
+      {
+        "line": 271,
+        "text": "1. Queue DSL and queue runtime:"
+      },
+      {
+        "line": 272,
+        "text": "   - `src/dsl/queue/compiler.py` parses and validates QDSL."
+      },
+      {
+        "line": 273,
+        "text": "   - `src/dsl/queue/materializer.py` expands prompts and persisted producers."
+      },
+      {
+        "line": 274,
+        "text": "   - Parallel prompt dependencies are resolved during materialization."
+      },
+      {
+        "line": 275,
+        "text": "   - Queue automation can dynamically append or insert follow-up queue entries."
+      },
+      {
+        "line": 276,
+        "text": ""
+      },
+      {
+        "line": 277,
+        "text": "2. Markdown plan-tree runtime:"
+      },
+      {
+        "line": 278,
+        "text": "   - `src/planning/runtime/plan_tree/engine.py` models a task tree with task IDs, statuses,"
+      },
+      {
+        "line": 279,
+        "text": "     dependencies, soft dependencies, readiness gates, revision logs, and executable frontiers."
+      },
+      {
+        "line": 280,
+        "text": "   - Supported revision operations include `update_state`, `edit_content`, `add_task`,"
+      },
+      {
+        "line": 281,
+        "text": "     `rename_task`, `drop_task`, `update_dependencies`, and `complete_research`."
+      },
+      {
+        "line": 282,
+        "text": "   - Blocked tasks require a blocker reference like `task:<id>` or `external:<reason>`."
+      },
+      {
+        "line": 283,
+        "text": "   - Research completion can leave a branch blocked with a concrete `blocked_by` reason."
+      },
+      {
+        "line": 284,
+        "text": "   - `record_plan_execution_unknown(...)` can add a research-gated branch for newly discovered"
+      },
+      {
+        "line": 285,
+        "text": "     unknowns."
+      },
+      {
+        "line": 286,
+        "text": "   - Mutations snapshot affected files and restore snapshots on validation failure."
+      },
+      {
+        "line": 287,
+        "text": ""
+      },
+      {
+        "line": 288,
+        "text": "`PersistentTaskRuntime` also has task dependency edges: `blocks` and `blocked_by`."
+      },
+      {
+        "line": 289,
+        "text": ""
+      },
+      {
+        "line": 290,
+        "text": "### Gap"
+      },
+      {
+        "line": 291,
+        "text": ""
+      },
+      {
+        "line": 292,
+        "text": "Codigote has the right primitives, but they are not yet one unified task DAG rollback/replan system."
+      },
+      {
+        "line": 293,
+        "text": ""
+      },
+      {
+        "line": 294,
+        "text": "Specific gaps:"
+      },
+      {
+        "line": 295,
+        "text": ""
+      },
+      {
+        "line": 296,
+        "text": "- Queue follow-ups are generated as new queue entries; they do not necessarily mutate the plan tree."
+      },
+      {
+        "line": 297,
+        "text": "- Plan-tree operations are file-backed markdown revisions; persistent task records and queue items"
+      },
+      {
+        "line": 298,
+        "text": "  are separate state models."
+      },
+      {
+        "line": 299,
+        "text": "- Rollback exists inside plan-tree mutation functions, but there is no high-level \"revert this task"
+      },
+      {
+        "line": 300,
+        "text": "  DAG to revision X and requeue the affected frontier\" operation."
+      },
+      {
+        "line": 301,
+        "text": "- Completion automation records planned-not-done metadata, but that metadata is not always converted"
+      },
+      {
+        "line": 302,
+        "text": "  into plan-tree `blocked`, `superseded`, `research`, or `add_task` operations."
+      },
+      {
+        "line": 303,
+        "text": "- `execution_impact` is already captured in revision operations, but the queue processor does not"
+      },
+      {
+        "line": 304,
+        "text": "  treat it as a scheduling contract."
+      },
+      {
+        "line": 305,
+        "text": ""
+      },
+      {
+        "line": 306,
+        "text": "### Recommendation"
+      },
+      {
+        "line": 307,
+        "text": ""
+      },
+      {
+        "line": 308,
+        "text": "Create a bridge layer that makes queue/runtime events produce plan-tree or task-DAG mutations when a"
+      },
+      {
+        "line": 309,
+        "text": "plan root is attached."
+      },
+      {
+        "line": 310,
+        "text": ""
+      },
+      {
+        "line": 311,
+        "text": "Proposed concepts:"
+      },
+      {
+        "line": 312,
+        "text": ""
+      },
+      {
+        "line": 313,
+        "text": "- `TaskGraphMutation`: provider-neutral record for `add`, `update_state`, `update_dependencies`,"
+      },
+      {
+        "line": 314,
+        "text": "  `drop`, `supersede`, `research_unknown`, and `complete_research`."
+      },
+      {
+        "line": 315,
+        "text": "- `TaskGraphRevision`: durable mutation batch with parent revision, actor, evidence refs, and"
+      },
+      {
+        "line": 316,
+        "text": "  execution impact."
+      },
+      {
+        "line": 317,
+        "text": "- `TaskGraphFrontierChange`: computed result that lists newly runnable, blocked, superseded, and"
+      },
+      {
+        "line": 318,
+        "text": "  requeued tasks."
+      },
+      {
+        "line": 319,
+        "text": "- `TaskGraphRollback`: operation that restores a previous revision and emits a new revision noting"
+      },
+      {
+        "line": 320,
+        "text": "  the rollback reason."
+      },
+      {
+        "line": 321,
+        "text": ""
+      },
+      {
+        "line": 322,
+        "text": "Implementation path:"
+      },
+      {
+        "line": 323,
+        "text": ""
+      },
+      {
+        "line": 324,
+        "text": "1. Build an adapter around plan-tree functions rather than rewriting them."
+      },
+      {
+        "line": 325,
+        "text": "2. Add a queue metadata convention for attaching `plan_root` and `plan_task_id`."
+      },
+      {
+        "line": 326,
+        "text": "3. When completion says incomplete:"
+      },
+      {
+        "line": 327,
+        "text": "   - If missing work maps to existing plan tasks, call `record_plan_task_state_updates(...)` or"
+      },
+      {
+        "line": 328,
+        "text": "     `record_plan_task_dependencies(...)`."
+      },
+      {
+        "line": 329,
+        "text": "   - If new work is discovered, call `record_plan_task_addition(...)`."
+      },
+      {
+        "line": 330,
+        "text": "   - If a critical unknown blocks execution, call `record_plan_execution_unknown(...)`."
+      },
+      {
+        "line": 331,
+        "text": "4. When research finishes, call `record_plan_research_completion(...)` and use `impact_scope` plus"
+      },
+      {
+        "line": 332,
+        "text": "   `execution_impact` to decide whether to recompile or requeue the frontier."
+      },
+      {
+        "line": 333,
+        "text": "5. Add a queue scheduler hook that consumes `ExecutableFrontier` and enqueues newly runnable leaves."
+      },
+      {
+        "line": 334,
+        "text": "6. Add rollback command/API support after mutation lineage is visible in the UI."
+      },
+      {
+        "line": 335,
+        "text": ""
+      },
+      {
+        "line": 336,
+        "text": "Test plan:"
+      },
+      {
+        "line": 337,
+        "text": ""
+      },
+      {
+        "line": 338,
+        "text": "- Unit test mapping a `planned_not_done` item into a new plan-tree task."
+      },
+      {
+        "line": 339,
+        "text": "- Unit test mapping a critical unknown into a research branch with `blocked_by`."
+      },
+      {
+        "line": 340,
+        "text": "- Queue integration test where a failed verification updates plan state and requeues only affected"
+      },
+      {
+        "line": 341,
+        "text": "  frontier leaves."
+      },
+      {
+        "line": 342,
+        "text": "- Rollback test proving task files, revision log, and queue entries remain consistent."
+      },
+      {
+        "line": 343,
+        "text": ""
+      },
+      {
+        "line": 344,
+        "text": "## 4. Verification As A Trust Gate"
+      },
+      {
+        "line": 345,
+        "text": ""
+      },
+      {
+        "line": 346,
+        "text": "### What Codigote Already Has"
+      },
+      {
+        "line": 347,
+        "text": ""
+      },
+      {
+        "line": 348,
+        "text": "Verification exists in several layers:"
+      },
+      {
+        "line": 349,
+        "text": ""
+      },
+      {
+        "line": 350,
+        "text": "- `ValidationLoopRuntime` runs deterministic command and JSON schema checks."
+      },
+      {
+        "line": 351,
+        "text": "- `ValidateProfileTool` and `RunTargetedTestsTool` expose validation to agents."
+      },
+      {
+        "line": 352,
+        "text": "- `ValidationProfileRuntime` resolves checks from task family and policy."
+      },
+      {
+        "line": 353,
+        "text": "- The built-in `verification` agent is read-only and has a final verdict convention."
+      },
+      {
+        "line": 354,
+        "text": "- `CompletionVerifier` in governance can reject final text with unresolved questions, failed"
+      },
+      {
+        "line": 355,
+        "text": "  validation, or unfinished markers."
+      },
+      {
+        "line": 356,
+        "text": "- `compute_quality_score(...)` factors tests/build/lint/typecheck and code-risk signals into a"
+      },
+      {
+        "line": 357,
+        "text": "  score."
+      },
+      {
+        "line": 358,
+        "text": "- `TraceSummaryBuilder._infer_verification_status(...)` infers pass/fail/unknown from run output."
+      },
+      {
+        "line": 359,
+        "text": ""
+      },
+      {
+        "line": 360,
+        "text": "### Gap"
+      },
+      {
+        "line": 361,
+        "text": ""
+      },
+      {
+        "line": 362,
+        "text": "Verification is available, but it is not a uniform trust gate."
+      },
+      {
+        "line": 363,
+        "text": ""
+      },
+      {
+        "line": 364,
+        "text": "Specific gaps:"
+      },
+      {
+        "line": 365,
+        "text": ""
+      },
+      {
+        "line": 366,
+        "text": "- Different paths use different verification concepts and status values."
+      },
+      {
+        "line": 367,
+        "text": "- Queue completion can happen before automation-generated checks finish."
+      },
+      {
+        "line": 368,
+        "text": "- The trace-level status is inferred from text markers, not necessarily from explicit validation"
+      },
+      {
+        "line": 369,
+        "text": "  evidence."
+      },
+      {
+        "line": 370,
+        "text": "- Validation plans can be advisory."
+      },
+      {
+        "line": 371,
+        "text": "- The verification agent's verdict is not yet normalized into the same trust state as deterministic"
+      },
+      {
+        "line": 372,
+        "text": "  validation."
+      },
+      {
+        "line": 373,
+        "text": ""
+      },
+      {
+        "line": 374,
+        "text": "### Recommendation"
+      },
+      {
+        "line": 375,
+        "text": ""
+      },
+      {
+        "line": 376,
+        "text": "Add a single trust-gate state machine that consumes all verification sources."
+      },
+      {
+        "line": 377,
+        "text": ""
+      },
+      {
+        "line": 378,
+        "text": "Proposed trust states:"
+      },
+      {
+        "line": 379,
+        "text": ""
+      },
+      {
+        "line": 380,
+        "text": "- `not_checked`"
+      },
+      {
+        "line": 381,
+        "text": "- `reported_complete`"
+      },
+      {
+        "line": 382,
+        "text": "- `verification_running`"
+      },
+      {
+        "line": 383,
+        "text": "- `verified_complete`"
+      },
+      {
+        "line": 384,
+        "text": "- `verified_partial`"
+      },
+      {
+        "line": 385,
+        "text": "- `verification_failed`"
+      },
+      {
+        "line": 386,
+        "text": "- `blocked`"
+      },
+      {
+        "line": 387,
+        "text": ""
+      },
+      {
+        "line": 388,
+        "text": "Rules:"
+      },
+      {
+        "line": 389,
+        "text": ""
+      },
+      {
+        "line": 390,
+        "text": "- Blocking deterministic checks outrank model claims."
+      },
+      {
+        "line": 391,
+        "text": "- A verifier-agent `PASS` can satisfy model-review checks but not deterministic test checks."
+      },
+      {
+        "line": 392,
+        "text": "- Unknown verification should never be displayed as verified."
+      },
+      {
+        "line": 393,
+        "text": "- Queue auto-followups can remain useful, but a user-facing task should expose its trust state."
+      },
+      {
+        "line": 394,
+        "text": ""
+      },
+      {
+        "line": 395,
+        "text": "Implementation path:"
+      },
+      {
+        "line": 396,
+        "text": ""
+      },
+      {
+        "line": 397,
+        "text": "1. Add `VerificationGateResult` model and evaluator."
+      },
+      {
+        "line": 398,
+        "text": "2. Feed it validation loop results, targeted test tool results, verifier-agent verdicts, completion"
+      },
+      {
+        "line": 399,
+        "text": "   decisions, and trace verification status."
+      },
+      {
+        "line": 400,
+        "text": "3. Persist the result alongside trace run metadata and queue item metadata."
+      },
+      {
+        "line": 401,
+        "text": "4. Update Slack/web rendering to show \"reported complete\" versus \"verified complete.\""
+      },
+      {
+        "line": 402,
+        "text": "5. Make strict profiles block `verified_complete`; leave non-strict profiles advisory."
+      },
+      {
+        "line": 403,
+        "text": ""
+      },
+      {
+        "line": 404,
+        "text": "Test plan:"
+      },
+      {
+        "line": 405,
+        "text": ""
+      },
+      {
+        "line": 406,
+        "text": "- Deterministic failed test blocks `verified_complete`."
+      },
+      {
+        "line": 407,
+        "text": "- Verifier-agent `PASS` without tests yields `verified_partial` or `reported_complete`, depending"
+      },
+      {
+        "line": 408,
+        "text": "  on contract policy."
+      },
+      {
+        "line": 409,
+        "text": "- Trace status `unknown` cannot promote a task."
+      },
+      {
+        "line": 410,
+        "text": "- Queue automation still enqueues followups when verification fails."
+      },
+      {
+        "line": 411,
+        "text": ""
+      },
+      {
+        "line": 412,
+        "text": "## 5. Cache-Aware Prompt And Tool Schema Stability"
+      },
+      {
+        "line": 413,
+        "text": ""
+      },
+      {
+        "line": 414,
+        "text": "### What Codigote Already Has"
+      },
+      {
+        "line": 415,
+        "text": ""
+      },
+      {
+        "line": 416,
+        "text": "Codigote already models cacheable context:"
+      },
+      {
+        "line": 417,
+        "text": ""
+      },
+      {
+        "line": 418,
+        "text": "- `RegisteredContextSource` has `cache_eligible`, `stable_content_hash`, freshness keys, retention"
+      },
+      {
+        "line": 419,
+        "text": "  modes, and stale behavior."
+      },
+      {
+        "line": 420,
+        "text": "- `ConversationView` emits `PromptCacheHint` records."
+      },
+      {
+        "line": 421,
+        "text": "- Provider semantics record whether a provider supports prompt cache hints."
+      },
+      {
+        "line": 422,
+        "text": "- `ConversationRuntime` tracks context bundle hashes and retention modes."
+      },
+      {
+        "line": 423,
+        "text": "- `ToolSelectionRuntime` limits selected tool declarations and records omitted tool refs plus"
+      },
+      {
+        "line": 424,
+        "text": "  schema byte counts."
+      },
+      {
+        "line": 425,
+        "text": ""
+      },
+      {
+        "line": 426,
+        "text": "### Gap"
+      },
+      {
+        "line": 427,
+        "text": ""
+      },
+      {
+        "line": 428,
+        "text": "The cache model is incomplete at the provider-request and tool-schema level."
+      },
+      {
+        "line": 429,
+        "text": ""
+      },
+      {
+        "line": 430,
+        "text": "Specific gaps:"
+      },
+      {
+        "line": 431,
+        "text": ""
+      },
+      {
+        "line": 432,
+        "text": "- `ConversationRuntime` computes prompt cache hints but does not appear to place the actual hints"
+      },
+      {
+        "line": 433,
+        "text": "  into `ModelRequest`; it currently records whether hints are enabled in routing constraints."
+      },
+      {
+        "line": 434,
+        "text": "- Dynamic tool lists, plugin commands, MCP tools, skills, and agent catalogs can change provider"
+      },
+      {
+        "line": 435,
+        "text": "  visible tool schema text."
+      },
+      {
+        "line": 436,
+        "text": "- Claude Code's reference explicitly addresses this by moving dynamic agent listing out of the tool"
+      },
+      {
+        "line": 437,
+        "text": "  description and into an attachment/message when needed. Codigote has `ToolSelectionRuntime`, but"
+      },
+      {
+        "line": 438,
+        "text": "  not a full \"stable core schema plus dynamic catalog attachment\" policy."
+      },
+      {
+        "line": 439,
+        "text": "- Cache metrics such as cache creation/read savings are not visibly tied to prompt/tool schema"
+      },
+      {
+        "line": 440,
+        "text": "  stability decisions."
+      },
+      {
+        "line": 441,
+        "text": ""
+      },
+      {
+        "line": 442,
+        "text": "### Recommendation"
+      },
+      {
+        "line": 443,
+        "text": ""
+      },
+      {
+        "line": 444,
+        "text": "Define a cache-stability policy for provider-visible prompt and tool surfaces."
+      },
+      {
+        "line": 445,
+        "text": ""
+      },
+      {
+        "line": 446,
+        "text": "Policy:"
+      },
+      {
+        "line": 447,
+        "text": ""
+      },
+      {
+        "line": 448,
+        "text": "- Keep core tool schemas stable and small."
+      },
+      {
+        "line": 449,
+        "text": "- Move dynamic catalogs into cacheable context sources or explicit catalog messages."
+      },
+      {
+        "line": 450,
+        "text": "- Use tool-search/deferred schema loading for long-tail tools."
+      },
+      {
+        "line": 451,
+        "text": "- Track schema fingerprints per request."
+      },
+      {
+        "line": 452,
+        "text": "- Emit diagnostics when a dynamic catalog changes the prompt or tool schema enough to bust cache."
+      },
+      {
+        "line": 453,
+        "text": ""
+      },
+      {
+        "line": 454,
+        "text": "Implementation path:"
+      },
+      {
+        "line": 455,
+        "text": ""
+      },
+      {
+        "line": 456,
+        "text": "1. Add a `ToolSchemaFingerprint` helper that hashes selected tool declarations."
+      },
+      {
+        "line": 457,
+        "text": "2. Add `prompt_cache_hints` or equivalent metadata to `ModelRequest` if provider adapters can use"
+      },
+      {
+        "line": 458,
+        "text": "   it."
+      },
+      {
+        "line": 459,
+        "text": "3. Split dynamic catalogs:"
+      },
+      {
+        "line": 460,
+        "text": "   - static core Agent tool schema"
+      },
+      {
+        "line": 461,
+        "text": "   - dynamic agent list as a context source or system reminder"
+      },
+      {
+        "line": 462,
+        "text": "   - dynamic plugin/MCP/skill catalogs as cacheable context sources with freshness keys"
+      },
+      {
+        "line": 463,
+        "text": "4. Extend `ToolSelectionRuntime` output with a schema fingerprint and stability diagnostics."
+      },
+      {
+        "line": 464,
+        "text": "5. Persist request-level cache diagnostics in the conversation request manifest."
+      },
+      {
+        "line": 465,
+        "text": "6. Add per-provider adapter support only where semantics say hints are supported."
+      },
+      {
+        "line": 466,
+        "text": ""
+      },
+      {
+        "line": 467,
+        "text": "Test plan:"
+      },
+      {
+        "line": 468,
+        "text": ""
+      },
+      {
+        "line": 469,
+        "text": "- Unit test that dynamic agent list changes do not change the Agent tool schema fingerprint."
+      },
+      {
+        "line": 470,
+        "text": "- Unit test that a plugin catalog freshness-key change changes only the catalog context source hash."
+      },
+      {
+        "line": 471,
+        "text": "- Provider request test proving cache hints flow to supported providers and are omitted otherwise."
+      },
+      {
+        "line": 472,
+        "text": "- Metrics test proving request manifests include schema fingerprints."
+      },
+      {
+        "line": 473,
+        "text": ""
+      },
+      {
+        "line": 474,
+        "text": "## 6. Persistent Sandbox And Session Execution"
+      },
+      {
+        "line": 475,
+        "text": ""
+      },
+      {
+        "line": 476,
+        "text": "### What Codigote Already Has"
+      },
+      {
+        "line": 477,
+        "text": ""
+      },
+      {
+        "line": 478,
+        "text": "There are two relevant execution models:"
+      },
+      {
+        "line": 479,
+        "text": ""
+      },
+      {
+        "line": 480,
+        "text": "- Model-facing `bash`, `powershell`, and `shell` tools in `src/tools/process_tools.py` run one-shot"
+      },
+      {
+        "line": 481,
+        "text": "  subprocesses through `_run_process_tool(...)`."
+      },
+      {
+        "line": 482,
+        "text": "- App-control terminal APIs in `src/tools/terminal.py` can start persistent background processes,"
+      },
+      {
+        "line": 483,
+        "text": "  write stdin, read output, resize PTYs, terminate processes, and persist terminal records."
+      },
+      {
+        "line": 484,
+        "text": ""
+      },
+      {
+        "line": 485,
+        "text": "The one-shot process tools intentionally block interactive standalone commands like `python`,"
+      },
+      {
+        "line": 486,
+        "text": "`bash`, `vim`, and `tail -f`. That is reasonable for safe model-facing tools, but it means agents"
+      },
+      {
+        "line": 487,
+        "text": "do not have a persistent Python/R/node/shell sandbox session as a first-class tool."
+      },
+      {
+        "line": 488,
+        "text": ""
+      },
+      {
+        "line": 489,
+        "text": "Codigote also has memory and plugin surfaces that can host long-lived state:"
+      },
+      {
+        "line": 490,
+        "text": ""
+      },
+      {
+        "line": 491,
+        "text": "- Memory tools: session memory, memory scan/retrieve/write/update."
+      },
+      {
+        "line": 492,
+        "text": "- Plugin runtime: trusted plugin loading, cache invalidation, skill/plugin discovery."
+      },
+      {
+        "line": 493,
+        "text": "- Terminal runtime: process lifecycle and buffered output."
+      },
+      {
+        "line": 494,
+        "text": ""
+      },
+      {
+        "line": 495,
+        "text": "### Gap"
+      },
+      {
+        "line": 496,
+        "text": ""
+      },
+      {
+        "line": 497,
+        "text": "Persistent execution exists for app-control clients, but it is not exposed as a governed"
+      },
+      {
+        "line": 498,
+        "text": "model-facing sandbox/session tool with snapshots, state summaries, and memory integration."
+      },
+      {
+        "line": 499,
+        "text": ""
+      },
+      {
+        "line": 500,
+        "text": "Specific gaps:"
+      },
+      {
+        "line": 501,
+        "text": ""
+      },
+      {
+        "line": 502,
+        "text": "- No model-facing `sandbox.create`, `sandbox.exec`, `sandbox.read`, `sandbox.snapshot`, or"
+      },
+      {
+        "line": 503,
+        "text": "  `sandbox.destroy` contract."
+      },
+      {
+        "line": 504,
+        "text": "- No first-class session state summary for a persistent REPL."
+      },
+      {
+        "line": 505,
+        "text": "- No snapshot/restore contract beyond terminal process records."
+      },
+      {
+        "line": 506,
+        "text": "- No trust boundary between persistent execution state and durable memory."
+      },
+      {
+        "line": 507,
+        "text": "- No expiration/cleanup policy for abandoned model-created sessions."
+      },
+      {
+        "line": 508,
+        "text": ""
+      },
+      {
+        "line": 509,
+        "text": "### Recommendation"
+      },
+      {
+        "line": 510,
+        "text": ""
+      },
+      {
+        "line": 511,
+        "text": "Build persistent sandbox/session execution as a plugin-backed first-class tool family that reuses"
+      },
+      {
+        "line": 512,
+        "text": "`TerminalRuntime` internally."
+      },
+      {
+        "line": 513,
+        "text": ""
+      },
+      {
+        "line": 514,
+        "text": "Initial tool family:"
+      },
+      {
+        "line": 515,
+        "text": ""
+      },
+      {
+        "line": 516,
+        "text": "- `sandbox_session_create`: create a named shell/Python/node session with cwd, env policy, timeout,"
+      },
+      {
+        "line": 517,
+        "text": "  and persistence mode."
+      },
+      {
+        "line": 518,
+        "text": "- `sandbox_session_exec`: send input and optionally wait for prompt/output patterns."
+      },
+      {
+        "line": 519,
+        "text": "- `sandbox_session_read`: read buffered output since a cursor."
+      },
+      {
+        "line": 520,
+        "text": "- `sandbox_session_snapshot`: summarize cwd, command history, relevant variables/files, output"
+      },
+      {
+        "line": 521,
+        "text": "  cursor, and artifact refs."
+      },
+      {
+        "line": 522,
+        "text": "- `sandbox_session_destroy`: terminate and clean up."
+      },
+      {
+        "line": 523,
+        "text": ""
+      },
+      {
+        "line": 524,
+        "text": "Why plugin-backed:"
+      },
+      {
+        "line": 525,
+        "text": ""
+      },
+      {
+        "line": 526,
+        "text": "- It fits the user's intuition that this could be a memory-system plugin."
+      },
+      {
+        "line": 527,
+        "text": "- It can be installed/disabled independently."
+      },
+      {
+        "line": 528,
+        "text": "- It can declare trust tier, permissions, retention, and cleanup policy."
+      },
+      {
+        "line": 529,
+        "text": "- It can integrate with session memory after explicit summarization instead of dumping raw terminal"
+      },
+      {
+        "line": 530,
+        "text": "  transcripts into memory."
+      },
+      {
+        "line": 531,
+        "text": ""
+      },
+      {
+        "line": 532,
+        "text": "Implementation path:"
+      },
+      {
+        "line": 533,
+        "text": ""
+      },
+      {
+        "line": 534,
+        "text": "1. Add a runtime wrapper around `TerminalRuntime` with stricter model-facing policy."
+      },
+      {
+        "line": 535,
+        "text": "2. Start with shell sessions only; add Python/node REPL helpers after cursor handling is reliable."
+      },
+      {
+        "line": 536,
+        "text": "3. Add database/session metadata: owner session, cwd, created_by tool call, TTL, status, output"
+      },
+      {
+        "line": 537,
+        "text": "   cursor, memory mode."
+      },
+      {
+        "line": 538,
+        "text": "4. Add safety policy:"
+      },
+      {
+        "line": 539,
+        "text": "   - no hidden daemon creation unless explicitly backgrounded"
+      },
+      {
+        "line": 540,
+        "text": "   - TTL cleanup"
+      },
+      {
+        "line": 541,
+        "text": "   - bounded output reads"
+      },
+      {
+        "line": 542,
+        "text": "   - explicit env allowlist"
+      },
+      {
+        "line": 543,
+        "text": "   - approval for high-risk commands"
+      },
+      {
+        "line": 544,
+        "text": "5. Add snapshot summaries and optional session memory writes."
+      },
+      {
+        "line": 545,
+        "text": "6. Expose through plugin or first-class tools after governance tests pass."
+      },
+      {
+        "line": 546,
+        "text": ""
+      },
+      {
+        "line": 547,
+        "text": "Test plan:"
+      },
+      {
+        "line": 548,
+        "text": ""
+      },
+      {
+        "line": 549,
+        "text": "- Create/write/read/destroy lifecycle test."
+      },
+      {
+        "line": 550,
+        "text": "- Cursor test proving reads do not duplicate output."
+      },
+      {
+        "line": 551,
+        "text": "- TTL cleanup test."
+      },
+      {
+        "line": 552,
+        "text": "- Policy test proving interactive sessions are denied unless created through sandbox tools."
+      },
+      {
+        "line": 553,
+        "text": "- Memory test proving only summaries, not full raw output, enter memory."
+      },
+      {
+        "line": 554,
+        "text": ""
+      },
+      {
+        "line": 555,
+        "text": "## Prioritized Roadmap"
+      },
+      {
+        "line": 556,
+        "text": ""
+      },
+      {
+        "line": 557,
+        "text": "### Phase 0: Instrument Current Behavior"
+      },
+      {
+        "line": 558,
+        "text": ""
+      },
+      {
+        "line": 559,
+        "text": "Goal: make the current advisory systems visible before changing semantics."
+      },
+      {
+        "line": 560,
+        "text": ""
+      },
+      {
+        "line": 561,
+        "text": "Tasks:"
+      },
+      {
+        "line": 562,
+        "text": ""
+      },
+      {
+        "line": 563,
+        "text": "- Add request/trace metadata for completion decision source, verification source, and queue"
+      },
+      {
+        "line": 564,
+        "text": "  automation action."
+      },
+      {
+        "line": 565,
+        "text": "- Add schema fingerprint metadata for selected tools."
+      },
+      {
+        "line": 566,
+        "text": "- Add documentation for current trust states and known limitations."
+      },
+      {
+        "line": 567,
+        "text": ""
+      },
+      {
+        "line": 568,
+        "text": "Exit criteria:"
+      },
+      {
+        "line": 569,
+        "text": ""
+      },
+      {
+        "line": 570,
+        "text": "- A trace can explain why a task was considered done."
+      },
+      {
+        "line": 571,
+        "text": "- A queue item can show whether it was merely completed or verified."
+      },
+      {
+        "line": 572,
+        "text": "- Tool schema churn can be observed."
+      },
+      {
+        "line": 573,
+        "text": ""
+      },
+      {
+        "line": 574,
+        "text": "### Phase 1: Completion Contract And Verification Gate"
+      },
+      {
+        "line": 575,
+        "text": ""
+      },
+      {
+        "line": 576,
+        "text": "Goal: turn existing completion and validation primitives into one trusted completion contract."
+      },
+      {
+        "line": 577,
+        "text": ""
+      },
+      {
+        "line": 578,
+        "text": "Tasks:"
+      },
+      {
+        "line": 579,
+        "text": ""
+      },
+      {
+        "line": 580,
+        "text": "- Add `CompletionContract`."
+      },
+      {
+        "line": 581,
+        "text": "- Add `VerificationGateResult`."
+      },
+      {
+        "line": 582,
+        "text": "- Compile contracts from acceptance criteria, task status, validation plans, and plan-tree task"
+      },
+      {
+        "line": 583,
+        "text": "  state."
+      },
+      {
+        "line": 584,
+        "text": "- Persist contract evaluations."
+      },
+      {
+        "line": 585,
+        "text": "- Render trust state in Slack/web."
+      },
+      {
+        "line": 586,
+        "text": ""
+      },
+      {
+        "line": 587,
+        "text": "Exit criteria:"
+      },
+      {
+        "line": 588,
+        "text": ""
+      },
+      {
+        "line": 589,
+        "text": "- \"Verified complete\" requires explicit evidence."
+      },
+      {
+        "line": 590,
+        "text": "- Failed blocking validation cannot silently become verified."
+      },
+      {
+        "line": 591,
+        "text": "- Existing completion automation still works."
+      },
+      {
+        "line": 592,
+        "text": ""
+      },
+      {
+        "line": 593,
+        "text": "### Phase 2: Subagent Output Discipline"
+      },
+      {
+        "line": 594,
+        "text": ""
+      },
+      {
+        "line": 595,
+        "text": "Goal: keep parent context clean and make agent results reliable."
+      },
+      {
+        "line": 596,
+        "text": ""
+      },
+      {
+        "line": 597,
+        "text": "Tasks:"
+      },
+      {
+        "line": 598,
+        "text": ""
+      },
+      {
+        "line": 599,
+        "text": "- Add `SubagentOutputContract`."
+      },
+      {
+        "line": 600,
+        "text": "- Normalize `AgentRunResult`."
+      },
+      {
+        "line": 601,
+        "text": "- Store detailed transcripts as artifacts/task outputs."
+      },
+      {
+        "line": 602,
+        "text": "- Return bounded summaries and artifact refs to parents."
+      },
+      {
+        "line": 603,
+        "text": "- Add structured contracts for verification/review agents."
+      },
+      {
+        "line": 604,
+        "text": ""
+      },
+      {
+        "line": 605,
+        "text": "Exit criteria:"
+      },
+      {
+        "line": 606,
+        "text": ""
+      },
+      {
+        "line": 607,
+        "text": "- Parent context gets summary-only by default."
+      },
+      {
+        "line": 608,
+        "text": "- Full child transcript remains available through explicit artifact access."
+      },
+      {
+        "line": 609,
+        "text": "- Verification agent output is parsed into structured verdicts."
+      },
+      {
+        "line": 610,
+        "text": ""
+      },
+      {
+        "line": 611,
+        "text": "### Phase 3: Plan-Tree And Queue DAG Integration"
+      },
+      {
+        "line": 612,
+        "text": ""
+      },
+      {
+        "line": 613,
+        "text": "Goal: make dynamic replanning update the plan/task DAG, not just append queue items."
+      },
+      {
+        "line": 614,
+        "text": ""
+      },
+      {
+        "line": 615,
+        "text": "Tasks:"
+      },
+      {
+        "line": 616,
+        "text": ""
+      },
+      {
+        "line": 617,
+        "text": "- Add a task graph adapter over existing plan-tree functions."
+      },
+      {
+        "line": 618,
+        "text": "- Attach `plan_root` and `plan_task_id` to queue items where available."
+      },
+      {
+        "line": 619,
+        "text": "- Convert completion failures and discovered unknowns into plan-tree mutations."
+      },
+      {
+        "line": 620,
+        "text": "- Recompute executable frontier and enqueue affected leaves."
+      },
+      {
+        "line": 621,
+        "text": "- Add rollback command/API after lineage is visible."
+      },
+      {
+        "line": 622,
+        "text": ""
+      },
+      {
+        "line": 623,
+        "text": "Exit criteria:"
+      },
+      {
+        "line": 624,
+        "text": ""
+      },
+      {
+        "line": 625,
+        "text": "- Incomplete work can become a plan mutation with reason and evidence."
+      },
+      {
+        "line": 626,
+        "text": "- Research-gated unknowns are first-class plan nodes."
+      },
+      {
+        "line": 627,
+        "text": "- Rollback restores plan files and queue frontier consistently."
+      },
+      {
+        "line": 628,
+        "text": ""
+      },
+      {
+        "line": 629,
+        "text": "### Phase 4: Cache Stability"
+      },
+      {
+        "line": 630,
+        "text": ""
+      },
+      {
+        "line": 631,
+        "text": "Goal: reduce cache churn from dynamic schemas and catalogs."
+      },
+      {
+        "line": 632,
+        "text": ""
+      },
+      {
+        "line": 633,
+        "text": "Tasks:"
+      },
+      {
+        "line": 634,
+        "text": ""
+      },
+      {
+        "line": 635,
+        "text": "- Add schema fingerprints."
+      },
+      {
+        "line": 636,
+        "text": "- Move dynamic catalogs into cacheable context messages where possible."
+      },
+      {
+        "line": 637,
+        "text": "- Wire prompt cache hints into provider requests."
+      },
+      {
+        "line": 638,
+        "text": "- Add request manifest diagnostics for cache eligibility and schema churn."
+      },
+      {
+        "line": 639,
+        "text": ""
+      },
+      {
+        "line": 640,
+        "text": "Exit criteria:"
+      },
+      {
+        "line": 641,
+        "text": ""
+      },
+      {
+        "line": 642,
+        "text": "- Dynamic agent/plugin list changes do not unnecessarily change core tool schema."
+      },
+      {
+        "line": 643,
+        "text": "- Supported providers receive cache hints."
+      },
+      {
+        "line": 644,
+        "text": "- Cache-stability regressions are testable."
+      },
+      {
+        "line": 645,
+        "text": ""
+      },
+      {
+        "line": 646,
+        "text": "### Phase 5: Persistent Sandbox Sessions"
+      },
+      {
+        "line": 647,
+        "text": ""
+      },
+      {
+        "line": 648,
+        "text": "Goal: expose durable execution sessions safely."
+      },
+      {
+        "line": 649,
+        "text": ""
+      },
+      {
+        "line": 650,
+        "text": "Tasks:"
+      },
+      {
+        "line": 651,
+        "text": ""
+      },
+      {
+        "line": 652,
+        "text": "- Build a governed sandbox session runtime on top of `TerminalRuntime`."
+      },
+      {
+        "line": 653,
+        "text": "- Add model-facing sandbox session tools behind plugin/feature policy."
+      },
+      {
+        "line": 654,
+        "text": "- Add TTL cleanup, bounded output reads, snapshots, and memory summaries."
+      },
+      {
+        "line": 655,
+        "text": "- Add frontend controls for viewing/terminating sessions."
+      },
+      {
+        "line": 656,
+        "text": ""
+      },
+      {
+        "line": 657,
+        "text": "Exit criteria:"
+      },
+      {
+        "line": 658,
+        "text": ""
+      },
+      {
+        "line": 659,
+        "text": "- Agents can reuse a persistent session without using unsafe standalone shells."
+      },
+      {
+        "line": 660,
+        "text": "- Raw output is bounded and summarized."
+      },
+      {
+        "line": 661,
+        "text": "- Sessions are visible, governable, and cleanly terminated."
+      },
+      {
+        "line": 662,
+        "text": ""
+      },
+      {
+        "line": 663,
+        "text": "## Recommended First PR"
+      },
+      {
+        "line": 664,
+        "text": ""
+      },
+      {
+        "line": 665,
+        "text": "Start with Phase 0 plus the minimal data model for Phase 1:"
+      },
+      {
+        "line": 666,
+        "text": ""
+      },
+      {
+        "line": 667,
+        "text": "1. Add `src/completion/contracts.py` with dataclasses only."
+      },
+      {
+        "line": 668,
+        "text": "2. Add a compiler from current `CompletionDecision`, task-status blocks, and validation plan"
+      },
+      {
+        "line": 669,
+        "text": "   results into a `CompletionContractEvaluation`."
+      },
+      {
+        "line": 670,
+        "text": "3. Add tests around compilation and trust-state precedence."
+      },
+      {
+        "line": 671,
+        "text": "4. Persist the evaluation in trace metadata without changing queue behavior yet."
+      },
+      {
+        "line": 672,
+        "text": "5. Add docs/UI labels for `reported_complete` versus `verified_complete`."
+      },
+      {
+        "line": 673,
+        "text": ""
+      },
+      {
+        "line": 674,
+        "text": "This gives Codigote a stable vocabulary and evidence shape before changing queue completion"
+      },
+      {
+        "line": 675,
+        "text": "semantics."
+      },
+      {
+        "line": 676,
+        "text": ""
+      },
+      {
+        "line": 677,
+        "text": "## Main Design Principle"
+      },
+      {
+        "line": 678,
+        "text": ""
+      },
+      {
+        "line": 679,
+        "text": "Codigote already has the concepts. The next level is to make them explicit, persisted, and"
+      },
+      {
+        "line": 680,
+        "text": "composable:"
+      },
+      {
+        "line": 681,
+        "text": ""
+      },
+      {
+        "line": 682,
+        "text": "- Completion should be a contract, not a guess."
+      },
+      {
+        "line": 683,
+        "text": "- Verification should be a gate, not just a useful tool."
+      },
+      {
+        "line": 684,
+        "text": "- Subagent output should be summary-first with artifact-backed detail."
+      },
+      {
+        "line": 685,
+        "text": "- Replanning should mutate a task graph with lineage, not only create more queue text."
+      },
+      {
+        "line": 686,
+        "text": "- Cache behavior should be observable and protected from dynamic schema churn."
+      },
+      {
+        "line": 687,
+        "text": "- Persistent sessions should reuse existing terminal/process governance and integrate with memory"
+      },
+      {
+        "line": 688,
+        "text": "  through explicit summaries."
+      }
+    ],
+    "mime_type": "text/markdown",
+    "numbered_content": "1\t# Claude Harness Concepts Gap Analysis\n2\t\n3\tDate: 2026-05-11\n4\t\n5\tThis document reviews the Claude-harness ideas discussed from\n6\t`claude_from_scratch.pdf` against the current Codigote codebase. The article is best\n7\tunderstood as a harness design article, not a description of Claude model internals. The relevant\n8\tquestion for Codigote is whether its provider-neutral harness already has equivalent runtime\n9\tcontracts, where those contracts are advisory, and which pieces should become first-class product\n10\tsurface.\n11\t\n12\t## Executive Summary\n13\t\n14\tCodigote already has substantial coverage for most of these ideas:\n15\t\n16\t- Completion is not just \"Claude stopped calling tools.\" `src/completion/decision.py` uses runtime\n17\t  lifecycle signals, structured `<task-status>` blocks, optional classifiers, optional LLM judges,\n18\t  and text/git heuristics.\n19\t- Queue automation already converts incomplete work into follow-up queue entries, and it has a\n20\t  quality scoring guardrail. However, queue items are marked `completed` before follow-ups are\n21\t  generated, so the current system is a continuation engine rather than a strict trust gate.\n22\t- Subagents are real delegated model/tool loops with configurable tool policies and durable task\n23\t  descriptors. They are not just \"explore a folder\" helpers. The current gap is output discipline:\n24\t  Codigote does not consistently enforce that parent context receives only a bounded summary while\n25\t  detailed transcripts stay in artifacts.\n26\t- The plan-tree runtime already supports dynamic plan mutation, blocked tasks with reasons,\n27\t  dependency updates, research completion, discovered execution unknowns, and rollback on failed\n28\t  mutations. The gap is integration: queue/runtime execution and persistent tasks do not share one\n29\t  unified task-DAG mutation model.\n30\t- Verification exists in multiple forms: deterministic validation profiles, targeted test tools,\n31\t  a built-in verification agent, trace-level verification inference, and prompt optimization\n32\t  scoring. The gap is that verification is not a single hard \"trusted complete\" gate.\n33\t- Cache-aware context exists through context source hashes, retention modes, and prompt cache hint\n34\t  metadata. Tool schema stability is partially addressed through `ToolSelectionRuntime`, but the\n35\t  prompt-cache hints are not yet wired deeply enough into provider requests, and dynamic agent/tool\n36\t  catalogs can still churn schemas.\n37\t- Persistent terminal processes already exist for app-control clients. Normal model `bash` and\n38\t  `shell` tools are still one-shot subprocesses. A persistent sandbox/session execution feature\n39\t  should reuse the terminal runtime and memory/plugin surfaces rather than inventing a second\n40\t  process manager.\n41\t\n42\tThe recommended direction is not a rewrite. The best next work is to connect existing primitives\n43\tinto explicit contracts with persisted evidence and clear trust states.\n44\t\n45\t## Source Map\n46\t\n47\tPrimary Codigote files reviewed:\n48\t\n49\t- Completion and done decisions: `src/completion/decision.py`,\n50\t  `src/dsl/queue/automation.py`,\n51\t  `src/frontends/slack/handlers/workflows/queue/runtime_engine.py`.\n52\t- Scoring and verification quality: `src/learned_harness/scoring.py`,\n53\t  `src/governance/validation_loop.py`, `src/governance/services.py`,\n54\t  `src/tools/coding_tools.py`, `src/trace/service.py`.\n55\t- Runtime contracts and task intent: `src/runtime/contracts.py`, `src/runtime/facade.py`,\n56\t  `src/features/`.\n57\t- Agents and subagents: `src/tools/agent_tools.py`, `src/agents/executor.py`,\n58\t  `src/agents/models.py`, `src/agents/registry.py`, `src/agents/tool_policy.py`,\n59\t  `src/agents/builtin/definitions.py`, `src/agents/swarm_runtime.py`.\n60\t- Planning and queue DAGs: `src/planning/runtime/plan_tree/engine.py`,\n61\t  `src/dsl/queue/compiler.py`, `src/dsl/queue/materializer.py`,\n62\t  `src/tasks/persistent_runtime.py`.\n63\t- Cache and context: `src/conversation/view.py`, `src/conversation/runtime.py`,\n64\t  `src/conversation/sources.py`, `src/providers/semantics.py`,\n65\t  `src/providers/llm_clients/executor.py`.\n66\t- Sandbox/session execution: `src/tools/process_tools.py`, `src/tools/tool_helpers.py`,\n67\t  `src/tools/terminal.py`, `src/backend/runtime_facets/tools_terminal.py`.\n68\t- Claude Code reference: `/home/dan/dev-repos/code-sigmas-ref/claude-code/src/tools/AgentTool`.\n69\t\n70\t## 1. First-Class Definition of Done Contracts\n71\t\n72\t### What Codigote Already Has\n73\t\n74\tCodigote already has a more sophisticated completion model than a plain \"no pending tool calls\"\n75\tcheck.\n76\t\n77\t`src/completion/decision.py` has a layered completion cascade:\n78\t\n79\t- Runtime lifecycle signals can force `needs_follow_up` when a provider follow-up is required,\n80\t  tool calls are pending, a stop hook blocked completion, the turn did not complete, or no assistant\n81\t  message was emitted.\n82\t- Structured `<task-status>` blocks can authoritatively mark complete or incomplete and can list\n83\t  original-plan items plus newly discovered issues by severity.\n84\t- Optional classifiers and LLM judges can decide ambiguous cases.\n85\t- Text/git heuristics are the fallback.\n86\t- `finish_called` is treated as a completion lifecycle signal.\n87\t\n88\tThe queue automation path uses that decision in `src/dsl/queue/automation.py` and\n89\t`src/frontends/slack/handlers/workflows/queue/runtime_engine.py`. It can enqueue review/check/fix\n90\tfollow-ups when a task is probably incomplete.\n91\t\n92\tThere are also related but separate concepts:\n93\t\n94\t- `TaskIntentDraft.acceptance_criteria` in `src/runtime/contracts.py`.\n95\t- `ValidationPlan` and `ValidationCheck` in `src/runtime/contracts.py`.\n96\t- `ValidationProfileRuntime` in `src/governance/services.py`.\n97\t- Deterministic quality scoring in `src/learned_harness/scoring.py`.\n98\t- Trace-level `verification_status` inference in `src/trace/service.py`.\n99\t\n100\t### Gap\n101\t\n102\tThe current system does not have one persisted, executable Definition of Done contract that follows\n103\ta task from intake through execution, verification, completion, trace, and queue status.\n104\t\n105\tSpecific gaps:\n106\t\n107\t- `TaskIntentDraft.acceptance_criteria` are strings, not executable checks.\n108\t- `src/runtime/facade.py` currently records empty acceptance criteria for harness runs.\n109\t- Queue automation marks an item `completed` before it runs completion automation. Follow-up queue\n110\t  entries may be created, but the queue item's state is not a strict \"verified done\" state.\n111\t- Validation profiles are resolved separately from completion decisions and are often advisory\n112\t  unless strict validation is enabled.\n113\t- The existing quality score is useful, but it is a score, not a contract with explicit required\n114\t  evidence.\n115\t\n116\t### Recommendation\n117\t\n118\tAdd a first-class `CompletionContract` layer that compiles existing acceptance criteria,\n119\ttask-status requirements, validation profiles, and runtime lifecycle constraints into one persisted\n120\tcontract.\n121\t\n122\tProposed contract fields:\n123\t\n124\t- `contract_id`\n125\t- `subject_type`: `queue_item`, `plan_task`, `persistent_task`, `harness_run`\n126\t- `subject_id`\n127\t- `required_outcomes`: human-readable success criteria\n128\t- `required_checks`: deterministic commands, schema checks, verifier-agent checks, and model-judge\n129\t  checks\n130\t- `blocking_checks`: subset that must pass for `verified_complete`\n131\t- `evidence_refs`: trace run IDs, validation IDs, test command results, diff summaries, verifier\n132\t  reports\n133\t- `trust_state`: `reported_complete`, `verified_complete`, `incomplete`,\n134\t  `verification_failed`, `verification_not_run`, `blocked`\n135\t- `failure_reasons`\n136\t- `created_from`: prompt, plan tree, queue metadata, user-supplied checklist, or plugin policy\n137\t\n138\tImplementation path:\n139\t\n140\t1. Add contract models in a narrow new module, likely `src/completion/contracts.py`.\n141\t2. Compile contracts from current sources:\n142\t   - `TaskIntentDraft.acceptance_criteria`\n143\t   - `<task-status>` parsed output\n144\t   - `ValidationProfileRuntime.resolve(...)`\n145\t   - queue auto metadata and planned-not-done extraction\n146\t   - plan-tree task state and readiness gates\n147\t3. Persist contract snapshots and evaluation results in existing trace/queue metadata first. Add a\n148\t   dedicated table only after the shape stabilizes.\n149\t4. Add `evaluate_completion_contract(...)` that runs or consumes required evidence and returns a\n150\t   trust-state decision.\n151\t5. Keep queue item `completed` semantics for model-stop state, but add a separate\n152\t   `verification_status` or `trust_state` field for \"trusted done.\"\n153\t6. Render the contract result in Slack/web surfaces so users can distinguish \"the model stopped\"\n154\t   from \"Codigote verified this.\"\n155\t\n156\tTest plan:\n157\t\n158\t- Unit tests for contract compilation from acceptance criteria, validation plans, and task-status\n159\t  blocks.\n160\t- Queue runtime test proving a task with failed blocking validation is not marked\n161\t  `verified_complete`.\n162\t- Trace test proving evidence refs and failure reasons are persisted.\n163\t- Regression test proving existing non-auto queue behavior still completes.\n164\t\n165\t## 2. Stronger Subagent Output Discipline\n166\t\n167\t### What Subagents Are\n168\t\n169\tIn Codex, subagents are delegated model/tool loops launched by the parent agent. They may inherit\n170\tcontext or receive a scoped prompt, can run in parallel, and can be read-only explorers or workers\n171\tthat edit files. They are not just directory explorers. An explorer is one possible role; a worker\n172\tcan implement changes within an assigned write scope.\n173\t\n174\tIn Claude Code, the local reference shows an Agent tool that launches specialized subprocess\n175\tagents. Fresh specialized agents start without the parent conversation context, while forked agents\n176\tinherit the parent context. The reference also emphasizes a \"do not peek\" discipline: the parent\n177\tshould not read the child transcript mid-flight because doing so pulls noisy tool output into the\n178\tparent context. It also has a cache-oriented design where dynamic agent listings can be attached as\n179\tmessages instead of embedded in the tool schema.\n180\t\n181\tIn Codigote, subagents are:\n182\t\n183\t- Configurable `AgentConfig` records with source, tools, disallowed tools, model, permission mode,\n184\t  skills, MCP servers, hooks, background mode, isolation, effort, and memory settings.\n185\t- Spawned through `AgentTool` or Slack agent commands.\n186\t- Executed by `AgentExecutor`, where each agent runs in its own backend session with its own\n187\t  session ID and scoped tool policy.\n188\t- Sometimes represented as durable task descriptors through `PersistentTaskRuntime` and\n189\t  `SwarmRuntime`.\n190\t\n191\t### What Codigote Already Has\n192\t\n193\tCodigote already has meaningful subagent machinery:\n194\t\n195\t- Built-in agents include `general`, `verification`, `coordinator`, `research-planner`,\n196\t  `claim-verifier`, `source-verifier`, and `experiment-verifier`.\n197\t- Agent tool policy resolution enforces allowed and disallowed tools.\n198\t- `AgentExecutor` executes each agent in a backend session such as `agent-{execution_id}`.\n199\t- `SwarmRuntime` can create teammate descriptors with inbox/progress/state files.\n200\t- `PersistentTaskRuntime` can create background `local_agent` tasks with dependencies and output\n201\t  files.\n202\t\n203\tThe built-in verification agent already requires a structured final verdict shape. That is a good\n204\tpattern to generalize.\n205\t\n206\t### Gap\n207\t\n208\tThe runtime does not consistently enforce output isolation or final-answer contracts for all\n209\tsubagents.\n210\t\n211\tSpecific gaps:\n212\t\n213\t- `AgentRunResult` includes both `output` and `detailed_output`.\n214\t- Parent-visible paths can receive detailed text unless each caller manually truncates or formats\n215\t  it.\n216\t- Slack truncates some agent output for display, but that is UI behavior, not context discipline.\n217\t- There is no cross-agent `SubagentOutputContract` that says what shape must be returned.\n218\t- There is no durable distinction between:\n219\t  - child transcript artifact\n220\t  - final summary\n221\t  - claims requiring parent verification\n222\t  - files changed by the child\n223\t  - confidence or blocker status\n224\t\n225\t### Recommendation\n226\t\n227\tIntroduce a `SubagentOutputContract` and make it the default for Agent tool results.\n228\t\n229\tProposed output modes:\n230\t\n231\t- `summary_only`: parent receives a bounded result summary and metadata.\n232\t- `artifact_backed`: parent receives summary plus artifact refs for transcript, diff, logs, and\n233\t  evidence.\n234\t- `full_transcript_on_request`: transcript is available only when explicitly requested by the user\n235\t  or a debug surface.\n236\t\n237\tProposed final schema for most coding subagents:\n238\t\n239\t- `status`: `completed`, `blocked`, `failed`, `partial`\n240\t- `summary`: short final answer\n241\t- `files_changed`: list of paths\n242\t- `tests_run`: commands and pass/fail\n243\t- `claims`: important findings that the parent may rely on\n244\t- `blockers`: missing inputs or unresolved risks\n245\t- `artifact_refs`: transcript, logs, diff, validation output\n246\t\n247\tImplementation path:\n248\t\n249\t1. Add an output contract module under `src/agents/`, probably `src/agents/output_contracts.py`.\n250\t2. Extend `AgentConfig` with optional `output_contract` and `max_parent_output_chars`.\n251\t3. Make `AgentExecutor` normalize every `AgentRunResult` through the contract.\n252\t4. Persist full transcript/detailed output as artifacts or task outputs, and return artifact refs to\n253\t   the parent.\n254\t5. Update `AgentTool` to expose contract metadata and default to `summary_only`.\n255\t6. Add stricter built-in contracts for verification and review agents.\n256\t7. Add a debug/admin path to fetch full transcript when needed.\n257\t\n258\tTest plan:\n259\t\n260\t- Unit test that detailed output is stored but not returned to the parent in `summary_only` mode.\n261\t- Agent tool test proving artifact refs are returned.\n262\t- Slack formatting test proving display truncation is not the only enforcement mechanism.\n263\t- Verification-agent test proving `VERDICT`-style output is parsed into structured contract fields.\n264\t\n265\t## 3. Task DAG Rollback And Replan\n266\t\n267\t### What Codigote Already Has\n268\t\n269\tCodigote has two separate graph-like systems:\n270\t\n271\t1. Queue DSL and queue runtime:\n272\t   - `src/dsl/queue/compiler.py` parses and validates QDSL.\n273\t   - `src/dsl/queue/materializer.py` expands prompts and persisted producers.\n274\t   - Parallel prompt dependencies are resolved during materialization.\n275\t   - Queue automation can dynamically append or insert follow-up queue entries.\n276\t\n277\t2. Markdown plan-tree runtime:\n278\t   - `src/planning/runtime/plan_tree/engine.py` models a task tree with task IDs, statuses,\n279\t     dependencies, soft dependencies, readiness gates, revision logs, and executable frontiers.\n280\t   - Supported revision operations include `update_state`, `edit_content`, `add_task`,\n281\t     `rename_task`, `drop_task`, `update_dependencies`, and `complete_research`.\n282\t   - Blocked tasks require a blocker reference like `task:<id>` or `external:<reason>`.\n283\t   - Research completion can leave a branch blocked with a concrete `blocked_by` reason.\n284\t   - `record_plan_execution_unknown(...)` can add a research-gated branch for newly discovered\n285\t     unknowns.\n286\t   - Mutations snapshot affected files and restore snapshots on validation failure.\n287\t\n288\t`PersistentTaskRuntime` also has task dependency edges: `blocks` and `blocked_by`.\n289\t\n290\t### Gap\n291\t\n292\tCodigote has the right primitives, but they are not yet one unified task DAG rollback/replan system.\n293\t\n294\tSpecific gaps:\n295\t\n296\t- Queue follow-ups are generated as new queue entries; they do not necessarily mutate the plan tree.\n297\t- Plan-tree operations are file-backed markdown revisions; persistent task records and queue items\n298\t  are separate state models.\n299\t- Rollback exists inside plan-tree mutation functions, but there is no high-level \"revert this task\n300\t  DAG to revision X and requeue the affected frontier\" operation.\n301\t- Completion automation records planned-not-done metadata, but that metadata is not always converted\n302\t  into plan-tree `blocked`, `superseded`, `research`, or `add_task` operations.\n303\t- `execution_impact` is already captured in revision operations, but the queue processor does not\n304\t  treat it as a scheduling contract.\n305\t\n306\t### Recommendation\n307\t\n308\tCreate a bridge layer that makes queue/runtime events produce plan-tree or task-DAG mutations when a\n309\tplan root is attached.\n310\t\n311\tProposed concepts:\n312\t\n313\t- `TaskGraphMutation`: provider-neutral record for `add`, `update_state`, `update_dependencies`,\n314\t  `drop`, `supersede`, `research_unknown`, and `complete_research`.\n315\t- `TaskGraphRevision`: durable mutation batch with parent revision, actor, evidence refs, and\n316\t  execution impact.\n317\t- `TaskGraphFrontierChange`: computed result that lists newly runnable, blocked, superseded, and\n318\t  requeued tasks.\n319\t- `TaskGraphRollback`: operation that restores a previous revision and emits a new revision noting\n320\t  the rollback reason.\n321\t\n322\tImplementation path:\n323\t\n324\t1. Build an adapter around plan-tree functions rather than rewriting them.\n325\t2. Add a queue metadata convention for attaching `plan_root` and `plan_task_id`.\n326\t3. When completion says incomplete:\n327\t   - If missing work maps to existing plan tasks, call `record_plan_task_state_updates(...)` or\n328\t     `record_plan_task_dependencies(...)`.\n329\t   - If new work is discovered, call `record_plan_task_addition(...)`.\n330\t   - If a critical unknown blocks execution, call `record_plan_execution_unknown(...)`.\n331\t4. When research finishes, call `record_plan_research_completion(...)` and use `impact_scope` plus\n332\t   `execution_impact` to decide whether to recompile or requeue the frontier.\n333\t5. Add a queue scheduler hook that consumes `ExecutableFrontier` and enqueues newly runnable leaves.\n334\t6. Add rollback command/API support after mutation lineage is visible in the UI.\n335\t\n336\tTest plan:\n337\t\n338\t- Unit test mapping a `planned_not_done` item into a new plan-tree task.\n339\t- Unit test mapping a critical unknown into a research branch with `blocked_by`.\n340\t- Queue integration test where a failed verification updates plan state and requeues only affected\n341\t  frontier leaves.\n342\t- Rollback test proving task files, revision log, and queue entries remain consistent.\n343\t\n344\t## 4. Verification As A Trust Gate\n345\t\n346\t### What Codigote Already Has\n347\t\n348\tVerification exists in several layers:\n349\t\n350\t- `ValidationLoopRuntime` runs deterministic command and JSON schema checks.\n351\t- `ValidateProfileTool` and `RunTargetedTestsTool` expose validation to agents.\n352\t- `ValidationProfileRuntime` resolves checks from task family and policy.\n353\t- The built-in `verification` agent is read-only and has a final verdict convention.\n354\t- `CompletionVerifier` in governance can reject final text with unresolved questions, failed\n355\t  validation, or unfinished markers.\n356\t- `compute_quality_score(...)` factors tests/build/lint/typecheck and code-risk signals into a\n357\t  score.\n358\t- `TraceSummaryBuilder._infer_verification_status(...)` infers pass/fail/unknown from run output.\n359\t\n360\t### Gap\n361\t\n362\tVerification is available, but it is not a uniform trust gate.\n363\t\n364\tSpecific gaps:\n365\t\n366\t- Different paths use different verification concepts and status values.\n367\t- Queue completion can happen before automation-generated checks finish.\n368\t- The trace-level status is inferred from text markers, not necessarily from explicit validation\n369\t  evidence.\n370\t- Validation plans can be advisory.\n371\t- The verification agent's verdict is not yet normalized into the same trust state as deterministic\n372\t  validation.\n373\t\n374\t### Recommendation\n375\t\n376\tAdd a single trust-gate state machine that consumes all verification sources.\n377\t\n378\tProposed trust states:\n379\t\n380\t- `not_checked`\n381\t- `reported_complete`\n382\t- `verification_running`\n383\t- `verified_complete`\n384\t- `verified_partial`\n385\t- `verification_failed`\n386\t- `blocked`\n387\t\n388\tRules:\n389\t\n390\t- Blocking deterministic checks outrank model claims.\n391\t- A verifier-agent `PASS` can satisfy model-review checks but not deterministic test checks.\n392\t- Unknown verification should never be displayed as verified.\n393\t- Queue auto-followups can remain useful, but a user-facing task should expose its trust state.\n394\t\n395\tImplementation path:\n396\t\n397\t1. Add `VerificationGateResult` model and evaluator.\n398\t2. Feed it validation loop results, targeted test tool results, verifier-agent verdicts, completion\n399\t   decisions, and trace verification status.\n400\t3. Persist the result alongside trace run metadata and queue item metadata.\n401\t4. Update Slack/web rendering to show \"reported complete\" versus \"verified complete.\"\n402\t5. Make strict profiles block `verified_complete`; leave non-strict profiles advisory.\n403\t\n404\tTest plan:\n405\t\n406\t- Deterministic failed test blocks `verified_complete`.\n407\t- Verifier-agent `PASS` without tests yields `verified_partial` or `reported_complete`, depending\n408\t  on contract policy.\n409\t- Trace status `unknown` cannot promote a task.\n410\t- Queue automation still enqueues followups when verification fails.\n411\t\n412\t## 5. Cache-Aware Prompt And Tool Schema Stability\n413\t\n414\t### What Codigote Already Has\n415\t\n416\tCodigote already models cacheable context:\n417\t\n418\t- `RegisteredContextSource` has `cache_eligible`, `stable_content_hash`, freshness keys, retention\n419\t  modes, and stale behavior.\n420\t- `ConversationView` emits `PromptCacheHint` records.\n421\t- Provider semantics record whether a provider supports prompt cache hints.\n422\t- `ConversationRuntime` tracks context bundle hashes and retention modes.\n423\t- `ToolSelectionRuntime` limits selected tool declarations and records omitted tool refs plus\n424\t  schema byte counts.\n425\t\n426\t### Gap\n427\t\n428\tThe cache model is incomplete at the provider-request and tool-schema level.\n429\t\n430\tSpecific gaps:\n431\t\n432\t- `ConversationRuntime` computes prompt cache hints but does not appear to place the actual hints\n433\t  into `ModelRequest`; it currently records whether hints are enabled in routing constraints.\n434\t- Dynamic tool lists, plugin commands, MCP tools, skills, and agent catalogs can change provider\n435\t  visible tool schema text.\n436\t- Claude Code's reference explicitly addresses this by moving dynamic agent listing out of the tool\n437\t  description and into an attachment/message when needed. Codigote has `ToolSelectionRuntime`, but\n438\t  not a full \"stable core schema plus dynamic catalog attachment\" policy.\n439\t- Cache metrics such as cache creation/read savings are not visibly tied to prompt/tool schema\n440\t  stability decisions.\n441\t\n442\t### Recommendation\n443\t\n444\tDefine a cache-stability policy for provider-visible prompt and tool surfaces.\n445\t\n446\tPolicy:\n447\t\n448\t- Keep core tool schemas stable and small.\n449\t- Move dynamic catalogs into cacheable context sources or explicit catalog messages.\n450\t- Use tool-search/deferred schema loading for long-tail tools.\n451\t- Track schema fingerprints per request.\n452\t- Emit diagnostics when a dynamic catalog changes the prompt or tool schema enough to bust cache.\n453\t\n454\tImplementation path:\n455\t\n456\t1. Add a `ToolSchemaFingerprint` helper that hashes selected tool declarations.\n457\t2. Add `prompt_cache_hints` or equivalent metadata to `ModelRequest` if provider adapters can use\n458\t   it.\n459\t3. Split dynamic catalogs:\n460\t   - static core Agent tool schema\n461\t   - dynamic agent list as a context source or system reminder\n462\t   - dynamic plugin/MCP/skill catalogs as cacheable context sources with freshness keys\n463\t4. Extend `ToolSelectionRuntime` output with a schema fingerprint and stability diagnostics.\n464\t5. Persist request-level cache diagnostics in the conversation request manifest.\n465\t6. Add per-provider adapter support only where semantics say hints are supported.\n466\t\n467\tTest plan:\n468\t\n469\t- Unit test that dynamic agent list changes do not change the Agent tool schema fingerprint.\n470\t- Unit test that a plugin catalog freshness-key change changes only the catalog context source hash.\n471\t- Provider request test proving cache hints flow to supported providers and are omitted otherwise.\n472\t- Metrics test proving request manifests include schema fingerprints.\n473\t\n474\t## 6. Persistent Sandbox And Session Execution\n475\t\n476\t### What Codigote Already Has\n477\t\n478\tThere are two relevant execution models:\n479\t\n480\t- Model-facing `bash`, `powershell`, and `shell` tools in `src/tools/process_tools.py` run one-shot\n481\t  subprocesses through `_run_process_tool(...)`.\n482\t- App-control terminal APIs in `src/tools/terminal.py` can start persistent background processes,\n483\t  write stdin, read output, resize PTYs, terminate processes, and persist terminal records.\n484\t\n485\tThe one-shot process tools intentionally block interactive standalone commands like `python`,\n486\t`bash`, `vim`, and `tail -f`. That is reasonable for safe model-facing tools, but it means agents\n487\tdo not have a persistent Python/R/node/shell sandbox session as a first-class tool.\n488\t\n489\tCodigote also has memory and plugin surfaces that can host long-lived state:\n490\t\n491\t- Memory tools: session memory, memory scan/retrieve/write/update.\n492\t- Plugin runtime: trusted plugin loading, cache invalidation, skill/plugin discovery.\n493\t- Terminal runtime: process lifecycle and buffered output.\n494\t\n495\t### Gap\n496\t\n497\tPersistent execution exists for app-control clients, but it is not exposed as a governed\n498\tmodel-facing sandbox/session tool with snapshots, state summaries, and memory integration.\n499\t\n500\tSpecific gaps:\n501\t\n502\t- No model-facing `sandbox.create`, `sandbox.exec`, `sandbox.read`, `sandbox.snapshot`, or\n503\t  `sandbox.destroy` contract.\n504\t- No first-class session state summary for a persistent REPL.\n505\t- No snapshot/restore contract beyond terminal process records.\n506\t- No trust boundary between persistent execution state and durable memory.\n507\t- No expiration/cleanup policy for abandoned model-created sessions.\n508\t\n509\t### Recommendation\n510\t\n511\tBuild persistent sandbox/session execution as a plugin-backed first-class tool family that reuses\n512\t`TerminalRuntime` internally.\n513\t\n514\tInitial tool family:\n515\t\n516\t- `sandbox_session_create`: create a named shell/Python/node session with cwd, env policy, timeout,\n517\t  and persistence mode.\n518\t- `sandbox_session_exec`: send input and optionally wait for prompt/output patterns.\n519\t- `sandbox_session_read`: read buffered output since a cursor.\n520\t- `sandbox_session_snapshot`: summarize cwd, command history, relevant variables/files, output\n521\t  cursor, and artifact refs.\n522\t- `sandbox_session_destroy`: terminate and clean up.\n523\t\n524\tWhy plugin-backed:\n525\t\n526\t- It fits the user's intuition that this could be a memory-system plugin.\n527\t- It can be installed/disabled independently.\n528\t- It can declare trust tier, permissions, retention, and cleanup policy.\n529\t- It can integrate with session memory after explicit summarization instead of dumping raw terminal\n530\t  transcripts into memory.\n531\t\n532\tImplementation path:\n533\t\n534\t1. Add a runtime wrapper around `TerminalRuntime` with stricter model-facing policy.\n535\t2. Start with shell sessions only; add Python/node REPL helpers after cursor handling is reliable.\n536\t3. Add database/session metadata: owner session, cwd, created_by tool call, TTL, status, output\n537\t   cursor, memory mode.\n538\t4. Add safety policy:\n539\t   - no hidden daemon creation unless explicitly backgrounded\n540\t   - TTL cleanup\n541\t   - bounded output reads\n542\t   - explicit env allowlist\n543\t   - approval for high-risk commands\n544\t5. Add snapshot summaries and optional session memory writes.\n545\t6. Expose through plugin or first-class tools after governance tests pass.\n546\t\n547\tTest plan:\n548\t\n549\t- Create/write/read/destroy lifecycle test.\n550\t- Cursor test proving reads do not duplicate output.\n551\t- TTL cleanup test.\n552\t- Policy test proving interactive sessions are denied unless created through sandbox tools.\n553\t- Memory test proving only summaries, not full raw output, enter memory.\n554\t\n555\t## Prioritized Roadmap\n556\t\n557\t### Phase 0: Instrument Current Behavior\n558\t\n559\tGoal: make the current advisory systems visible before changing semantics.\n560\t\n561\tTasks:\n562\t\n563\t- Add request/trace metadata for completion decision source, verification source, and queue\n564\t  automation action.\n565\t- Add schema fingerprint metadata for selected tools.\n566\t- Add documentation for current trust states and known limitations.\n567\t\n568\tExit criteria:\n569\t\n570\t- A trace can explain why a task was considered done.\n571\t- A queue item can show whether it was merely completed or verified.\n572\t- Tool schema churn can be observed.\n573\t\n574\t### Phase 1: Completion Contract And Verification Gate\n575\t\n576\tGoal: turn existing completion and validation primitives into one trusted completion contract.\n577\t\n578\tTasks:\n579\t\n580\t- Add `CompletionContract`.\n581\t- Add `VerificationGateResult`.\n582\t- Compile contracts from acceptance criteria, task status, validation plans, and plan-tree task\n583\t  state.\n584\t- Persist contract evaluations.\n585\t- Render trust state in Slack/web.\n586\t\n587\tExit criteria:\n588\t\n589\t- \"Verified complete\" requires explicit evidence.\n590\t- Failed blocking validation cannot silently become verified.\n591\t- Existing completion automation still works.\n592\t\n593\t### Phase 2: Subagent Output Discipline\n594\t\n595\tGoal: keep parent context clean and make agent results reliable.\n596\t\n597\tTasks:\n598\t\n599\t- Add `SubagentOutputContract`.\n600\t- Normalize `AgentRunResult`.\n601\t- Store detailed transcripts as artifacts/task outputs.\n602\t- Return bounded summaries and artifact refs to parents.\n603\t- Add structured contracts for verification/review agents.\n604\t\n605\tExit criteria:\n606\t\n607\t- Parent context gets summary-only by default.\n608\t- Full child transcript remains available through explicit artifact access.\n609\t- Verification agent output is parsed into structured verdicts.\n610\t\n611\t### Phase 3: Plan-Tree And Queue DAG Integration\n612\t\n613\tGoal: make dynamic replanning update the plan/task DAG, not just append queue items.\n614\t\n615\tTasks:\n616\t\n617\t- Add a task graph adapter over existing plan-tree functions.\n618\t- Attach `plan_root` and `plan_task_id` to queue items where available.\n619\t- Convert completion failures and discovered unknowns into plan-tree mutations.\n620\t- Recompute executable frontier and enqueue affected leaves.\n621\t- Add rollback command/API after lineage is visible.\n622\t\n623\tExit criteria:\n624\t\n625\t- Incomplete work can become a plan mutation with reason and evidence.\n626\t- Research-gated unknowns are first-class plan nodes.\n627\t- Rollback restores plan files and queue frontier consistently.\n628\t\n629\t### Phase 4: Cache Stability\n630\t\n631\tGoal: reduce cache churn from dynamic schemas and catalogs.\n632\t\n633\tTasks:\n634\t\n635\t- Add schema fingerprints.\n636\t- Move dynamic catalogs into cacheable context messages where possible.\n637\t- Wire prompt cache hints into provider requests.\n638\t- Add request manifest diagnostics for cache eligibility and schema churn.\n639\t\n640\tExit criteria:\n641\t\n642\t- Dynamic agent/plugin list changes do not unnecessarily change core tool schema.\n643\t- Supported providers receive cache hints.\n644\t- Cache-stability regressions are testable.\n645\t\n646\t### Phase 5: Persistent Sandbox Sessions\n647\t\n648\tGoal: expose durable execution sessions safely.\n649\t\n650\tTasks:\n651\t\n652\t- Build a governed sandbox session runtime on top of `TerminalRuntime`.\n653\t- Add model-facing sandbox session tools behind plugin/feature policy.\n654\t- Add TTL cleanup, bounded output reads, snapshots, and memory summaries.\n655\t- Add frontend controls for viewing/terminating sessions.\n656\t\n657\tExit criteria:\n658\t\n659\t- Agents can reuse a persistent session without using unsafe standalone shells.\n660\t- Raw output is bounded and summarized.\n661\t- Sessions are visible, governable, and cleanly terminated.\n662\t\n663\t## Recommended First PR\n664\t\n665\tStart with Phase 0 plus the minimal data model for Phase 1:\n666\t\n667\t1. Add `src/completion/contracts.py` with dataclasses only.\n668\t2. Add a compiler from current `CompletionDecision`, task-status blocks, and validation plan\n669\t   results into a `CompletionContractEvaluation`.\n670\t3. Add tests around compilation and trust-state precedence.\n671\t4. Persist the evaluation in trace metadata without changing queue behavior yet.\n672\t5. Add docs/UI labels for `reported_complete` versus `verified_complete`.\n673\t\n674\tThis gives Codigote a stable vocabulary and evidence shape before changing queue completion\n675\tsemantics.\n676\t\n677\t## Main Design Principle\n678\t\n679\tCodigote already has the concepts. The next level is to make them explicit, persisted, and\n680\tcomposable:\n681\t\n682\t- Completion should be a contract, not a guess.\n683\t- Verification should be a gate, not just a useful tool.\n684\t- Subagent output should be summary-first with artifact-backed detail.\n685\t- Replanning should mutate a task graph with lineage, not only create more queue text.\n686\t- Cache behavior should be observable and protected from dynamic schema churn.\n687\t- Persistent sessions should reuse existing terminal/process governance and integrate with memory\n688\t  through explicit summaries.",
+    "path": "/home/dan/repos/codigote/docs/planning/claude_harness_concepts_gap_analysis.md",
+    "start_line": 1,
+    "total_lines": 688,
+    "truncated": false
+  },
+  "started_at": "2026-06-07T17:17:30.740622",
+  "status": "completed",
+  "tool_call_id": "call_B3XJvgo9uIyTy1ev9juNQbv3",
+  "tool_name": "read"
+}

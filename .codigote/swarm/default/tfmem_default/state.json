@@ -1,0 +1,33 @@
+{
+  "agent_id": "tfmem@default",
+  "teammate_id": "swarm_teammate_0b835aae78d7ea37e718d8984c4540a5",
+  "name": "tfmem",
+  "team_name": "default",
+  "description": "Explore Taskflows architecture for memory restart integration",
+  "prompt": "Explore the Taskflows codebase at /home/dan/repos/taskflows read-only. Focus on how tasks/jobs are defined and executed, any existing resource/retry/restart/supervision abstractions, CLI/config entrypoints, and where a memory-based restart or systemd integration would fit. Return file paths, key classes/functions, and a concrete integration plan matching the current architecture. Do not edit files.",
+  "subagent_type": "Explore",
+  "model": null,
+  "backend_type": "in_process",
+  "isolation": "shared",
+  "parent_session_id": "tool:call_gyDlwgU2IQthKDqo1HF3qTOp",
+  "backend_session_id": "swarm_backend_session_6a0fc2808e3097946c5e1c9ebee7d45d",
+  "workspace_ref": "/home/dan/repos/taskflows",
+  "cwd": "/home/dan/repos/taskflows",
+  "worktree_ref": null,
+  "permission_mode": "default",
+  "permissions": [],
+  "inbox_file": "/home/dan/repos/taskflows/.codigote/swarm/teams/default/inboxes/tfmem.json",
+  "progress_file": "/home/dan/repos/taskflows/.codigote/swarm/default/tfmem_default/progress.json",
+  "state_file": "/home/dan/repos/taskflows/.codigote/swarm/default/tfmem_default/state.json",
+  "status": "queued",
+  "run_in_background": false,
+  "resumable": true,
+  "created_at": "2026-05-31T15:36:22.867468+00:00",
+  "updated_at": "2026-05-31T15:36:22.867468+00:00",
+  "resume": {
+    "parent_session_id": "tool:call_gyDlwgU2IQthKDqo1HF3qTOp",
+    "backend_session_id": "swarm_backend_session_6a0fc2808e3097946c5e1c9ebee7d45d",
+    "cwd": "/home/dan/repos/taskflows",
+    "worktree_ref": null
+  }
+}

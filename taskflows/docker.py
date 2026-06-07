@@ -670,8 +670,6 @@ class DockerContainer:
 
         if isinstance(self.image, DockerImage):
             image_name = self.image.tag
-            # Ensure image is built
-            self.image.build()
         else:
             image_name = self.image
 

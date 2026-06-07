@@ -55,6 +55,25 @@ _API_RESPONSE_MAX_CHARS = 8000
 _API_TRACEBACK_MAX_LINES = 40
 
 
+def _deduplicate_services(services: Sequence[Service]) -> list[Service]:
+    """Return one service per name, preserving last definition semantics."""
+    services_by_name: dict[Optional[str], Service] = {}
+    ordered_names: list[Optional[str]] = []
+
+    for service in services:
+        if service.name not in services_by_name:
+            ordered_names.append(service.name)
+        services_by_name[service.name] = service
+
+    duplicate_count = len(services) - len(ordered_names)
+    if duplicate_count:
+        logger.info(
+            f"Skipped {duplicate_count} duplicate service definitions during create"
+        )
+
+    return [services_by_name[name] for name in ordered_names]
+
+
 async def get_unit_files(
     unit_type: Optional[Literal["service", "timer"]] = None,
     match: Optional[str] = None,
@@ -563,11 +582,27 @@ async def create(
         dashboards = []
 
         if yaml_file:
-            # Load services from YAML file
-            from taskflows.serialization import load_services_from_yaml
+            # Load services and dashboards from YAML file
+            from taskflows.serialization import (
+                load_dashboards_from_yaml,
+                load_services_from_yaml,
+            )
 
-            services = load_services_from_yaml(yaml_file)
-            logger.info(f"Loaded {len(services)} services from {yaml_file}")
+            try:
+                services = load_services_from_yaml(yaml_file)
+            except ValueError as exc:
+                if "'services' key" not in str(exc):
+                    raise
+                services = []
+            try:
+                dashboards = load_dashboards_from_yaml(yaml_file)
+            except ValueError as exc:
+                if "'dashboards' key" not in str(exc):
+                    raise
+                dashboards = []
+            logger.info(
+                f"Loaded {len(services)} services and {len(dashboards)} dashboards from {yaml_file}"
+            )
         else:
             # Search Python files for Service instances
             services = find_instances(class_type=Service, search_in=search_in)
@@ -594,6 +629,8 @@ async def create(
             dashboards = [
                 d for d in dashboards if not fnmatchcase(name=d.title, pat=exclude)
             ]
+
+        services = _deduplicate_services(services)
 
         for srv in services:
             await srv.create(defer_reload=True)

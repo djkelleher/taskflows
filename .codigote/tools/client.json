@@ -1,0 +1,18 @@
+{
+  "records": [
+    {
+      "created_at": "2026-05-31T10:32:09.358695",
+      "kind": "question",
+      "payload": {
+        "choices": [
+          "Approve read-only access to the guide",
+          "I\u2019ll paste the file contents here",
+          "Skip file review and give general recommendations"
+        ],
+        "metadata": {},
+        "question": "I need read access to `~/systemd-memory-restart-guide.md` to review the analysis you mentioned, but local shell access is currently blocked with \u201crequires approval.\u201d Can you approve a read-only command to `cat` that file?"
+      },
+      "record_id": "client_record_2a0996179b295ab4c685e2c31742a027"
+    }
+  ]
+}

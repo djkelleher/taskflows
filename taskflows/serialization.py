@@ -71,6 +71,7 @@ from typing import (
 import yaml
 
 if TYPE_CHECKING:
+    from .dashboard import Dashboard
     from .service import Service
 from pydantic import BaseModel
 
@@ -125,10 +126,14 @@ _MEMORY_FIELDS = {
     "memory_reservation",
     "memory_swap_limit",
     "memory_swap_max",
+    "memory",
+    "memswap",
     "mem_limit",
     "memswap_limit",
     "mem_reservation",
     "shm_size",
+    "shmsize",
+    "kernel_memory",
     "amount",  # Memory constraint amount field
 }
 
@@ -142,9 +147,14 @@ _TIME_FIELDS = {
     "window",
 }
 
+_PERCENT_FIELDS = {
+    "managed_oom_memory_pressure_limit",
+}
+
 # Regex patterns for parsing
 _MEMORY_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?\s*$")
 _TIME_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?\s*$")
+_PERCENT_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*%?\s*$")
 
 
 def parse_memory_size(value: Any) -> int:
@@ -275,6 +285,28 @@ def parse_time_duration(value: Any) -> int:
     return int(number * _TIME_UNITS[unit_lower])
 
 
+def parse_percent(value: Any) -> int:
+    """Parse a whole percentage value, accepting forms like 60, "60", and "60%"."""
+    if isinstance(value, bool):
+        raise ValueError("Percent must be a number")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError("Percent must be a whole number")
+        return int(value)
+    if not isinstance(value, str):
+        raise ValueError(f"Cannot parse percent from {type(value).__name__}: {value}")
+
+    match = _PERCENT_PATTERN.match(value)
+    if not match:
+        raise ValueError(f"Invalid percent format: {value}")
+    number = float(match.group(1))
+    if not number.is_integer():
+        raise ValueError("Percent must be a whole number")
+    return int(number)
+
+
 def _maybe_parse_value(value: Any, field_name: str) -> Any:
     """Parse a value if it matches a known field that needs conversion.
 
@@ -304,6 +336,12 @@ def _maybe_parse_value(value: Any, field_name: str) -> Any:
         except (ValueError, TypeError):
             return value
 
+    if field_name in _PERCENT_FIELDS:
+        try:
+            return parse_percent(value)
+        except (ValueError, TypeError):
+            return value
+
     return value
 
 
@@ -317,9 +355,13 @@ _TYPE_REGISTRY: Dict[str, Type] = {}
 _FIELD_TYPE_MAP: Dict[str, str] = {
     "restart_policy": "RestartPolicy",
     "cgroup_config": "CgroupConfig",
+    "container_limits": "ContainerLimits",
     "start_schedule": "Schedule",
     "stop_schedule": "Schedule",
     "restart_schedule": "Schedule",
+    "ulimits": "Ulimit",
+    "volumes": "Volume",
+    "panels_grid": "LogsPanelConfig",
 }
 
 # Keys that uniquely identify a type (for content-based inference)
@@ -328,6 +370,13 @@ _TYPE_SIGNATURE_KEYS: Dict[frozenset, str] = {
     frozenset(["env_name"]): "Venv",
     # DockerContainer: has image
     frozenset(["image"]): "DockerContainer",
+    # DockerImage: has tag/path
+    frozenset(["tag", "path"]): "DockerImage",
+    frozenset(["tag"]): "DockerImage",
+    # ContainerLimits: Docker build resource controls
+    frozenset(["memory", "memswap"]): "ContainerLimits",
+    frozenset(["cpushares"]): "ContainerLimits",
+    frozenset(["cpusetcpus"]): "ContainerLimits",
     # Calendar: has schedule (string pattern)
     frozenset(["schedule"]): "Calendar",
     # Periodic: has period and start_on
@@ -342,11 +391,20 @@ _TYPE_SIGNATURE_KEYS: Dict[frozenset, str] = {
     # CPUPressure constraint
     frozenset(["max_percent", "timespan"]): "CPUPressure",
     frozenset(["max_percent"]): "CPUPressure",
+    # Dashboard log panels
+    frozenset(["service", "text", "period"]): "LogsCountPlot",
+    frozenset(["service", "text"]): "LogsTextSearch",
+    frozenset(["service"]): "LogsPanelConfig",
     # CgroupConfig: has memory_limit or cpu_quota (common cgroup fields)
     frozenset(["memory_limit"]): "CgroupConfig",
     frozenset(["cpu_quota"]): "CgroupConfig",
     frozenset(["cpu_shares"]): "CgroupConfig",
     frozenset(["pids_limit"]): "CgroupConfig",
+    frozenset(["oom_policy"]): "CgroupConfig",
+    frozenset(["managed_oom_swap"]): "CgroupConfig",
+    frozenset(["managed_oom_memory_pressure"]): "CgroupConfig",
+    frozenset(["managed_oom_memory_pressure_limit"]): "CgroupConfig",
+    frozenset(["managed_oom_preference"]): "CgroupConfig",
 }
 
 
@@ -447,6 +505,11 @@ def _is_union_type(annotation: Any) -> bool:
 def _sequence_element_type(annotation: Any) -> Optional[Type]:
     """Return the item type for list-like annotations when available."""
     origin = get_origin(annotation)
+    if origin in (Union, UnionType):
+        for arg in get_args(annotation):
+            element_type = _sequence_element_type(arg)
+            if element_type:
+                return element_type
     if origin in (list, List, tuple, Sequence, ABCSequence):
         args = get_args(annotation)
         if args:
@@ -471,6 +534,14 @@ def _resolve_union_type(annotation: Any, value: Any) -> Any:
             for arg in union_args:
                 if getattr(arg, "__name__", None) == type_name:
                     return arg
+        non_primitive_args = [
+            arg
+            for arg in union_args
+            if arg not in (str, int, float, bool, dict, list, Path)
+            and get_origin(arg) is None
+        ]
+        if len(non_primitive_args) == 1:
+            return non_primitive_args[0]
 
     return annotation
 
@@ -684,6 +755,8 @@ def _deserialize_value(
             "stop_schedule",
             "restart_schedule",
             "volumes",
+            "ulimits",
+            "panels_grid",
         ):
             return [_deserialize_value(v, element_type, field_name) for v in value]
 
@@ -741,13 +814,22 @@ def from_dict(data: Dict[str, Any], cls: Type[T]) -> T:
         processed_data = {}
         for key, value in data.items():
             field_type = _get_field_type(cls, key)
-            # Apply human-readable parsing first (memory sizes, time durations)
-            value = _maybe_parse_value(value, key)
+            # Apply human-readable parsing first (memory sizes, time durations),
+            # except for dashboard log panel period strings (for example "5m"),
+            # which Grafana/Loki expects to remain strings.
+            if not (cls.__name__ == "LogsCountPlot" and key == "period"):
+                value = _maybe_parse_value(value, key)
             processed_data[key] = _deserialize_value(value, field_type, field_name=key)
         return cls(**processed_data)
 
     # Handle dataclasses
     if is_dataclass(cls):
+        field_names = {field.name for field in fields(cls)}
+        unknown_fields = sorted(set(data) - field_names)
+        if unknown_fields:
+            unknown = ", ".join(unknown_fields)
+            raise ValueError(f"Unknown field(s) for {cls.__name__}: {unknown}")
+
         processed_data = {}
         for field in fields(cls):
             if field.name in data:
@@ -767,6 +849,14 @@ def from_dict(data: Dict[str, Any], cls: Type[T]) -> T:
                 continue
 
         return cls(**processed_data)
+
+    # Dashboard is a regular class but its nested panel grid needs type-aware
+    # deserialization before calling the constructor.
+    if cls.__name__ == "Dashboard" and "panels_grid" in data:
+        data = dict(data)
+        data["panels_grid"] = _deserialize_value(
+            data["panels_grid"], field_name="panels_grid"
+        )
 
     # For regular classes, just pass the data
     return cls(**data)
@@ -892,6 +982,7 @@ def deserialize_from_file(
 def _register_taskflows_types():
     """Register all taskflows types in the type registry."""
     # Import here to avoid circular imports
+    from taskflows.dashboard import Dashboard, LogsCountPlot, LogsPanelConfig, LogsTextSearch
     from taskflows.service import Venv, Service, RestartPolicy
     from taskflows.docker import (
         DockerContainer,
@@ -916,6 +1007,12 @@ def _register_taskflows_types():
     register_type(Venv)
     register_type(Service)
     register_type(RestartPolicy)
+
+    # Dashboard types
+    register_type(Dashboard)
+    register_type(LogsPanelConfig)
+    register_type(LogsTextSearch)
+    register_type(LogsCountPlot)
 
     # Docker types
     register_type(DockerContainer)
@@ -1010,6 +1107,72 @@ def load_services_from_yaml(path: Union[str, Path]) -> List["Service"]:
 
     logger.info(f"Loaded {len(services)} services from {path}")
     return services
+
+
+def load_dashboards_from_yaml(path: Union[str, Path]) -> List["Dashboard"]:
+    """Load one or more dashboards from a YAML file.
+
+    The YAML file may contain either:
+      - a single dashboard mapping with ``title`` and ``panels_grid`` keys
+      - a ``dashboard`` mapping
+      - a ``dashboards`` or legacy ``taskflows_dashboards`` list
+
+    Panel dictionaries are deserialized into ``LogsPanelConfig``,
+    ``LogsTextSearch``, or ``LogsCountPlot`` using their explicit ``type`` field
+    or by inferring from their keys.
+    """
+    from taskflows.dashboard import Dashboard
+
+    path = Path(path)
+    content = path.read_text()
+    data = yaml.safe_load(content)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"YAML file must contain a mapping, got {type(data).__name__}")
+
+    if "taskflows_dashboards" in data:
+        dashboards_data = data["taskflows_dashboards"]
+    elif "dashboards" in data:
+        dashboards_data = data["dashboards"]
+    elif "dashboard" in data:
+        dashboards_data = [data["dashboard"]]
+    elif "title" in data and "panels_grid" in data:
+        dashboards_data = [data]
+    else:
+        raise ValueError(
+            "YAML file must contain a 'dashboards' key (or legacy "
+            "'taskflows_dashboards' key) with a list of dashboard definitions"
+        )
+
+    if not isinstance(dashboards_data, list):
+        raise ValueError(
+            f"'dashboards' must be a list, got {type(dashboards_data).__name__}"
+        )
+
+    dashboards = []
+    for dashboard_data in dashboards_data:
+        dashboards.append(from_dict(dashboard_data, Dashboard))
+
+    logger.info(f"Loaded {len(dashboards)} dashboards from {path}")
+    return dashboards
+
+
+def save_dashboards_to_yaml(
+    dashboards: List["Dashboard"], path: Union[str, Path], include_none: bool = False
+) -> None:
+    """Save multiple dashboards to a YAML file."""
+    path = Path(path)
+    dashboards_data = [to_dict(d, include_none=include_none) for d in dashboards]
+    for dashboard in dashboards_data:
+        dashboard.pop("type", None)
+
+    data = {"dashboards": dashboards_data}
+    content = yaml.dump(
+        data, default_flow_style=False, allow_unicode=True, sort_keys=False
+    )
+    secure_write_text(path, content)
+
+    logger.info(f"Saved {len(dashboards)} dashboards to {path}")
 
 
 def save_services_to_yaml(

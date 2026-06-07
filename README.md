@@ -866,7 +866,7 @@ srv = Service(
         # Memory limits
         memory_limit=2 * 1024**3,  # 2GB hard limit
         memory_high=1.5 * 1024**3, # 1.5GB soft limit
-        memory_swap_limit=4 * 1024**3,
+        memory_swap_max=0,         # Disable swap for this unit
 
         # I/O limits
         io_weight=100,             # I/O priority (1-10000)
@@ -878,10 +878,57 @@ srv = Service(
 
         # Security
         oom_score_adj=500,         # OOM killer priority
+        oom_policy="kill",         # Kill the whole unit if one process is OOM-killed
         cap_drop=["NET_RAW"],      # Drop capabilities
     ),
 )
 ```
+
+### Memory-Based Restart
+
+For services that can exhaust machine memory, prefer a cgroup hard limit plus
+systemd restart policy. This is more deterministic than restarting from global
+free-memory checks because the service is capped before it can destabilize the
+host:
+
+```python
+from taskflows import CgroupConfig, Service
+from taskflows.service import RestartPolicy
+
+svc = Service(
+    name="memory-sensitive-worker",
+    start_command="python worker.py",
+    cgroup_config=CgroupConfig(
+        memory_high=3 * 1024**3,   # Apply reclaim pressure first
+        memory_limit=4 * 1024**3,  # Hard ceiling; triggers OOM inside the unit
+        memory_swap_max=0,         # Optional: avoid swap thrashing
+        oom_policy="kill",
+    ),
+    restart_policy=RestartPolicy(
+        condition="on-failure",
+        delay=10,
+        max_attempts=5,
+        window=300,
+    ),
+)
+```
+
+If `systemd-oomd` is enabled on the host, Taskflows can also emit the native
+memory-pressure controls. For user services, `systemd-oomd` candidate
+preferences may depend on cgroup ownership and which ancestor cgroup is being
+monitored, so validate this on the target host:
+
+```python
+CgroupConfig(
+    managed_oom_memory_pressure="kill",
+    managed_oom_memory_pressure_limit=60,  # "60%" is also accepted in YAML
+    managed_oom_swap="kill",
+)
+```
+
+Use host-wide `MemAvailable` watchdog timers only when you specifically need
+"restart this service once total available memory drops below X"; they are less
+deterministic than per-service cgroup limits.
 
 ## CLI Reference
 

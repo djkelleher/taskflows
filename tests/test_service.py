@@ -80,6 +80,13 @@ def test_constraints_reject_invalid_numeric_ranges():
         {"pids_limit": 0},
         {"nofile_limit": 0},
         {"oom_score_adj": -1001},
+        {"oom_policy": "restart"},
+        {"managed_oom_swap": "stop"},
+        {"managed_oom_memory_pressure": "continue"},
+        {"managed_oom_memory_pressure_limit": 101},
+        {"managed_oom_memory_pressure_limit": "sometimes"},
+        {"managed_oom_memory_pressure_limit": "60.5%"},
+        {"managed_oom_preference": "prefer"},
         {"timeout_start": -1},
         {"device_read_bps": {"/dev/sda": 0}},
         {"device_write_iops": {"/dev/sda": -1}},
@@ -88,6 +95,39 @@ def test_constraints_reject_invalid_numeric_ranges():
 def test_cgroup_config_rejects_invalid_resource_ranges(kwargs):
     with pytest.raises(ValueError):
         CgroupConfig(**kwargs)
+
+
+def test_cgroup_config_normalizes_oom_literals_and_percentages():
+    config = CgroupConfig(
+        oom_policy="KILL",
+        managed_oom_swap="KILL",
+        managed_oom_memory_pressure="KILL",
+        managed_oom_memory_pressure_limit="60%",
+        managed_oom_preference="AVOID",
+    )
+
+    directives = config.to_systemd_directives()
+
+    assert directives["OOMPolicy"] == "kill"
+    assert directives["ManagedOOMSwap"] == "kill"
+    assert directives["ManagedOOMMemoryPressure"] == "kill"
+    assert directives["ManagedOOMMemoryPressureLimit"] == "60%"
+    assert directives["ManagedOOMPreference"] == "avoid"
+
+
+def test_service_includes_memory_swap_max_directive():
+    service = Service(
+        name="swap-limited",
+        start_command="python -V",
+        cgroup_config=CgroupConfig(
+            memory_limit=1024 * 1024 * 1024,
+            memory_swap_max=0,
+        ),
+    )
+
+    assert "MemoryAccounting=yes" in service.service_entries
+    assert "MemoryMax=1073741824" in service.service_entries
+    assert "MemorySwapMax=0" in service.service_entries
 
 
 def test_calendar_from_datetime_uses_four_digit_year():
@@ -166,7 +206,53 @@ def test_venv_command_quotes_runner_and_environment_name(tmp_path):
         "python -V"
     )
 
-    assert command == f"'{runner}' run -n 'prod env' --no-capture-output python -V"
+    assert command == f"'{runner}' run -n 'prod env' --no-capture-output -- python -V"
+
+
+def test_venv_command_uses_attach_when_runner_supports_it(tmp_path):
+    runner = tmp_path / "mamba"
+    runner.touch()
+    help_output = "--attach STREAM\n-a \"\" for disabling stream redirection"
+
+    with patch(
+        "taskflows.service.subprocess.run",
+        return_value=MagicMock(stdout=help_output, stderr=""),
+    ):
+        command = Venv(env_name="prod env", custom_path=runner).create_env_command(
+            "python -V"
+        )
+
+    assert command == f"{runner} run -n 'prod env' -a '' -- python -V"
+
+
+def test_venv_command_uses_no_capture_when_runner_supports_it(tmp_path):
+    runner = tmp_path / "mamba"
+    runner.touch()
+
+    with patch(
+        "taskflows.service.subprocess.run",
+        return_value=MagicMock(stdout="--no-capture-output", stderr=""),
+    ):
+        command = Venv(env_name="prod env", custom_path=runner).create_env_command(
+            "python -V"
+        )
+
+    assert command == f"{runner} run -n 'prod env' --no-capture-output -- python -V"
+
+
+def test_venv_command_omits_live_output_flag_for_mamba_when_probe_fails(tmp_path):
+    runner = tmp_path / "mamba"
+    runner.touch()
+
+    with patch(
+        "taskflows.service.subprocess.run",
+        side_effect=OSError("not executable"),
+    ):
+        command = Venv(env_name="prod env", custom_path=runner).create_env_command(
+            "python -V"
+        )
+
+    assert command == f"{runner} run -n 'prod env' -- python -V"
 
 
 @pytest.mark.integration

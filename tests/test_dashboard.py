@@ -1,4 +1,5 @@
-from taskflows.dashboard import Dashboard, LogsPanelConfig, _logql_string
+from taskflows.dashboard import Dashboard, LogsCountPlot, LogsPanelConfig, LogsTextSearch, _logql_string
+from taskflows.serialization import load_dashboards_from_yaml
 from taskflows.service import Service
 
 
@@ -28,3 +29,58 @@ def test_dashboard_layout_does_not_mutate_panel_widths():
     dashboard._create_gl_dashboard("loki")
 
     assert panel.width_fr is None
+
+
+def test_dashboard_from_yaml():
+    dashboard = Dashboard.from_yaml(
+        """
+        title: Worker Dashboard
+        panels_grid:
+          - type: LogsPanelConfig
+            service:
+              name: worker
+              start_command: python worker.py
+          - - type: LogsTextSearch
+              service:
+                name: api
+                start_command: uvicorn app:app
+              text: ERROR
+              height: lg
+            - type: LogsCountPlot
+              service:
+                name: scheduler
+                start_command: python scheduler.py
+              text: retrying
+              period: "1m"
+        """
+    )
+
+    assert dashboard.title == "Worker Dashboard"
+    assert isinstance(dashboard.panels_grid[0], LogsPanelConfig)
+    assert dashboard.panels_grid[0].service.name == "worker"
+    assert isinstance(dashboard.panels_grid[1][0], LogsTextSearch)
+    assert dashboard.panels_grid[1][0].title == "api: ERROR"
+    assert dashboard.panels_grid[1][0].height == "lg"
+    assert isinstance(dashboard.panels_grid[1][1], LogsCountPlot)
+    assert dashboard.panels_grid[1][1].title == "scheduler: retrying Counts"
+
+
+def test_load_dashboards_from_yaml(tmp_path):
+    path = tmp_path / "dashboards.yaml"
+    path.write_text(
+        """
+        dashboards:
+          - title: Ops
+            panels_grid:
+              - type: LogsPanelConfig
+                service:
+                  name: worker
+                  start_command: python worker.py
+        """
+    )
+
+    dashboards = load_dashboards_from_yaml(path)
+
+    assert len(dashboards) == 1
+    assert dashboards[0].title == "Ops"
+    assert dashboards[0].panels_grid[0].service.name == "worker"

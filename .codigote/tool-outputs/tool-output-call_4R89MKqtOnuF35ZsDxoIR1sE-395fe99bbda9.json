@@ -1,0 +1,2042 @@
+{
+  "artifact_id": "tool-output-call_4R89MKqtOnuF35ZsDxoIR1sE-395fe99bbda9",
+  "ended_at": "2026-06-07T16:58:48.012644",
+  "error": null,
+  "metadata": {
+    "bytes_read": 15415,
+    "hook_permission_config": {
+      "diagnostics": [],
+      "hooks": [],
+      "permission_rules": [],
+      "shadowed_rules": [],
+      "source_refs": []
+    },
+    "line_numbers": true,
+    "permission_decision": {
+      "allowed": true,
+      "behavior": "allow",
+      "classifier_confidence": 0.86,
+      "classifier_label": "low-risk-tool",
+      "explanation": "read is a low-risk tool. Classifier label `low-risk-tool` assessed command `{\"cell_limit\": 0, \"cell_offset\": 0, \"include_data\": false, \"include_outputs\": false, \"limit\": 560, \"line_numbers\": true, \"max_bytes\": 20000, \"offset\": 0, \"page_limit\": 0, \"page_offset\": 0, \"path\": \"/home/dan/repos/taskflows/tests/test_service.py\", \"render\": \"text\"}`.",
+      "hook_results": [],
+      "matched_rule_ids": [],
+      "message": "Tool `read` is allowed.",
+      "requires_approval": false,
+      "updated_input": {
+        "cell_limit": 0,
+        "cell_offset": 0,
+        "include_data": false,
+        "include_outputs": false,
+        "limit": 560,
+        "line_numbers": true,
+        "max_bytes": 20000,
+        "offset": 0,
+        "page_limit": 0,
+        "page_offset": 0,
+        "path": "/home/dan/repos/taskflows/tests/test_service.py",
+        "render": "text"
+      }
+    },
+    "post_hook_results": [],
+    "selected_line_count": 495
+  },
+  "output": {
+    "content": "from datetime import datetime, timedelta, timezone\nfrom pathlib import Path\nfrom shutil import rmtree\nfrom time import sleep, time\nfrom unittest.mock import MagicMock, patch\n\nimport pytest\nfrom taskflows import constraints\nfrom taskflows.common import _SYSTEMD_FILE_PREFIX\nfrom taskflows.constraints import CgroupConfig\nfrom taskflows.schedule import Calendar, Periodic\nfrom taskflows.service import Service, ServiceRegistry, Venv, service_logs, systemd_dir\n\n\n@pytest.fixture\ndef log_dir():\n    d = Path(__file__).parent / \"logs\"\n    d.mkdir(exist_ok=True)\n    yield d\n    rmtree(d)\n\n\ndef create_test_name():\n    return f\"test_{time()}\".replace(\".\", \"\")\n\n\ndef test_config():\n    v = Calendar(\"Sun 17:00 America/New_York\")\n    assert isinstance(v.unit_entries, set)\n\n    v = Periodic(start_on=\"boot\", period=10, relative_to=\"start\")\n    assert isinstance(v.unit_entries, set)\n\n    v = Periodic(\"login\", 1, \"start\")\n    assert isinstance(v.unit_entries, set)\n\n    v = constraints.Memory(amount=1000000, constraint=\">=\", silent=True)\n    assert isinstance(v.unit_entries, set)\n\n    v = constraints.Memory(amount=908902, constraint=\"=\", silent=False)\n    assert isinstance(v.unit_entries, set)\n\n    v = constraints.CPUs(amount=9, constraint=\">=\", silent=True)\n    assert isinstance(v.unit_entries, set)\n\n    v = constraints.CPUPressure(max_percent=80, timespan=\"5min\", silent=True)\n    assert isinstance(v.unit_entries, set)\n\n    v = constraints.MemoryPressure(max_percent=90, timespan=\"5min\", silent=False)\n    assert isinstance(v.unit_entries, set)\n\n    v = constraints.CPUPressure(max_percent=80, timespan=\"1min\", silent=False)\n    assert isinstance(v.unit_entries, set)\n\n    v = constraints.IOPressure(max_percent=80, timespan=\"10sec\", silent=True)\n    assert isinstance(v.unit_entries, set)\n\n\ndef test_constraints_reject_invalid_numeric_ranges():\n    with pytest.raises(ValueError):\n        constraints.Memory(amount=-1)\n\n    with pytest.raises(ValueError):\n        constraints.CPUPressure(max_percent=-1)\n\n    with pytest.raises(ValueError):\n        constraints.CPUPressure(max_percent=101)\n\n\n@pytest.mark.parametrize(\n    \"kwargs\",\n    [\n        {\"cpu_period\": 0},\n        {\"cpu_shares\": 0},\n        {\"cpu_weight\": 10001},\n        {\"memory_limit\": -1},\n        {\"memory_swappiness\": 101},\n        {\"blkio_weight\": 9},\n        {\"io_weight\": 0},\n        {\"pids_limit\": 0},\n        {\"nofile_limit\": 0},\n        {\"oom_score_adj\": -1001},\n        {\"oom_policy\": \"restart\"},\n        {\"managed_oom_swap\": \"stop\"},\n        {\"managed_oom_memory_pressure\": \"continue\"},\n        {\"managed_oom_memory_pressure_limit\": 101},\n        {\"managed_oom_memory_pressure_limit\": \"sometimes\"},\n        {\"managed_oom_memory_pressure_limit\": \"60.5%\"},\n        {\"managed_oom_preference\": \"prefer\"},\n        {\"timeout_start\": -1},\n        {\"device_read_bps\": {\"/dev/sda\": 0}},\n        {\"device_write_iops\": {\"/dev/sda\": -1}},\n    ],\n)\ndef test_cgroup_config_rejects_invalid_resource_ranges(kwargs):\n    with pytest.raises(ValueError):\n        CgroupConfig(**kwargs)\n\n\ndef test_cgroup_config_normalizes_oom_literals_and_percentages():\n    config = CgroupConfig(\n        oom_policy=\"KILL\",\n        managed_oom_swap=\"KILL\",\n        managed_oom_memory_pressure=\"KILL\",\n        managed_oom_memory_pressure_limit=\"60%\",\n        managed_oom_preference=\"AVOID\",\n    )\n\n    directives = config.to_systemd_directives()\n\n    assert directives[\"OOMPolicy\"] == \"kill\"\n    assert directives[\"ManagedOOMSwap\"] == \"kill\"\n    assert directives[\"ManagedOOMMemoryPressure\"] == \"kill\"\n    assert directives[\"ManagedOOMMemoryPressureLimit\"] == \"60%\"\n    assert directives[\"ManagedOOMPreference\"] == \"avoid\"\n\n\ndef test_calendar_from_datetime_uses_four_digit_year():\n    run_time = datetime(2026, 5, 5, 16, 50, 8, tzinfo=timezone.utc)\n\n    calendar = Calendar.from_datetime(run_time)\n\n    assert calendar.schedule == \"Tue 2026-05-05 16:50:08 UTC\"\n    assert \"OnCalendar=Tue 2026-05-05 16:50:08 UTC\" in calendar.unit_entries\n\n\n@pytest.mark.parametrize(\"period\", [0, -1])\ndef test_periodic_rejects_nonpositive_period(period):\n    with pytest.raises(ValueError, match=\"period\"):\n        Periodic(start_on=\"boot\", period=period, relative_to=\"start\")\n\n\n@pytest.mark.parametrize(\n    \"kwargs\",\n    [\n        {\"start_on\": \"shutdown\", \"period\": 1, \"relative_to\": \"start\"},\n        {\"start_on\": \"boot\", \"period\": 1, \"relative_to\": \"middle\"},\n    ],\n)\ndef test_periodic_rejects_invalid_options(kwargs):\n    with pytest.raises(ValueError):\n        Periodic(**kwargs)\n\n\n@pytest.mark.parametrize(\n    \"schedule_kwargs\",\n    [\n        {\"schedule\": \"\", \"accuracy\": \"1ms\"},\n        {\"schedule\": \"Mon 12:00\", \"accuracy\": \"\"},\n        {\"schedule\": \"Mon 12:00\\nOnBootSec=1\", \"accuracy\": \"1ms\"},\n    ],\n)\ndef test_calendar_rejects_invalid_systemd_values(schedule_kwargs):\n    with pytest.raises(ValueError):\n        Calendar(**schedule_kwargs)\n\n\ndef test_service_logs_sets_journalctl_timeout(monkeypatch):\n    monkeypatch.setenv(\"TASKFLOWS_JOURNALCTL_TIMEOUT_SECONDS\", \"7\")\n    completed = MagicMock(stdout=\"logs\", stderr=\"\")\n\n    with patch(\n        \"taskflows.service.get_docker_client\", side_effect=RuntimeError(\"no docker\")\n    ):\n        with patch(\"taskflows.service.subprocess.run\", return_value=completed) as run:\n            assert service_logs(\"test-service\") == \"logs\"\n\n    assert run.call_args.kwargs[\"timeout\"] == 7\n\n\ndef test_service_copies_env_before_adding_runtime_defaults():\n    env = {\"APP_ENV\": \"test\"}\n\n    service = Service(name=\"env-copy\", start_command=\"python -V\", env=env)\n\n    assert env == {\"APP_ENV\": \"test\"}\n    assert service.env == {\"APP_ENV\": \"test\", \"PYTHONUNBUFFERED\": \"1\"}\n\n\n@pytest.mark.parametrize(\"timeout\", [0, -1])\ndef test_service_rejects_nonpositive_timeout(timeout):\n    with pytest.raises(ValueError, match=\"timeout\"):\n        Service(name=\"bad-timeout\", start_command=\"python -V\", timeout=timeout)\n\n\ndef test_venv_command_quotes_runner_and_environment_name(tmp_path):\n    runner = tmp_path / \"conda runner\"\n    runner.touch()\n\n    command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command(\n        \"python -V\"\n    )\n\n    assert command == f\"'{runner}' run -n 'prod env' --no-capture-output -- python -V\"\n\n\ndef test_venv_command_uses_attach_when_runner_supports_it(tmp_path):\n    runner = tmp_path / \"mamba\"\n    runner.touch()\n    help_output = \"--attach STREAM\\n-a \\\"\\\" for disabling stream redirection\"\n\n    with patch(\n        \"taskflows.service.subprocess.run\",\n        return_value=MagicMock(stdout=help_output, stderr=\"\"),\n    ):\n        command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command(\n            \"python -V\"\n        )\n\n    assert command == f\"{runner} run -n 'prod env' -a '' -- python -V\"\n\n\ndef test_venv_command_uses_no_capture_when_runner_supports_it(tmp_path):\n    runner = tmp_path / \"mamba\"\n    runner.touch()\n\n    with patch(\n        \"taskflows.service.subprocess.run\",\n        return_value=MagicMock(stdout=\"--no-capture-output\", stderr=\"\"),\n    ):\n        command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command(\n            \"python -V\"\n        )\n\n    assert command == f\"{runner} run -n 'prod env' --no-capture-output -- python -V\"\n\n\ndef test_venv_command_omits_live_output_flag_for_mamba_when_probe_fails(tmp_path):\n    runner = tmp_path / \"mamba\"\n    runner.touch()\n\n    with patch(\n        \"taskflows.service.subprocess.run\",\n        side_effect=OSError(\"not executable\"),\n    ):\n        command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command(\n            \"python -V\"\n        )\n\n    assert command == f\"{runner} run -n 'prod env' -- python -V\"\n\n\n@pytest.mark.integration\n@pytest.mark.asyncio\nasync def test_service_management(log_dir):\n    # create a minimal service.\n    test_name = create_test_name()\n    log_file = (log_dir / f\"{test_name}.log\").resolve()\n    srv = Service(\n        name=test_name, start_command=f\"bash -c 'echo {test_name} >> {log_file}'\"\n    )\n    await srv.create()\n    service_file = systemd_dir / f\"{_SYSTEMD_FILE_PREFIX}{test_name}.service\"\n    assert service_file.is_file()\n    assert len(service_file.read_text())\n    await srv.start()\n    sleep(0.5)\n    assert log_file.is_file()\n    assert log_file.read_text().strip() == test_name\n    await srv.remove()\n    assert not service_file.exists()\n\n\n@pytest.mark.integration\n@pytest.mark.asyncio\nasync def test_schedule(log_dir):\n    test_name = create_test_name()\n    log_file = (log_dir / f\"{test_name}.log\").resolve()\n    run_time = datetime.now(timezone.utc) + timedelta(seconds=1)\n    srv = Service(\n        name=test_name,\n        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\",\n        start_schedule=Calendar.from_datetime(run_time),\n    )\n    await srv.create()\n    timer_file = systemd_dir / f\"{_SYSTEMD_FILE_PREFIX}{test_name}.timer\"\n    assert timer_file.is_file()\n    assert len(timer_file.read_text())\n    assert not log_file.is_file()\n    sleep((run_time - datetime.now(timezone.utc)).total_seconds() + 0.5)\n    assert log_file.is_file()\n    assert log_file.read_text().strip() == test_name\n    await srv.remove()\n    assert not timer_file.exists()\n\n\n@pytest.mark.integration\n@pytest.mark.asyncio\nasync def test_service_enable_without_arguments(log_dir):\n    \"\"\"Test that Service.enable() works without arguments (default parameter).\"\"\"\n    test_name = create_test_name()\n    log_file = (log_dir / f\"{test_name}.log\").resolve()\n    srv = Service(\n        name=test_name,\n        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\",\n        start_schedule=Calendar.from_datetime(\n            datetime.now(timezone.utc) + timedelta(seconds=10)\n        ),\n    )\n    await srv.create()\n\n    # This should not raise TypeError (the bug we fixed)\n    # Just verify it doesn't crash - enable() has no return value\n    try:\n        await srv.enable()\n        enable_succeeded = True\n    except TypeError:\n        enable_succeeded = False\n\n    assert enable_succeeded, \"enable() should work without arguments\"\n\n    await srv.remove()\n\n\n@pytest.mark.integration\n@pytest.mark.asyncio\nasync def test_service_enable_timers_only(log_dir):\n    \"\"\"Test that Service.enable(timers_only=True) accepts the parameter.\"\"\"\n    test_name = create_test_name()\n    log_file = (log_dir / f\"{test_name}.log\").resolve()\n    srv = Service(\n        name=test_name,\n        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\",\n        start_schedule=Calendar.from_datetime(\n            datetime.now(timezone.utc) + timedelta(seconds=10)\n        ),\n    )\n    await srv.create()\n\n    # This should not raise TypeError (verify parameter works)\n    try:\n        await srv.enable(timers_only=True)\n        enable_succeeded = True\n    except TypeError:\n        enable_succeeded = False\n\n    assert enable_succeeded, \"enable(timers_only=True) should work\"\n\n    await srv.remove()\n\n\n@pytest.mark.integration\n@pytest.mark.asyncio\nasync def test_service_registry_enable():\n    \"\"\"Test that ServiceRegistry.enable() works correctly.\"\"\"\n    test_name1 = create_test_name()\n    test_name2 = create_test_name()\n\n    srv1 = Service(name=test_name1, start_command=\"echo test1\")\n    srv2 = Service(name=test_name2, start_command=\"echo test2\")\n\n    # Create a registry and add services\n    registry = ServiceRegistry()\n    registry.add(srv1, srv2)\n\n    try:\n        await srv1.create()\n        await srv2.create()\n\n        # This should not raise TypeError (the bug we fixed)\n        try:\n            await registry.enable()\n            enable_succeeded = True\n        except TypeError:\n            enable_succeeded = False\n\n        assert enable_succeeded, \"ServiceRegistry.enable() should work without errors\"\n\n    finally:\n        # Clean up\n        await srv1.remove()\n        await srv2.remove()\n\n\ndef test_cgroup_multiple_device_limits():\n    \"\"\"Test that multiple device bandwidth limits are preserved in systemd directives.\"\"\"\n    cgroup = CgroupConfig(\n        device_read_bps={\n            \"/dev/sda\": 1048576,  # 1 MB/s\n            \"/dev/sdb\": 2097152,  # 2 MB/s\n        },\n        device_write_bps={\n            \"/dev/sda\": 524288,  # 512 KB/s\n            \"/dev/sdb\": 1048576,  # 1 MB/s\n        },\n    )\n\n    directives = cgroup.to_systemd_directives()\n\n    # Verify all device limits are present with numbered keys\n    assert \"IOReadBandwidthMax_0\" in directives\n    assert \"IOReadBandwidthMax_1\" in directives\n    assert \"IOWriteBandwidthMax_0\" in directives\n    assert \"IOWriteBandwidthMax_1\" in directives\n\n    # Verify values are correct\n    read_values = {\n        directives[\"IOReadBandwidthMax_0\"],\n        directives[\"IOReadBandwidthMax_1\"],\n    }\n    assert \"/dev/sda 1048576\" in read_values\n    assert \"/dev/sdb 2097152\" in read_values\n\n    write_values = {\n        directives[\"IOWriteBandwidthMax_0\"],\n        directives[\"IOWriteBandwidthMax_1\"],\n    }\n    assert \"/dev/sda 524288\" in write_values\n    assert \"/dev/sdb 1048576\" in write_values\n\n\ndef test_cgroup_environment_directives_are_escaped():\n    cgroup = CgroupConfig(environment={\"SAFE_VALUE\": 'quoted \"value\" with spaces'})\n    srv = Service(\n        name=\"cgroup-env\",\n        start_command=\"echo ok\",\n        cgroup_config=cgroup,\n    )\n\n    assert (\n        'Environment=\"SAFE_VALUE=quoted \\\\\"value\\\\\" with spaces\"' in srv.service_entries\n    )\n\n\ndef test_cgroup_repeated_device_allow_entries_are_preserved():\n    cgroup = CgroupConfig(devices=[\"/dev/fuse\", \"/dev/null:r\"])\n    srv = Service(\n        name=\"cgroup-devices\",\n        start_command=\"echo ok\",\n        cgroup_config=cgroup,\n    )\n\n    device_allow_entries = {\n        entry for entry in srv.service_entries if entry.startswith(\"DeviceAllow=\")\n    }\n    assert device_allow_entries == {\n        \"DeviceAllow=/dev/fuse rwm\",\n        \"DeviceAllow=/dev/null r\",\n    }\n\n\ndef test_service_relationship_accepts_service_object():\n    dependency = Service(name=\"dependency\", start_command=\"echo dependency\")\n    srv = Service(\n        name=\"dependent\",\n        start_command=\"echo dependent\",\n        start_after=dependency,\n    )\n\n    assert \"After=taskflows-dependency.service\" in srv.unit_entries\n\n\ndef test_service_env_file_parse_errors_are_fatal(tmp_path):\n    env_file = tmp_path / \"bad.env\"\n    env_file.write_text(\"not-an-env-line\")\n\n    with pytest.raises(ValueError, match=\"Invalid environment line\"):\n        Service(\n            name=\"bad-env-file\",\n            start_command=\"echo bad\",\n            env_file=str(env_file),\n        )\n\n\n@pytest.mark.integration\n@pytest.mark.asyncio\nasync def test_cgroup_device_limits_in_service_unit(log_dir):\n    \"\"\"Test that service unit file contains all device limits.\"\"\"\n    test_name = create_test_name()\n    log_file = (log_dir / f\"{test_name}.log\").resolve()\n\n    cgroup = CgroupConfig(\n        device_read_bps={\n            \"/dev/sda\": 1048576,\n            \"/dev/sdb\": 2097152,\n        },\n    )\n\n    srv = Service(\n        name=test_name,\n        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\",\n        cgroup_config=cgroup,\n    )\n    await srv.create()\n\n    # Read the service file\n    service_file = systemd_dir / f\"{_SYSTEMD_FILE_PREFIX}{test_name}.service\"\n    assert service_file.is_file()\n    service_content = service_file.read_text()\n\n    # Verify both device limits appear in the service file\n    assert \"IOReadBandwidthMax=/dev/sda 1048576\" in service_content\n    assert \"IOReadBandwidthMax=/dev/sdb 2097152\" in service_content\n\n    await srv.remove()\n",
+    "end_line": 495,
+    "kind": "text",
+    "line_limit": 560,
+    "line_offset": 0,
+    "lines": [
+      {
+        "line": 1,
+        "text": "from datetime import datetime, timedelta, timezone"
+      },
+      {
+        "line": 2,
+        "text": "from pathlib import Path"
+      },
+      {
+        "line": 3,
+        "text": "from shutil import rmtree"
+      },
+      {
+        "line": 4,
+        "text": "from time import sleep, time"
+      },
+      {
+        "line": 5,
+        "text": "from unittest.mock import MagicMock, patch"
+      },
+      {
+        "line": 6,
+        "text": ""
+      },
+      {
+        "line": 7,
+        "text": "import pytest"
+      },
+      {
+        "line": 8,
+        "text": "from taskflows import constraints"
+      },
+      {
+        "line": 9,
+        "text": "from taskflows.common import _SYSTEMD_FILE_PREFIX"
+      },
+      {
+        "line": 10,
+        "text": "from taskflows.constraints import CgroupConfig"
+      },
+      {
+        "line": 11,
+        "text": "from taskflows.schedule import Calendar, Periodic"
+      },
+      {
+        "line": 12,
+        "text": "from taskflows.service import Service, ServiceRegistry, Venv, service_logs, systemd_dir"
+      },
+      {
+        "line": 13,
+        "text": ""
+      },
+      {
+        "line": 14,
+        "text": ""
+      },
+      {
+        "line": 15,
+        "text": "@pytest.fixture"
+      },
+      {
+        "line": 16,
+        "text": "def log_dir():"
+      },
+      {
+        "line": 17,
+        "text": "    d = Path(__file__).parent / \"logs\""
+      },
+      {
+        "line": 18,
+        "text": "    d.mkdir(exist_ok=True)"
+      },
+      {
+        "line": 19,
+        "text": "    yield d"
+      },
+      {
+        "line": 20,
+        "text": "    rmtree(d)"
+      },
+      {
+        "line": 21,
+        "text": ""
+      },
+      {
+        "line": 22,
+        "text": ""
+      },
+      {
+        "line": 23,
+        "text": "def create_test_name():"
+      },
+      {
+        "line": 24,
+        "text": "    return f\"test_{time()}\".replace(\".\", \"\")"
+      },
+      {
+        "line": 25,
+        "text": ""
+      },
+      {
+        "line": 26,
+        "text": ""
+      },
+      {
+        "line": 27,
+        "text": "def test_config():"
+      },
+      {
+        "line": 28,
+        "text": "    v = Calendar(\"Sun 17:00 America/New_York\")"
+      },
+      {
+        "line": 29,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 30,
+        "text": ""
+      },
+      {
+        "line": 31,
+        "text": "    v = Periodic(start_on=\"boot\", period=10, relative_to=\"start\")"
+      },
+      {
+        "line": 32,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 33,
+        "text": ""
+      },
+      {
+        "line": 34,
+        "text": "    v = Periodic(\"login\", 1, \"start\")"
+      },
+      {
+        "line": 35,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 36,
+        "text": ""
+      },
+      {
+        "line": 37,
+        "text": "    v = constraints.Memory(amount=1000000, constraint=\">=\", silent=True)"
+      },
+      {
+        "line": 38,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 39,
+        "text": ""
+      },
+      {
+        "line": 40,
+        "text": "    v = constraints.Memory(amount=908902, constraint=\"=\", silent=False)"
+      },
+      {
+        "line": 41,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 42,
+        "text": ""
+      },
+      {
+        "line": 43,
+        "text": "    v = constraints.CPUs(amount=9, constraint=\">=\", silent=True)"
+      },
+      {
+        "line": 44,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 45,
+        "text": ""
+      },
+      {
+        "line": 46,
+        "text": "    v = constraints.CPUPressure(max_percent=80, timespan=\"5min\", silent=True)"
+      },
+      {
+        "line": 47,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 48,
+        "text": ""
+      },
+      {
+        "line": 49,
+        "text": "    v = constraints.MemoryPressure(max_percent=90, timespan=\"5min\", silent=False)"
+      },
+      {
+        "line": 50,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 51,
+        "text": ""
+      },
+      {
+        "line": 52,
+        "text": "    v = constraints.CPUPressure(max_percent=80, timespan=\"1min\", silent=False)"
+      },
+      {
+        "line": 53,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 54,
+        "text": ""
+      },
+      {
+        "line": 55,
+        "text": "    v = constraints.IOPressure(max_percent=80, timespan=\"10sec\", silent=True)"
+      },
+      {
+        "line": 56,
+        "text": "    assert isinstance(v.unit_entries, set)"
+      },
+      {
+        "line": 57,
+        "text": ""
+      },
+      {
+        "line": 58,
+        "text": ""
+      },
+      {
+        "line": 59,
+        "text": "def test_constraints_reject_invalid_numeric_ranges():"
+      },
+      {
+        "line": 60,
+        "text": "    with pytest.raises(ValueError):"
+      },
+      {
+        "line": 61,
+        "text": "        constraints.Memory(amount=-1)"
+      },
+      {
+        "line": 62,
+        "text": ""
+      },
+      {
+        "line": 63,
+        "text": "    with pytest.raises(ValueError):"
+      },
+      {
+        "line": 64,
+        "text": "        constraints.CPUPressure(max_percent=-1)"
+      },
+      {
+        "line": 65,
+        "text": ""
+      },
+      {
+        "line": 66,
+        "text": "    with pytest.raises(ValueError):"
+      },
+      {
+        "line": 67,
+        "text": "        constraints.CPUPressure(max_percent=101)"
+      },
+      {
+        "line": 68,
+        "text": ""
+      },
+      {
+        "line": 69,
+        "text": ""
+      },
+      {
+        "line": 70,
+        "text": "@pytest.mark.parametrize("
+      },
+      {
+        "line": 71,
+        "text": "    \"kwargs\","
+      },
+      {
+        "line": 72,
+        "text": "    ["
+      },
+      {
+        "line": 73,
+        "text": "        {\"cpu_period\": 0},"
+      },
+      {
+        "line": 74,
+        "text": "        {\"cpu_shares\": 0},"
+      },
+      {
+        "line": 75,
+        "text": "        {\"cpu_weight\": 10001},"
+      },
+      {
+        "line": 76,
+        "text": "        {\"memory_limit\": -1},"
+      },
+      {
+        "line": 77,
+        "text": "        {\"memory_swappiness\": 101},"
+      },
+      {
+        "line": 78,
+        "text": "        {\"blkio_weight\": 9},"
+      },
+      {
+        "line": 79,
+        "text": "        {\"io_weight\": 0},"
+      },
+      {
+        "line": 80,
+        "text": "        {\"pids_limit\": 0},"
+      },
+      {
+        "line": 81,
+        "text": "        {\"nofile_limit\": 0},"
+      },
+      {
+        "line": 82,
+        "text": "        {\"oom_score_adj\": -1001},"
+      },
+      {
+        "line": 83,
+        "text": "        {\"oom_policy\": \"restart\"},"
+      },
+      {
+        "line": 84,
+        "text": "        {\"managed_oom_swap\": \"stop\"},"
+      },
+      {
+        "line": 85,
+        "text": "        {\"managed_oom_memory_pressure\": \"continue\"},"
+      },
+      {
+        "line": 86,
+        "text": "        {\"managed_oom_memory_pressure_limit\": 101},"
+      },
+      {
+        "line": 87,
+        "text": "        {\"managed_oom_memory_pressure_limit\": \"sometimes\"},"
+      },
+      {
+        "line": 88,
+        "text": "        {\"managed_oom_memory_pressure_limit\": \"60.5%\"},"
+      },
+      {
+        "line": 89,
+        "text": "        {\"managed_oom_preference\": \"prefer\"},"
+      },
+      {
+        "line": 90,
+        "text": "        {\"timeout_start\": -1},"
+      },
+      {
+        "line": 91,
+        "text": "        {\"device_read_bps\": {\"/dev/sda\": 0}},"
+      },
+      {
+        "line": 92,
+        "text": "        {\"device_write_iops\": {\"/dev/sda\": -1}},"
+      },
+      {
+        "line": 93,
+        "text": "    ],"
+      },
+      {
+        "line": 94,
+        "text": ")"
+      },
+      {
+        "line": 95,
+        "text": "def test_cgroup_config_rejects_invalid_resource_ranges(kwargs):"
+      },
+      {
+        "line": 96,
+        "text": "    with pytest.raises(ValueError):"
+      },
+      {
+        "line": 97,
+        "text": "        CgroupConfig(**kwargs)"
+      },
+      {
+        "line": 98,
+        "text": ""
+      },
+      {
+        "line": 99,
+        "text": ""
+      },
+      {
+        "line": 100,
+        "text": "def test_cgroup_config_normalizes_oom_literals_and_percentages():"
+      },
+      {
+        "line": 101,
+        "text": "    config = CgroupConfig("
+      },
+      {
+        "line": 102,
+        "text": "        oom_policy=\"KILL\","
+      },
+      {
+        "line": 103,
+        "text": "        managed_oom_swap=\"KILL\","
+      },
+      {
+        "line": 104,
+        "text": "        managed_oom_memory_pressure=\"KILL\","
+      },
+      {
+        "line": 105,
+        "text": "        managed_oom_memory_pressure_limit=\"60%\","
+      },
+      {
+        "line": 106,
+        "text": "        managed_oom_preference=\"AVOID\","
+      },
+      {
+        "line": 107,
+        "text": "    )"
+      },
+      {
+        "line": 108,
+        "text": ""
+      },
+      {
+        "line": 109,
+        "text": "    directives = config.to_systemd_directives()"
+      },
+      {
+        "line": 110,
+        "text": ""
+      },
+      {
+        "line": 111,
+        "text": "    assert directives[\"OOMPolicy\"] == \"kill\""
+      },
+      {
+        "line": 112,
+        "text": "    assert directives[\"ManagedOOMSwap\"] == \"kill\""
+      },
+      {
+        "line": 113,
+        "text": "    assert directives[\"ManagedOOMMemoryPressure\"] == \"kill\""
+      },
+      {
+        "line": 114,
+        "text": "    assert directives[\"ManagedOOMMemoryPressureLimit\"] == \"60%\""
+      },
+      {
+        "line": 115,
+        "text": "    assert directives[\"ManagedOOMPreference\"] == \"avoid\""
+      },
+      {
+        "line": 116,
+        "text": ""
+      },
+      {
+        "line": 117,
+        "text": ""
+      },
+      {
+        "line": 118,
+        "text": "def test_calendar_from_datetime_uses_four_digit_year():"
+      },
+      {
+        "line": 119,
+        "text": "    run_time = datetime(2026, 5, 5, 16, 50, 8, tzinfo=timezone.utc)"
+      },
+      {
+        "line": 120,
+        "text": ""
+      },
+      {
+        "line": 121,
+        "text": "    calendar = Calendar.from_datetime(run_time)"
+      },
+      {
+        "line": 122,
+        "text": ""
+      },
+      {
+        "line": 123,
+        "text": "    assert calendar.schedule == \"Tue 2026-05-05 16:50:08 UTC\""
+      },
+      {
+        "line": 124,
+        "text": "    assert \"OnCalendar=Tue 2026-05-05 16:50:08 UTC\" in calendar.unit_entries"
+      },
+      {
+        "line": 125,
+        "text": ""
+      },
+      {
+        "line": 126,
+        "text": ""
+      },
+      {
+        "line": 127,
+        "text": "@pytest.mark.parametrize(\"period\", [0, -1])"
+      },
+      {
+        "line": 128,
+        "text": "def test_periodic_rejects_nonpositive_period(period):"
+      },
+      {
+        "line": 129,
+        "text": "    with pytest.raises(ValueError, match=\"period\"):"
+      },
+      {
+        "line": 130,
+        "text": "        Periodic(start_on=\"boot\", period=period, relative_to=\"start\")"
+      },
+      {
+        "line": 131,
+        "text": ""
+      },
+      {
+        "line": 132,
+        "text": ""
+      },
+      {
+        "line": 133,
+        "text": "@pytest.mark.parametrize("
+      },
+      {
+        "line": 134,
+        "text": "    \"kwargs\","
+      },
+      {
+        "line": 135,
+        "text": "    ["
+      },
+      {
+        "line": 136,
+        "text": "        {\"start_on\": \"shutdown\", \"period\": 1, \"relative_to\": \"start\"},"
+      },
+      {
+        "line": 137,
+        "text": "        {\"start_on\": \"boot\", \"period\": 1, \"relative_to\": \"middle\"},"
+      },
+      {
+        "line": 138,
+        "text": "    ],"
+      },
+      {
+        "line": 139,
+        "text": ")"
+      },
+      {
+        "line": 140,
+        "text": "def test_periodic_rejects_invalid_options(kwargs):"
+      },
+      {
+        "line": 141,
+        "text": "    with pytest.raises(ValueError):"
+      },
+      {
+        "line": 142,
+        "text": "        Periodic(**kwargs)"
+      },
+      {
+        "line": 143,
+        "text": ""
+      },
+      {
+        "line": 144,
+        "text": ""
+      },
+      {
+        "line": 145,
+        "text": "@pytest.mark.parametrize("
+      },
+      {
+        "line": 146,
+        "text": "    \"schedule_kwargs\","
+      },
+      {
+        "line": 147,
+        "text": "    ["
+      },
+      {
+        "line": 148,
+        "text": "        {\"schedule\": \"\", \"accuracy\": \"1ms\"},"
+      },
+      {
+        "line": 149,
+        "text": "        {\"schedule\": \"Mon 12:00\", \"accuracy\": \"\"},"
+      },
+      {
+        "line": 150,
+        "text": "        {\"schedule\": \"Mon 12:00\\nOnBootSec=1\", \"accuracy\": \"1ms\"},"
+      },
+      {
+        "line": 151,
+        "text": "    ],"
+      },
+      {
+        "line": 152,
+        "text": ")"
+      },
+      {
+        "line": 153,
+        "text": "def test_calendar_rejects_invalid_systemd_values(schedule_kwargs):"
+      },
+      {
+        "line": 154,
+        "text": "    with pytest.raises(ValueError):"
+      },
+      {
+        "line": 155,
+        "text": "        Calendar(**schedule_kwargs)"
+      },
+      {
+        "line": 156,
+        "text": ""
+      },
+      {
+        "line": 157,
+        "text": ""
+      },
+      {
+        "line": 158,
+        "text": "def test_service_logs_sets_journalctl_timeout(monkeypatch):"
+      },
+      {
+        "line": 159,
+        "text": "    monkeypatch.setenv(\"TASKFLOWS_JOURNALCTL_TIMEOUT_SECONDS\", \"7\")"
+      },
+      {
+        "line": 160,
+        "text": "    completed = MagicMock(stdout=\"logs\", stderr=\"\")"
+      },
+      {
+        "line": 161,
+        "text": ""
+      },
+      {
+        "line": 162,
+        "text": "    with patch("
+      },
+      {
+        "line": 163,
+        "text": "        \"taskflows.service.get_docker_client\", side_effect=RuntimeError(\"no docker\")"
+      },
+      {
+        "line": 164,
+        "text": "    ):"
+      },
+      {
+        "line": 165,
+        "text": "        with patch(\"taskflows.service.subprocess.run\", return_value=completed) as run:"
+      },
+      {
+        "line": 166,
+        "text": "            assert service_logs(\"test-service\") == \"logs\""
+      },
+      {
+        "line": 167,
+        "text": ""
+      },
+      {
+        "line": 168,
+        "text": "    assert run.call_args.kwargs[\"timeout\"] == 7"
+      },
+      {
+        "line": 169,
+        "text": ""
+      },
+      {
+        "line": 170,
+        "text": ""
+      },
+      {
+        "line": 171,
+        "text": "def test_service_copies_env_before_adding_runtime_defaults():"
+      },
+      {
+        "line": 172,
+        "text": "    env = {\"APP_ENV\": \"test\"}"
+      },
+      {
+        "line": 173,
+        "text": ""
+      },
+      {
+        "line": 174,
+        "text": "    service = Service(name=\"env-copy\", start_command=\"python -V\", env=env)"
+      },
+      {
+        "line": 175,
+        "text": ""
+      },
+      {
+        "line": 176,
+        "text": "    assert env == {\"APP_ENV\": \"test\"}"
+      },
+      {
+        "line": 177,
+        "text": "    assert service.env == {\"APP_ENV\": \"test\", \"PYTHONUNBUFFERED\": \"1\"}"
+      },
+      {
+        "line": 178,
+        "text": ""
+      },
+      {
+        "line": 179,
+        "text": ""
+      },
+      {
+        "line": 180,
+        "text": "@pytest.mark.parametrize(\"timeout\", [0, -1])"
+      },
+      {
+        "line": 181,
+        "text": "def test_service_rejects_nonpositive_timeout(timeout):"
+      },
+      {
+        "line": 182,
+        "text": "    with pytest.raises(ValueError, match=\"timeout\"):"
+      },
+      {
+        "line": 183,
+        "text": "        Service(name=\"bad-timeout\", start_command=\"python -V\", timeout=timeout)"
+      },
+      {
+        "line": 184,
+        "text": ""
+      },
+      {
+        "line": 185,
+        "text": ""
+      },
+      {
+        "line": 186,
+        "text": "def test_venv_command_quotes_runner_and_environment_name(tmp_path):"
+      },
+      {
+        "line": 187,
+        "text": "    runner = tmp_path / \"conda runner\""
+      },
+      {
+        "line": 188,
+        "text": "    runner.touch()"
+      },
+      {
+        "line": 189,
+        "text": ""
+      },
+      {
+        "line": 190,
+        "text": "    command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command("
+      },
+      {
+        "line": 191,
+        "text": "        \"python -V\""
+      },
+      {
+        "line": 192,
+        "text": "    )"
+      },
+      {
+        "line": 193,
+        "text": ""
+      },
+      {
+        "line": 194,
+        "text": "    assert command == f\"'{runner}' run -n 'prod env' --no-capture-output -- python -V\""
+      },
+      {
+        "line": 195,
+        "text": ""
+      },
+      {
+        "line": 196,
+        "text": ""
+      },
+      {
+        "line": 197,
+        "text": "def test_venv_command_uses_attach_when_runner_supports_it(tmp_path):"
+      },
+      {
+        "line": 198,
+        "text": "    runner = tmp_path / \"mamba\""
+      },
+      {
+        "line": 199,
+        "text": "    runner.touch()"
+      },
+      {
+        "line": 200,
+        "text": "    help_output = \"--attach STREAM\\n-a \\\"\\\" for disabling stream redirection\""
+      },
+      {
+        "line": 201,
+        "text": ""
+      },
+      {
+        "line": 202,
+        "text": "    with patch("
+      },
+      {
+        "line": 203,
+        "text": "        \"taskflows.service.subprocess.run\","
+      },
+      {
+        "line": 204,
+        "text": "        return_value=MagicMock(stdout=help_output, stderr=\"\"),"
+      },
+      {
+        "line": 205,
+        "text": "    ):"
+      },
+      {
+        "line": 206,
+        "text": "        command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command("
+      },
+      {
+        "line": 207,
+        "text": "            \"python -V\""
+      },
+      {
+        "line": 208,
+        "text": "        )"
+      },
+      {
+        "line": 209,
+        "text": ""
+      },
+      {
+        "line": 210,
+        "text": "    assert command == f\"{runner} run -n 'prod env' -a '' -- python -V\""
+      },
+      {
+        "line": 211,
+        "text": ""
+      },
+      {
+        "line": 212,
+        "text": ""
+      },
+      {
+        "line": 213,
+        "text": "def test_venv_command_uses_no_capture_when_runner_supports_it(tmp_path):"
+      },
+      {
+        "line": 214,
+        "text": "    runner = tmp_path / \"mamba\""
+      },
+      {
+        "line": 215,
+        "text": "    runner.touch()"
+      },
+      {
+        "line": 216,
+        "text": ""
+      },
+      {
+        "line": 217,
+        "text": "    with patch("
+      },
+      {
+        "line": 218,
+        "text": "        \"taskflows.service.subprocess.run\","
+      },
+      {
+        "line": 219,
+        "text": "        return_value=MagicMock(stdout=\"--no-capture-output\", stderr=\"\"),"
+      },
+      {
+        "line": 220,
+        "text": "    ):"
+      },
+      {
+        "line": 221,
+        "text": "        command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command("
+      },
+      {
+        "line": 222,
+        "text": "            \"python -V\""
+      },
+      {
+        "line": 223,
+        "text": "        )"
+      },
+      {
+        "line": 224,
+        "text": ""
+      },
+      {
+        "line": 225,
+        "text": "    assert command == f\"{runner} run -n 'prod env' --no-capture-output -- python -V\""
+      },
+      {
+        "line": 226,
+        "text": ""
+      },
+      {
+        "line": 227,
+        "text": ""
+      },
+      {
+        "line": 228,
+        "text": "def test_venv_command_omits_live_output_flag_for_mamba_when_probe_fails(tmp_path):"
+      },
+      {
+        "line": 229,
+        "text": "    runner = tmp_path / \"mamba\""
+      },
+      {
+        "line": 230,
+        "text": "    runner.touch()"
+      },
+      {
+        "line": 231,
+        "text": ""
+      },
+      {
+        "line": 232,
+        "text": "    with patch("
+      },
+      {
+        "line": 233,
+        "text": "        \"taskflows.service.subprocess.run\","
+      },
+      {
+        "line": 234,
+        "text": "        side_effect=OSError(\"not executable\"),"
+      },
+      {
+        "line": 235,
+        "text": "    ):"
+      },
+      {
+        "line": 236,
+        "text": "        command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command("
+      },
+      {
+        "line": 237,
+        "text": "            \"python -V\""
+      },
+      {
+        "line": 238,
+        "text": "        )"
+      },
+      {
+        "line": 239,
+        "text": ""
+      },
+      {
+        "line": 240,
+        "text": "    assert command == f\"{runner} run -n 'prod env' -- python -V\""
+      },
+      {
+        "line": 241,
+        "text": ""
+      },
+      {
+        "line": 242,
+        "text": ""
+      },
+      {
+        "line": 243,
+        "text": "@pytest.mark.integration"
+      },
+      {
+        "line": 244,
+        "text": "@pytest.mark.asyncio"
+      },
+      {
+        "line": 245,
+        "text": "async def test_service_management(log_dir):"
+      },
+      {
+        "line": 246,
+        "text": "    # create a minimal service."
+      },
+      {
+        "line": 247,
+        "text": "    test_name = create_test_name()"
+      },
+      {
+        "line": 248,
+        "text": "    log_file = (log_dir / f\"{test_name}.log\").resolve()"
+      },
+      {
+        "line": 249,
+        "text": "    srv = Service("
+      },
+      {
+        "line": 250,
+        "text": "        name=test_name, start_command=f\"bash -c 'echo {test_name} >> {log_file}'\""
+      },
+      {
+        "line": 251,
+        "text": "    )"
+      },
+      {
+        "line": 252,
+        "text": "    await srv.create()"
+      },
+      {
+        "line": 253,
+        "text": "    service_file = systemd_dir / f\"{_SYSTEMD_FILE_PREFIX}{test_name}.service\""
+      },
+      {
+        "line": 254,
+        "text": "    assert service_file.is_file()"
+      },
+      {
+        "line": 255,
+        "text": "    assert len(service_file.read_text())"
+      },
+      {
+        "line": 256,
+        "text": "    await srv.start()"
+      },
+      {
+        "line": 257,
+        "text": "    sleep(0.5)"
+      },
+      {
+        "line": 258,
+        "text": "    assert log_file.is_file()"
+      },
+      {
+        "line": 259,
+        "text": "    assert log_file.read_text().strip() == test_name"
+      },
+      {
+        "line": 260,
+        "text": "    await srv.remove()"
+      },
+      {
+        "line": 261,
+        "text": "    assert not service_file.exists()"
+      },
+      {
+        "line": 262,
+        "text": ""
+      },
+      {
+        "line": 263,
+        "text": ""
+      },
+      {
+        "line": 264,
+        "text": "@pytest.mark.integration"
+      },
+      {
+        "line": 265,
+        "text": "@pytest.mark.asyncio"
+      },
+      {
+        "line": 266,
+        "text": "async def test_schedule(log_dir):"
+      },
+      {
+        "line": 267,
+        "text": "    test_name = create_test_name()"
+      },
+      {
+        "line": 268,
+        "text": "    log_file = (log_dir / f\"{test_name}.log\").resolve()"
+      },
+      {
+        "line": 269,
+        "text": "    run_time = datetime.now(timezone.utc) + timedelta(seconds=1)"
+      },
+      {
+        "line": 270,
+        "text": "    srv = Service("
+      },
+      {
+        "line": 271,
+        "text": "        name=test_name,"
+      },
+      {
+        "line": 272,
+        "text": "        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\","
+      },
+      {
+        "line": 273,
+        "text": "        start_schedule=Calendar.from_datetime(run_time),"
+      },
+      {
+        "line": 274,
+        "text": "    )"
+      },
+      {
+        "line": 275,
+        "text": "    await srv.create()"
+      },
+      {
+        "line": 276,
+        "text": "    timer_file = systemd_dir / f\"{_SYSTEMD_FILE_PREFIX}{test_name}.timer\""
+      },
+      {
+        "line": 277,
+        "text": "    assert timer_file.is_file()"
+      },
+      {
+        "line": 278,
+        "text": "    assert len(timer_file.read_text())"
+      },
+      {
+        "line": 279,
+        "text": "    assert not log_file.is_file()"
+      },
+      {
+        "line": 280,
+        "text": "    sleep((run_time - datetime.now(timezone.utc)).total_seconds() + 0.5)"
+      },
+      {
+        "line": 281,
+        "text": "    assert log_file.is_file()"
+      },
+      {
+        "line": 282,
+        "text": "    assert log_file.read_text().strip() == test_name"
+      },
+      {
+        "line": 283,
+        "text": "    await srv.remove()"
+      },
+      {
+        "line": 284,
+        "text": "    assert not timer_file.exists()"
+      },
+      {
+        "line": 285,
+        "text": ""
+      },
+      {
+        "line": 286,
+        "text": ""
+      },
+      {
+        "line": 287,
+        "text": "@pytest.mark.integration"
+      },
+      {
+        "line": 288,
+        "text": "@pytest.mark.asyncio"
+      },
+      {
+        "line": 289,
+        "text": "async def test_service_enable_without_arguments(log_dir):"
+      },
+      {
+        "line": 290,
+        "text": "    \"\"\"Test that Service.enable() works without arguments (default parameter).\"\"\""
+      },
+      {
+        "line": 291,
+        "text": "    test_name = create_test_name()"
+      },
+      {
+        "line": 292,
+        "text": "    log_file = (log_dir / f\"{test_name}.log\").resolve()"
+      },
+      {
+        "line": 293,
+        "text": "    srv = Service("
+      },
+      {
+        "line": 294,
+        "text": "        name=test_name,"
+      },
+      {
+        "line": 295,
+        "text": "        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\","
+      },
+      {
+        "line": 296,
+        "text": "        start_schedule=Calendar.from_datetime("
+      },
+      {
+        "line": 297,
+        "text": "            datetime.now(timezone.utc) + timedelta(seconds=10)"
+      },
+      {
+        "line": 298,
+        "text": "        ),"
+      },
+      {
+        "line": 299,
+        "text": "    )"
+      },
+      {
+        "line": 300,
+        "text": "    await srv.create()"
+      },
+      {
+        "line": 301,
+        "text": ""
+      },
+      {
+        "line": 302,
+        "text": "    # This should not raise TypeError (the bug we fixed)"
+      },
+      {
+        "line": 303,
+        "text": "    # Just verify it doesn't crash - enable() has no return value"
+      },
+      {
+        "line": 304,
+        "text": "    try:"
+      },
+      {
+        "line": 305,
+        "text": "        await srv.enable()"
+      },
+      {
+        "line": 306,
+        "text": "        enable_succeeded = True"
+      },
+      {
+        "line": 307,
+        "text": "    except TypeError:"
+      },
+      {
+        "line": 308,
+        "text": "        enable_succeeded = False"
+      },
+      {
+        "line": 309,
+        "text": ""
+      },
+      {
+        "line": 310,
+        "text": "    assert enable_succeeded, \"enable() should work without arguments\""
+      },
+      {
+        "line": 311,
+        "text": ""
+      },
+      {
+        "line": 312,
+        "text": "    await srv.remove()"
+      },
+      {
+        "line": 313,
+        "text": ""
+      },
+      {
+        "line": 314,
+        "text": ""
+      },
+      {
+        "line": 315,
+        "text": "@pytest.mark.integration"
+      },
+      {
+        "line": 316,
+        "text": "@pytest.mark.asyncio"
+      },
+      {
+        "line": 317,
+        "text": "async def test_service_enable_timers_only(log_dir):"
+      },
+      {
+        "line": 318,
+        "text": "    \"\"\"Test that Service.enable(timers_only=True) accepts the parameter.\"\"\""
+      },
+      {
+        "line": 319,
+        "text": "    test_name = create_test_name()"
+      },
+      {
+        "line": 320,
+        "text": "    log_file = (log_dir / f\"{test_name}.log\").resolve()"
+      },
+      {
+        "line": 321,
+        "text": "    srv = Service("
+      },
+      {
+        "line": 322,
+        "text": "        name=test_name,"
+      },
+      {
+        "line": 323,
+        "text": "        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\","
+      },
+      {
+        "line": 324,
+        "text": "        start_schedule=Calendar.from_datetime("
+      },
+      {
+        "line": 325,
+        "text": "            datetime.now(timezone.utc) + timedelta(seconds=10)"
+      },
+      {
+        "line": 326,
+        "text": "        ),"
+      },
+      {
+        "line": 327,
+        "text": "    )"
+      },
+      {
+        "line": 328,
+        "text": "    await srv.create()"
+      },
+      {
+        "line": 329,
+        "text": ""
+      },
+      {
+        "line": 330,
+        "text": "    # This should not raise TypeError (verify parameter works)"
+      },
+      {
+        "line": 331,
+        "text": "    try:"
+      },
+      {
+        "line": 332,
+        "text": "        await srv.enable(timers_only=True)"
+      },
+      {
+        "line": 333,
+        "text": "        enable_succeeded = True"
+      },
+      {
+        "line": 334,
+        "text": "    except TypeError:"
+      },
+      {
+        "line": 335,
+        "text": "        enable_succeeded = False"
+      },
+      {
+        "line": 336,
+        "text": ""
+      },
+      {
+        "line": 337,
+        "text": "    assert enable_succeeded, \"enable(timers_only=True) should work\""
+      },
+      {
+        "line": 338,
+        "text": ""
+      },
+      {
+        "line": 339,
+        "text": "    await srv.remove()"
+      },
+      {
+        "line": 340,
+        "text": ""
+      },
+      {
+        "line": 341,
+        "text": ""
+      },
+      {
+        "line": 342,
+        "text": "@pytest.mark.integration"
+      },
+      {
+        "line": 343,
+        "text": "@pytest.mark.asyncio"
+      },
+      {
+        "line": 344,
+        "text": "async def test_service_registry_enable():"
+      },
+      {
+        "line": 345,
+        "text": "    \"\"\"Test that ServiceRegistry.enable() works correctly.\"\"\""
+      },
+      {
+        "line": 346,
+        "text": "    test_name1 = create_test_name()"
+      },
+      {
+        "line": 347,
+        "text": "    test_name2 = create_test_name()"
+      },
+      {
+        "line": 348,
+        "text": ""
+      },
+      {
+        "line": 349,
+        "text": "    srv1 = Service(name=test_name1, start_command=\"echo test1\")"
+      },
+      {
+        "line": 350,
+        "text": "    srv2 = Service(name=test_name2, start_command=\"echo test2\")"
+      },
+      {
+        "line": 351,
+        "text": ""
+      },
+      {
+        "line": 352,
+        "text": "    # Create a registry and add services"
+      },
+      {
+        "line": 353,
+        "text": "    registry = ServiceRegistry()"
+      },
+      {
+        "line": 354,
+        "text": "    registry.add(srv1, srv2)"
+      },
+      {
+        "line": 355,
+        "text": ""
+      },
+      {
+        "line": 356,
+        "text": "    try:"
+      },
+      {
+        "line": 357,
+        "text": "        await srv1.create()"
+      },
+      {
+        "line": 358,
+        "text": "        await srv2.create()"
+      },
+      {
+        "line": 359,
+        "text": ""
+      },
+      {
+        "line": 360,
+        "text": "        # This should not raise TypeError (the bug we fixed)"
+      },
+      {
+        "line": 361,
+        "text": "        try:"
+      },
+      {
+        "line": 362,
+        "text": "            await registry.enable()"
+      },
+      {
+        "line": 363,
+        "text": "            enable_succeeded = True"
+      },
+      {
+        "line": 364,
+        "text": "        except TypeError:"
+      },
+      {
+        "line": 365,
+        "text": "            enable_succeeded = False"
+      },
+      {
+        "line": 366,
+        "text": ""
+      },
+      {
+        "line": 367,
+        "text": "        assert enable_succeeded, \"ServiceRegistry.enable() should work without errors\""
+      },
+      {
+        "line": 368,
+        "text": ""
+      },
+      {
+        "line": 369,
+        "text": "    finally:"
+      },
+      {
+        "line": 370,
+        "text": "        # Clean up"
+      },
+      {
+        "line": 371,
+        "text": "        await srv1.remove()"
+      },
+      {
+        "line": 372,
+        "text": "        await srv2.remove()"
+      },
+      {
+        "line": 373,
+        "text": ""
+      },
+      {
+        "line": 374,
+        "text": ""
+      },
+      {
+        "line": 375,
+        "text": "def test_cgroup_multiple_device_limits():"
+      },
+      {
+        "line": 376,
+        "text": "    \"\"\"Test that multiple device bandwidth limits are preserved in systemd directives.\"\"\""
+      },
+      {
+        "line": 377,
+        "text": "    cgroup = CgroupConfig("
+      },
+      {
+        "line": 378,
+        "text": "        device_read_bps={"
+      },
+      {
+        "line": 379,
+        "text": "            \"/dev/sda\": 1048576,  # 1 MB/s"
+      },
+      {
+        "line": 380,
+        "text": "            \"/dev/sdb\": 2097152,  # 2 MB/s"
+      },
+      {
+        "line": 381,
+        "text": "        },"
+      },
+      {
+        "line": 382,
+        "text": "        device_write_bps={"
+      },
+      {
+        "line": 383,
+        "text": "            \"/dev/sda\": 524288,  # 512 KB/s"
+      },
+      {
+        "line": 384,
+        "text": "            \"/dev/sdb\": 1048576,  # 1 MB/s"
+      },
+      {
+        "line": 385,
+        "text": "        },"
+      },
+      {
+        "line": 386,
+        "text": "    )"
+      },
+      {
+        "line": 387,
+        "text": ""
+      },
+      {
+        "line": 388,
+        "text": "    directives = cgroup.to_systemd_directives()"
+      },
+      {
+        "line": 389,
+        "text": ""
+      },
+      {
+        "line": 390,
+        "text": "    # Verify all device limits are present with numbered keys"
+      },
+      {
+        "line": 391,
+        "text": "    assert \"IOReadBandwidthMax_0\" in directives"
+      },
+      {
+        "line": 392,
+        "text": "    assert \"IOReadBandwidthMax_1\" in directives"
+      },
+      {
+        "line": 393,
+        "text": "    assert \"IOWriteBandwidthMax_0\" in directives"
+      },
+      {
+        "line": 394,
+        "text": "    assert \"IOWriteBandwidthMax_1\" in directives"
+      },
+      {
+        "line": 395,
+        "text": ""
+      },
+      {
+        "line": 396,
+        "text": "    # Verify values are correct"
+      },
+      {
+        "line": 397,
+        "text": "    read_values = {"
+      },
+      {
+        "line": 398,
+        "text": "        directives[\"IOReadBandwidthMax_0\"],"
+      },
+      {
+        "line": 399,
+        "text": "        directives[\"IOReadBandwidthMax_1\"],"
+      },
+      {
+        "line": 400,
+        "text": "    }"
+      },
+      {
+        "line": 401,
+        "text": "    assert \"/dev/sda 1048576\" in read_values"
+      },
+      {
+        "line": 402,
+        "text": "    assert \"/dev/sdb 2097152\" in read_values"
+      },
+      {
+        "line": 403,
+        "text": ""
+      },
+      {
+        "line": 404,
+        "text": "    write_values = {"
+      },
+      {
+        "line": 405,
+        "text": "        directives[\"IOWriteBandwidthMax_0\"],"
+      },
+      {
+        "line": 406,
+        "text": "        directives[\"IOWriteBandwidthMax_1\"],"
+      },
+      {
+        "line": 407,
+        "text": "    }"
+      },
+      {
+        "line": 408,
+        "text": "    assert \"/dev/sda 524288\" in write_values"
+      },
+      {
+        "line": 409,
+        "text": "    assert \"/dev/sdb 1048576\" in write_values"
+      },
+      {
+        "line": 410,
+        "text": ""
+      },
+      {
+        "line": 411,
+        "text": ""
+      },
+      {
+        "line": 412,
+        "text": "def test_cgroup_environment_directives_are_escaped():"
+      },
+      {
+        "line": 413,
+        "text": "    cgroup = CgroupConfig(environment={\"SAFE_VALUE\": 'quoted \"value\" with spaces'})"
+      },
+      {
+        "line": 414,
+        "text": "    srv = Service("
+      },
+      {
+        "line": 415,
+        "text": "        name=\"cgroup-env\","
+      },
+      {
+        "line": 416,
+        "text": "        start_command=\"echo ok\","
+      },
+      {
+        "line": 417,
+        "text": "        cgroup_config=cgroup,"
+      },
+      {
+        "line": 418,
+        "text": "    )"
+      },
+      {
+        "line": 419,
+        "text": ""
+      },
+      {
+        "line": 420,
+        "text": "    assert ("
+      },
+      {
+        "line": 421,
+        "text": "        'Environment=\"SAFE_VALUE=quoted \\\\\"value\\\\\" with spaces\"' in srv.service_entries"
+      },
+      {
+        "line": 422,
+        "text": "    )"
+      },
+      {
+        "line": 423,
+        "text": ""
+      },
+      {
+        "line": 424,
+        "text": ""
+      },
+      {
+        "line": 425,
+        "text": "def test_cgroup_repeated_device_allow_entries_are_preserved():"
+      },
+      {
+        "line": 426,
+        "text": "    cgroup = CgroupConfig(devices=[\"/dev/fuse\", \"/dev/null:r\"])"
+      },
+      {
+        "line": 427,
+        "text": "    srv = Service("
+      },
+      {
+        "line": 428,
+        "text": "        name=\"cgroup-devices\","
+      },
+      {
+        "line": 429,
+        "text": "        start_command=\"echo ok\","
+      },
+      {
+        "line": 430,
+        "text": "        cgroup_config=cgroup,"
+      },
+      {
+        "line": 431,
+        "text": "    )"
+      },
+      {
+        "line": 432,
+        "text": ""
+      },
+      {
+        "line": 433,
+        "text": "    device_allow_entries = {"
+      },
+      {
+        "line": 434,
+        "text": "        entry for entry in srv.service_entries if entry.startswith(\"DeviceAllow=\")"
+      },
+      {
+        "line": 435,
+        "text": "    }"
+      },
+      {
+        "line": 436,
+        "text": "    assert device_allow_entries == {"
+      },
+      {
+        "line": 437,
+        "text": "        \"DeviceAllow=/dev/fuse rwm\","
+      },
+      {
+        "line": 438,
+        "text": "        \"DeviceAllow=/dev/null r\","
+      },
+      {
+        "line": 439,
+        "text": "    }"
+      },
+      {
+        "line": 440,
+        "text": ""
+      },
+      {
+        "line": 441,
+        "text": ""
+      },
+      {
+        "line": 442,
+        "text": "def test_service_relationship_accepts_service_object():"
+      },
+      {
+        "line": 443,
+        "text": "    dependency = Service(name=\"dependency\", start_command=\"echo dependency\")"
+      },
+      {
+        "line": 444,
+        "text": "    srv = Service("
+      },
+      {
+        "line": 445,
+        "text": "        name=\"dependent\","
+      },
+      {
+        "line": 446,
+        "text": "        start_command=\"echo dependent\","
+      },
+      {
+        "line": 447,
+        "text": "        start_after=dependency,"
+      },
+      {
+        "line": 448,
+        "text": "    )"
+      },
+      {
+        "line": 449,
+        "text": ""
+      },
+      {
+        "line": 450,
+        "text": "    assert \"After=taskflows-dependency.service\" in srv.unit_entries"
+      },
+      {
+        "line": 451,
+        "text": ""
+      },
+      {
+        "line": 452,
+        "text": ""
+      },
+      {
+        "line": 453,
+        "text": "def test_service_env_file_parse_errors_are_fatal(tmp_path):"
+      },
+      {
+        "line": 454,
+        "text": "    env_file = tmp_path / \"bad.env\""
+      },
+      {
+        "line": 455,
+        "text": "    env_file.write_text(\"not-an-env-line\")"
+      },
+      {
+        "line": 456,
+        "text": ""
+      },
+      {
+        "line": 457,
+        "text": "    with pytest.raises(ValueError, match=\"Invalid environment line\"):"
+      },
+      {
+        "line": 458,
+        "text": "        Service("
+      },
+      {
+        "line": 459,
+        "text": "            name=\"bad-env-file\","
+      },
+      {
+        "line": 460,
+        "text": "            start_command=\"echo bad\","
+      },
+      {
+        "line": 461,
+        "text": "            env_file=str(env_file),"
+      },
+      {
+        "line": 462,
+        "text": "        )"
+      },
+      {
+        "line": 463,
+        "text": ""
+      },
+      {
+        "line": 464,
+        "text": ""
+      },
+      {
+        "line": 465,
+        "text": "@pytest.mark.integration"
+      },
+      {
+        "line": 466,
+        "text": "@pytest.mark.asyncio"
+      },
+      {
+        "line": 467,
+        "text": "async def test_cgroup_device_limits_in_service_unit(log_dir):"
+      },
+      {
+        "line": 468,
+        "text": "    \"\"\"Test that service unit file contains all device limits.\"\"\""
+      },
+      {
+        "line": 469,
+        "text": "    test_name = create_test_name()"
+      },
+      {
+        "line": 470,
+        "text": "    log_file = (log_dir / f\"{test_name}.log\").resolve()"
+      },
+      {
+        "line": 471,
+        "text": ""
+      },
+      {
+        "line": 472,
+        "text": "    cgroup = CgroupConfig("
+      },
+      {
+        "line": 473,
+        "text": "        device_read_bps={"
+      },
+      {
+        "line": 474,
+        "text": "            \"/dev/sda\": 1048576,"
+      },
+      {
+        "line": 475,
+        "text": "            \"/dev/sdb\": 2097152,"
+      },
+      {
+        "line": 476,
+        "text": "        },"
+      },
+      {
+        "line": 477,
+        "text": "    )"
+      },
+      {
+        "line": 478,
+        "text": ""
+      },
+      {
+        "line": 479,
+        "text": "    srv = Service("
+      },
+      {
+        "line": 480,
+        "text": "        name=test_name,"
+      },
+      {
+        "line": 481,
+        "text": "        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\","
+      },
+      {
+        "line": 482,
+        "text": "        cgroup_config=cgroup,"
+      },
+      {
+        "line": 483,
+        "text": "    )"
+      },
+      {
+        "line": 484,
+        "text": "    await srv.create()"
+      },
+      {
+        "line": 485,
+        "text": ""
+      },
+      {
+        "line": 486,
+        "text": "    # Read the service file"
+      },
+      {
+        "line": 487,
+        "text": "    service_file = systemd_dir / f\"{_SYSTEMD_FILE_PREFIX}{test_name}.service\""
+      },
+      {
+        "line": 488,
+        "text": "    assert service_file.is_file()"
+      },
+      {
+        "line": 489,
+        "text": "    service_content = service_file.read_text()"
+      },
+      {
+        "line": 490,
+        "text": ""
+      },
+      {
+        "line": 491,
+        "text": "    # Verify both device limits appear in the service file"
+      },
+      {
+        "line": 492,
+        "text": "    assert \"IOReadBandwidthMax=/dev/sda 1048576\" in service_content"
+      },
+      {
+        "line": 493,
+        "text": "    assert \"IOReadBandwidthMax=/dev/sdb 2097152\" in service_content"
+      },
+      {
+        "line": 494,
+        "text": ""
+      },
+      {
+        "line": 495,
+        "text": "    await srv.remove()"
+      }
+    ],
+    "mime_type": "text/x-python",
+    "numbered_content": "1\tfrom datetime import datetime, timedelta, timezone\n2\tfrom pathlib import Path\n3\tfrom shutil import rmtree\n4\tfrom time import sleep, time\n5\tfrom unittest.mock import MagicMock, patch\n6\t\n7\timport pytest\n8\tfrom taskflows import constraints\n9\tfrom taskflows.common import _SYSTEMD_FILE_PREFIX\n10\tfrom taskflows.constraints import CgroupConfig\n11\tfrom taskflows.schedule import Calendar, Periodic\n12\tfrom taskflows.service import Service, ServiceRegistry, Venv, service_logs, systemd_dir\n13\t\n14\t\n15\t@pytest.fixture\n16\tdef log_dir():\n17\t    d = Path(__file__).parent / \"logs\"\n18\t    d.mkdir(exist_ok=True)\n19\t    yield d\n20\t    rmtree(d)\n21\t\n22\t\n23\tdef create_test_name():\n24\t    return f\"test_{time()}\".replace(\".\", \"\")\n25\t\n26\t\n27\tdef test_config():\n28\t    v = Calendar(\"Sun 17:00 America/New_York\")\n29\t    assert isinstance(v.unit_entries, set)\n30\t\n31\t    v = Periodic(start_on=\"boot\", period=10, relative_to=\"start\")\n32\t    assert isinstance(v.unit_entries, set)\n33\t\n34\t    v = Periodic(\"login\", 1, \"start\")\n35\t    assert isinstance(v.unit_entries, set)\n36\t\n37\t    v = constraints.Memory(amount=1000000, constraint=\">=\", silent=True)\n38\t    assert isinstance(v.unit_entries, set)\n39\t\n40\t    v = constraints.Memory(amount=908902, constraint=\"=\", silent=False)\n41\t    assert isinstance(v.unit_entries, set)\n42\t\n43\t    v = constraints.CPUs(amount=9, constraint=\">=\", silent=True)\n44\t    assert isinstance(v.unit_entries, set)\n45\t\n46\t    v = constraints.CPUPressure(max_percent=80, timespan=\"5min\", silent=True)\n47\t    assert isinstance(v.unit_entries, set)\n48\t\n49\t    v = constraints.MemoryPressure(max_percent=90, timespan=\"5min\", silent=False)\n50\t    assert isinstance(v.unit_entries, set)\n51\t\n52\t    v = constraints.CPUPressure(max_percent=80, timespan=\"1min\", silent=False)\n53\t    assert isinstance(v.unit_entries, set)\n54\t\n55\t    v = constraints.IOPressure(max_percent=80, timespan=\"10sec\", silent=True)\n56\t    assert isinstance(v.unit_entries, set)\n57\t\n58\t\n59\tdef test_constraints_reject_invalid_numeric_ranges():\n60\t    with pytest.raises(ValueError):\n61\t        constraints.Memory(amount=-1)\n62\t\n63\t    with pytest.raises(ValueError):\n64\t        constraints.CPUPressure(max_percent=-1)\n65\t\n66\t    with pytest.raises(ValueError):\n67\t        constraints.CPUPressure(max_percent=101)\n68\t\n69\t\n70\t@pytest.mark.parametrize(\n71\t    \"kwargs\",\n72\t    [\n73\t        {\"cpu_period\": 0},\n74\t        {\"cpu_shares\": 0},\n75\t        {\"cpu_weight\": 10001},\n76\t        {\"memory_limit\": -1},\n77\t        {\"memory_swappiness\": 101},\n78\t        {\"blkio_weight\": 9},\n79\t        {\"io_weight\": 0},\n80\t        {\"pids_limit\": 0},\n81\t        {\"nofile_limit\": 0},\n82\t        {\"oom_score_adj\": -1001},\n83\t        {\"oom_policy\": \"restart\"},\n84\t        {\"managed_oom_swap\": \"stop\"},\n85\t        {\"managed_oom_memory_pressure\": \"continue\"},\n86\t        {\"managed_oom_memory_pressure_limit\": 101},\n87\t        {\"managed_oom_memory_pressure_limit\": \"sometimes\"},\n88\t        {\"managed_oom_memory_pressure_limit\": \"60.5%\"},\n89\t        {\"managed_oom_preference\": \"prefer\"},\n90\t        {\"timeout_start\": -1},\n91\t        {\"device_read_bps\": {\"/dev/sda\": 0}},\n92\t        {\"device_write_iops\": {\"/dev/sda\": -1}},\n93\t    ],\n94\t)\n95\tdef test_cgroup_config_rejects_invalid_resource_ranges(kwargs):\n96\t    with pytest.raises(ValueError):\n97\t        CgroupConfig(**kwargs)\n98\t\n99\t\n100\tdef test_cgroup_config_normalizes_oom_literals_and_percentages():\n101\t    config = CgroupConfig(\n102\t        oom_policy=\"KILL\",\n103\t        managed_oom_swap=\"KILL\",\n104\t        managed_oom_memory_pressure=\"KILL\",\n105\t        managed_oom_memory_pressure_limit=\"60%\",\n106\t        managed_oom_preference=\"AVOID\",\n107\t    )\n108\t\n109\t    directives = config.to_systemd_directives()\n110\t\n111\t    assert directives[\"OOMPolicy\"] == \"kill\"\n112\t    assert directives[\"ManagedOOMSwap\"] == \"kill\"\n113\t    assert directives[\"ManagedOOMMemoryPressure\"] == \"kill\"\n114\t    assert directives[\"ManagedOOMMemoryPressureLimit\"] == \"60%\"\n115\t    assert directives[\"ManagedOOMPreference\"] == \"avoid\"\n116\t\n117\t\n118\tdef test_calendar_from_datetime_uses_four_digit_year():\n119\t    run_time = datetime(2026, 5, 5, 16, 50, 8, tzinfo=timezone.utc)\n120\t\n121\t    calendar = Calendar.from_datetime(run_time)\n122\t\n123\t    assert calendar.schedule == \"Tue 2026-05-05 16:50:08 UTC\"\n124\t    assert \"OnCalendar=Tue 2026-05-05 16:50:08 UTC\" in calendar.unit_entries\n125\t\n126\t\n127\t@pytest.mark.parametrize(\"period\", [0, -1])\n128\tdef test_periodic_rejects_nonpositive_period(period):\n129\t    with pytest.raises(ValueError, match=\"period\"):\n130\t        Periodic(start_on=\"boot\", period=period, relative_to=\"start\")\n131\t\n132\t\n133\t@pytest.mark.parametrize(\n134\t    \"kwargs\",\n135\t    [\n136\t        {\"start_on\": \"shutdown\", \"period\": 1, \"relative_to\": \"start\"},\n137\t        {\"start_on\": \"boot\", \"period\": 1, \"relative_to\": \"middle\"},\n138\t    ],\n139\t)\n140\tdef test_periodic_rejects_invalid_options(kwargs):\n141\t    with pytest.raises(ValueError):\n142\t        Periodic(**kwargs)\n143\t\n144\t\n145\t@pytest.mark.parametrize(\n146\t    \"schedule_kwargs\",\n147\t    [\n148\t        {\"schedule\": \"\", \"accuracy\": \"1ms\"},\n149\t        {\"schedule\": \"Mon 12:00\", \"accuracy\": \"\"},\n150\t        {\"schedule\": \"Mon 12:00\\nOnBootSec=1\", \"accuracy\": \"1ms\"},\n151\t    ],\n152\t)\n153\tdef test_calendar_rejects_invalid_systemd_values(schedule_kwargs):\n154\t    with pytest.raises(ValueError):\n155\t        Calendar(**schedule_kwargs)\n156\t\n157\t\n158\tdef test_service_logs_sets_journalctl_timeout(monkeypatch):\n159\t    monkeypatch.setenv(\"TASKFLOWS_JOURNALCTL_TIMEOUT_SECONDS\", \"7\")\n160\t    completed = MagicMock(stdout=\"logs\", stderr=\"\")\n161\t\n162\t    with patch(\n163\t        \"taskflows.service.get_docker_client\", side_effect=RuntimeError(\"no docker\")\n164\t    ):\n165\t        with patch(\"taskflows.service.subprocess.run\", return_value=completed) as run:\n166\t            assert service_logs(\"test-service\") == \"logs\"\n167\t\n168\t    assert run.call_args.kwargs[\"timeout\"] == 7\n169\t\n170\t\n171\tdef test_service_copies_env_before_adding_runtime_defaults():\n172\t    env = {\"APP_ENV\": \"test\"}\n173\t\n174\t    service = Service(name=\"env-copy\", start_command=\"python -V\", env=env)\n175\t\n176\t    assert env == {\"APP_ENV\": \"test\"}\n177\t    assert service.env == {\"APP_ENV\": \"test\", \"PYTHONUNBUFFERED\": \"1\"}\n178\t\n179\t\n180\t@pytest.mark.parametrize(\"timeout\", [0, -1])\n181\tdef test_service_rejects_nonpositive_timeout(timeout):\n182\t    with pytest.raises(ValueError, match=\"timeout\"):\n183\t        Service(name=\"bad-timeout\", start_command=\"python -V\", timeout=timeout)\n184\t\n185\t\n186\tdef test_venv_command_quotes_runner_and_environment_name(tmp_path):\n187\t    runner = tmp_path / \"conda runner\"\n188\t    runner.touch()\n189\t\n190\t    command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command(\n191\t        \"python -V\"\n192\t    )\n193\t\n194\t    assert command == f\"'{runner}' run -n 'prod env' --no-capture-output -- python -V\"\n195\t\n196\t\n197\tdef test_venv_command_uses_attach_when_runner_supports_it(tmp_path):\n198\t    runner = tmp_path / \"mamba\"\n199\t    runner.touch()\n200\t    help_output = \"--attach STREAM\\n-a \\\"\\\" for disabling stream redirection\"\n201\t\n202\t    with patch(\n203\t        \"taskflows.service.subprocess.run\",\n204\t        return_value=MagicMock(stdout=help_output, stderr=\"\"),\n205\t    ):\n206\t        command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command(\n207\t            \"python -V\"\n208\t        )\n209\t\n210\t    assert command == f\"{runner} run -n 'prod env' -a '' -- python -V\"\n211\t\n212\t\n213\tdef test_venv_command_uses_no_capture_when_runner_supports_it(tmp_path):\n214\t    runner = tmp_path / \"mamba\"\n215\t    runner.touch()\n216\t\n217\t    with patch(\n218\t        \"taskflows.service.subprocess.run\",\n219\t        return_value=MagicMock(stdout=\"--no-capture-output\", stderr=\"\"),\n220\t    ):\n221\t        command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command(\n222\t            \"python -V\"\n223\t        )\n224\t\n225\t    assert command == f\"{runner} run -n 'prod env' --no-capture-output -- python -V\"\n226\t\n227\t\n228\tdef test_venv_command_omits_live_output_flag_for_mamba_when_probe_fails(tmp_path):\n229\t    runner = tmp_path / \"mamba\"\n230\t    runner.touch()\n231\t\n232\t    with patch(\n233\t        \"taskflows.service.subprocess.run\",\n234\t        side_effect=OSError(\"not executable\"),\n235\t    ):\n236\t        command = Venv(env_name=\"prod env\", custom_path=runner).create_env_command(\n237\t            \"python -V\"\n238\t        )\n239\t\n240\t    assert command == f\"{runner} run -n 'prod env' -- python -V\"\n241\t\n242\t\n243\t@pytest.mark.integration\n244\t@pytest.mark.asyncio\n245\tasync def test_service_management(log_dir):\n246\t    # create a minimal service.\n247\t    test_name = create_test_name()\n248\t    log_file = (log_dir / f\"{test_name}.log\").resolve()\n249\t    srv = Service(\n250\t        name=test_name, start_command=f\"bash -c 'echo {test_name} >> {log_file}'\"\n251\t    )\n252\t    await srv.create()\n253\t    service_file = systemd_dir / f\"{_SYSTEMD_FILE_PREFIX}{test_name}.service\"\n254\t    assert service_file.is_file()\n255\t    assert len(service_file.read_text())\n256\t    await srv.start()\n257\t    sleep(0.5)\n258\t    assert log_file.is_file()\n259\t    assert log_file.read_text().strip() == test_name\n260\t    await srv.remove()\n261\t    assert not service_file.exists()\n262\t\n263\t\n264\t@pytest.mark.integration\n265\t@pytest.mark.asyncio\n266\tasync def test_schedule(log_dir):\n267\t    test_name = create_test_name()\n268\t    log_file = (log_dir / f\"{test_name}.log\").resolve()\n269\t    run_time = datetime.now(timezone.utc) + timedelta(seconds=1)\n270\t    srv = Service(\n271\t        name=test_name,\n272\t        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\",\n273\t        start_schedule=Calendar.from_datetime(run_time),\n274\t    )\n275\t    await srv.create()\n276\t    timer_file = systemd_dir / f\"{_SYSTEMD_FILE_PREFIX}{test_name}.timer\"\n277\t    assert timer_file.is_file()\n278\t    assert len(timer_file.read_text())\n279\t    assert not log_file.is_file()\n280\t    sleep((run_time - datetime.now(timezone.utc)).total_seconds() + 0.5)\n281\t    assert log_file.is_file()\n282\t    assert log_file.read_text().strip() == test_name\n283\t    await srv.remove()\n284\t    assert not timer_file.exists()\n285\t\n286\t\n287\t@pytest.mark.integration\n288\t@pytest.mark.asyncio\n289\tasync def test_service_enable_without_arguments(log_dir):\n290\t    \"\"\"Test that Service.enable() works without arguments (default parameter).\"\"\"\n291\t    test_name = create_test_name()\n292\t    log_file = (log_dir / f\"{test_name}.log\").resolve()\n293\t    srv = Service(\n294\t        name=test_name,\n295\t        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\",\n296\t        start_schedule=Calendar.from_datetime(\n297\t            datetime.now(timezone.utc) + timedelta(seconds=10)\n298\t        ),\n299\t    )\n300\t    await srv.create()\n301\t\n302\t    # This should not raise TypeError (the bug we fixed)\n303\t    # Just verify it doesn't crash - enable() has no return value\n304\t    try:\n305\t        await srv.enable()\n306\t        enable_succeeded = True\n307\t    except TypeError:\n308\t        enable_succeeded = False\n309\t\n310\t    assert enable_succeeded, \"enable() should work without arguments\"\n311\t\n312\t    await srv.remove()\n313\t\n314\t\n315\t@pytest.mark.integration\n316\t@pytest.mark.asyncio\n317\tasync def test_service_enable_timers_only(log_dir):\n318\t    \"\"\"Test that Service.enable(timers_only=True) accepts the parameter.\"\"\"\n319\t    test_name = create_test_name()\n320\t    log_file = (log_dir / f\"{test_name}.log\").resolve()\n321\t    srv = Service(\n322\t        name=test_name,\n323\t        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\",\n324\t        start_schedule=Calendar.from_datetime(\n325\t            datetime.now(timezone.utc) + timedelta(seconds=10)\n326\t        ),\n327\t    )\n328\t    await srv.create()\n329\t\n330\t    # This should not raise TypeError (verify parameter works)\n331\t    try:\n332\t        await srv.enable(timers_only=True)\n333\t        enable_succeeded = True\n334\t    except TypeError:\n335\t        enable_succeeded = False\n336\t\n337\t    assert enable_succeeded, \"enable(timers_only=True) should work\"\n338\t\n339\t    await srv.remove()\n340\t\n341\t\n342\t@pytest.mark.integration\n343\t@pytest.mark.asyncio\n344\tasync def test_service_registry_enable():\n345\t    \"\"\"Test that ServiceRegistry.enable() works correctly.\"\"\"\n346\t    test_name1 = create_test_name()\n347\t    test_name2 = create_test_name()\n348\t\n349\t    srv1 = Service(name=test_name1, start_command=\"echo test1\")\n350\t    srv2 = Service(name=test_name2, start_command=\"echo test2\")\n351\t\n352\t    # Create a registry and add services\n353\t    registry = ServiceRegistry()\n354\t    registry.add(srv1, srv2)\n355\t\n356\t    try:\n357\t        await srv1.create()\n358\t        await srv2.create()\n359\t\n360\t        # This should not raise TypeError (the bug we fixed)\n361\t        try:\n362\t            await registry.enable()\n363\t            enable_succeeded = True\n364\t        except TypeError:\n365\t            enable_succeeded = False\n366\t\n367\t        assert enable_succeeded, \"ServiceRegistry.enable() should work without errors\"\n368\t\n369\t    finally:\n370\t        # Clean up\n371\t        await srv1.remove()\n372\t        await srv2.remove()\n373\t\n374\t\n375\tdef test_cgroup_multiple_device_limits():\n376\t    \"\"\"Test that multiple device bandwidth limits are preserved in systemd directives.\"\"\"\n377\t    cgroup = CgroupConfig(\n378\t        device_read_bps={\n379\t            \"/dev/sda\": 1048576,  # 1 MB/s\n380\t            \"/dev/sdb\": 2097152,  # 2 MB/s\n381\t        },\n382\t        device_write_bps={\n383\t            \"/dev/sda\": 524288,  # 512 KB/s\n384\t            \"/dev/sdb\": 1048576,  # 1 MB/s\n385\t        },\n386\t    )\n387\t\n388\t    directives = cgroup.to_systemd_directives()\n389\t\n390\t    # Verify all device limits are present with numbered keys\n391\t    assert \"IOReadBandwidthMax_0\" in directives\n392\t    assert \"IOReadBandwidthMax_1\" in directives\n393\t    assert \"IOWriteBandwidthMax_0\" in directives\n394\t    assert \"IOWriteBandwidthMax_1\" in directives\n395\t\n396\t    # Verify values are correct\n397\t    read_values = {\n398\t        directives[\"IOReadBandwidthMax_0\"],\n399\t        directives[\"IOReadBandwidthMax_1\"],\n400\t    }\n401\t    assert \"/dev/sda 1048576\" in read_values\n402\t    assert \"/dev/sdb 2097152\" in read_values\n403\t\n404\t    write_values = {\n405\t        directives[\"IOWriteBandwidthMax_0\"],\n406\t        directives[\"IOWriteBandwidthMax_1\"],\n407\t    }\n408\t    assert \"/dev/sda 524288\" in write_values\n409\t    assert \"/dev/sdb 1048576\" in write_values\n410\t\n411\t\n412\tdef test_cgroup_environment_directives_are_escaped():\n413\t    cgroup = CgroupConfig(environment={\"SAFE_VALUE\": 'quoted \"value\" with spaces'})\n414\t    srv = Service(\n415\t        name=\"cgroup-env\",\n416\t        start_command=\"echo ok\",\n417\t        cgroup_config=cgroup,\n418\t    )\n419\t\n420\t    assert (\n421\t        'Environment=\"SAFE_VALUE=quoted \\\\\"value\\\\\" with spaces\"' in srv.service_entries\n422\t    )\n423\t\n424\t\n425\tdef test_cgroup_repeated_device_allow_entries_are_preserved():\n426\t    cgroup = CgroupConfig(devices=[\"/dev/fuse\", \"/dev/null:r\"])\n427\t    srv = Service(\n428\t        name=\"cgroup-devices\",\n429\t        start_command=\"echo ok\",\n430\t        cgroup_config=cgroup,\n431\t    )\n432\t\n433\t    device_allow_entries = {\n434\t        entry for entry in srv.service_entries if entry.startswith(\"DeviceAllow=\")\n435\t    }\n436\t    assert device_allow_entries == {\n437\t        \"DeviceAllow=/dev/fuse rwm\",\n438\t        \"DeviceAllow=/dev/null r\",\n439\t    }\n440\t\n441\t\n442\tdef test_service_relationship_accepts_service_object():\n443\t    dependency = Service(name=\"dependency\", start_command=\"echo dependency\")\n444\t    srv = Service(\n445\t        name=\"dependent\",\n446\t        start_command=\"echo dependent\",\n447\t        start_after=dependency,\n448\t    )\n449\t\n450\t    assert \"After=taskflows-dependency.service\" in srv.unit_entries\n451\t\n452\t\n453\tdef test_service_env_file_parse_errors_are_fatal(tmp_path):\n454\t    env_file = tmp_path / \"bad.env\"\n455\t    env_file.write_text(\"not-an-env-line\")\n456\t\n457\t    with pytest.raises(ValueError, match=\"Invalid environment line\"):\n458\t        Service(\n459\t            name=\"bad-env-file\",\n460\t            start_command=\"echo bad\",\n461\t            env_file=str(env_file),\n462\t        )\n463\t\n464\t\n465\t@pytest.mark.integration\n466\t@pytest.mark.asyncio\n467\tasync def test_cgroup_device_limits_in_service_unit(log_dir):\n468\t    \"\"\"Test that service unit file contains all device limits.\"\"\"\n469\t    test_name = create_test_name()\n470\t    log_file = (log_dir / f\"{test_name}.log\").resolve()\n471\t\n472\t    cgroup = CgroupConfig(\n473\t        device_read_bps={\n474\t            \"/dev/sda\": 1048576,\n475\t            \"/dev/sdb\": 2097152,\n476\t        },\n477\t    )\n478\t\n479\t    srv = Service(\n480\t        name=test_name,\n481\t        start_command=f\"bash -c 'echo {test_name} >> {log_file}'\",\n482\t        cgroup_config=cgroup,\n483\t    )\n484\t    await srv.create()\n485\t\n486\t    # Read the service file\n487\t    service_file = systemd_dir / f\"{_SYSTEMD_FILE_PREFIX}{test_name}.service\"\n488\t    assert service_file.is_file()\n489\t    service_content = service_file.read_text()\n490\t\n491\t    # Verify both device limits appear in the service file\n492\t    assert \"IOReadBandwidthMax=/dev/sda 1048576\" in service_content\n493\t    assert \"IOReadBandwidthMax=/dev/sdb 2097152\" in service_content\n494\t\n495\t    await srv.remove()",
+    "path": "/home/dan/repos/taskflows/tests/test_service.py",
+    "start_line": 1,
+    "total_lines": 495,
+    "truncated": false
+  },
+  "started_at": "2026-06-07T16:58:48.012119",
+  "status": "completed",
+  "tool_call_id": "call_4R89MKqtOnuF35ZsDxoIR1sE",
+  "tool_name": "read"
+}

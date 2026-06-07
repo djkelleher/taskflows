@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from numbers import Real
 from typing import Dict, List, Literal, Optional, Set
 
 from pydantic import BaseModel, Field
@@ -102,11 +103,18 @@ class CgroupConfig:
 
     # Security and isolation
     oom_score_adj: Optional[int] = None  # OOM killer preference (-1000 to 1000)
+    oom_policy: Optional[Literal["continue", "stop", "kill"]] = None
     read_only_rootfs: Optional[bool] = None  # make root filesystem read-only
     cap_add: Optional[List[str]] = None  # add Linux capabilities
     cap_drop: Optional[List[str]] = None  # drop Linux capabilities
     devices: Optional[List[str]] = None  # device access rules
     device_cgroup_rules: Optional[List[str]] = None  # custom device cgroup rules
+
+    # systemd-oomd controls
+    managed_oom_swap: Optional[Literal["auto", "kill"]] = None
+    managed_oom_memory_pressure: Optional[Literal["auto", "kill"]] = None
+    managed_oom_memory_pressure_limit: Optional[int] = None
+    managed_oom_preference: Optional[Literal["none", "avoid", "omit"]] = None
 
     # Timeouts (resource-related)
     timeout_start: Optional[int] = None  # start timeout in seconds
@@ -119,6 +127,11 @@ class CgroupConfig:
     working_dir: Optional[str] = None  # working directory
 
     def __post_init__(self) -> None:
+        self._normalize_literal("oom_policy")
+        self._normalize_literal("managed_oom_swap")
+        self._normalize_literal("managed_oom_memory_pressure")
+        self._normalize_literal("managed_oom_preference")
+        self._normalize_percent("managed_oom_memory_pressure_limit")
         self._validate_positive(
             "cpu_period",
             "cpu_shares",
@@ -129,18 +142,22 @@ class CgroupConfig:
             "memory_low",
             "memory_min",
             "memory_swap_limit",
-            "memory_swap_max",
             "pids_limit",
             "nofile_limit",
             "timeout_start",
             "timeout_stop",
         )
-        self._validate_non_negative("cpu_quota")
+        self._validate_non_negative("cpu_quota", "memory_swap_max")
         self._validate_range("cpu_weight", 1, 10000)
         self._validate_range("memory_swappiness", 0, 100)
         self._validate_range("blkio_weight", 10, 1000)
         self._validate_range("io_weight", 1, 10000)
         self._validate_range("oom_score_adj", -1000, 1000)
+        self._validate_range("managed_oom_memory_pressure_limit", 0, 100)
+        self._validate_literal("oom_policy", {"continue", "stop", "kill"})
+        self._validate_literal("managed_oom_swap", {"auto", "kill"})
+        self._validate_literal("managed_oom_memory_pressure", {"auto", "kill"})
+        self._validate_literal("managed_oom_preference", {"none", "avoid", "omit"})
         self._validate_positive_mapping(
             "device_read_bps",
             "device_write_bps",
@@ -162,8 +179,41 @@ class CgroupConfig:
 
     def _validate_range(self, name: str, minimum: int, maximum: int) -> None:
         value = getattr(self, name)
-        if value is not None and not minimum <= value <= maximum:
+        if value is None:
+            return
+        if isinstance(value, bool) or not isinstance(value, Real):
             raise ValueError(f"{name} must be between {minimum} and {maximum}")
+        if not minimum <= value <= maximum:
+            raise ValueError(f"{name} must be between {minimum} and {maximum}")
+
+    def _normalize_literal(self, name: str) -> None:
+        value = getattr(self, name)
+        if isinstance(value, str):
+            setattr(self, name, value.lower())
+
+    def _normalize_percent(self, name: str) -> None:
+        value = getattr(self, name)
+        if value is None or isinstance(value, bool) or isinstance(value, int):
+            return
+        if isinstance(value, float):
+            if not value.is_integer():
+                raise ValueError(f"{name} must be a whole percent between 0 and 100")
+            setattr(self, name, int(value))
+            return
+        if isinstance(value, str):
+            percent = value.strip()
+            if percent.endswith("%"):
+                percent = percent[:-1].strip()
+            if percent.isdigit():
+                setattr(self, name, int(percent))
+                return
+        raise ValueError(f"{name} must be a whole percent between 0 and 100")
+
+    def _validate_literal(self, name: str, allowed: Set[str]) -> None:
+        value = getattr(self, name)
+        if value is not None and value not in allowed:
+            allowed_values = ", ".join(sorted(allowed))
+            raise ValueError(f"{name} must be one of: {allowed_values}")
 
     def _validate_positive_mapping(self, *names: str) -> None:
         for name in names:
@@ -309,7 +359,7 @@ class CgroupConfig:
 
         # systemd: memory_swap_max is swap allowance only
         # Docker: memory_swap_limit is total memory + swap
-        if self.memory_swap_max:
+        if self.memory_swap_max is not None:
             base_memory = self._calculate_effective_memory_limit()
             if base_memory:
                 return base_memory + self.memory_swap_max
@@ -334,7 +384,6 @@ class CgroupConfig:
         directives = {}
 
         # Enable resource accounting
-        directives["CPUAccounting"] = "yes"
         directives["MemoryAccounting"] = "yes"
         directives["IOAccounting"] = "yes"
         directives["TasksAccounting"] = "yes"
@@ -375,7 +424,7 @@ class CgroupConfig:
             directives["MemoryMin"] = str(self.memory_min)
 
         # Swap handling: prefer memory_swap_max, fallback to calculated from Docker limits
-        if self.memory_swap_max:
+        if self.memory_swap_max is not None:
             directives["MemorySwapMax"] = str(self.memory_swap_max)
         elif self.memory_swap_limit and self.memory_limit:
             # Calculate swap allowance from Docker total limit
@@ -423,6 +472,20 @@ class CgroupConfig:
         # Security and isolation
         if self.oom_score_adj is not None:
             directives["OOMScoreAdjust"] = str(self.oom_score_adj)
+        if self.oom_policy:
+            directives["OOMPolicy"] = self.oom_policy
+        if self.managed_oom_swap:
+            directives["ManagedOOMSwap"] = self.managed_oom_swap
+        if self.managed_oom_memory_pressure:
+            directives["ManagedOOMMemoryPressure"] = (
+                self.managed_oom_memory_pressure
+            )
+        if self.managed_oom_memory_pressure_limit is not None:
+            directives["ManagedOOMMemoryPressureLimit"] = (
+                f"{self.managed_oom_memory_pressure_limit}%"
+            )
+        if self.managed_oom_preference:
+            directives["ManagedOOMPreference"] = self.managed_oom_preference
         if self.read_only_rootfs:
             directives["ProtectSystem"] = "strict"
             directives["ReadOnlyPaths"] = "/"

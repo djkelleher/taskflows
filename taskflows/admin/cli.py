@@ -37,7 +37,6 @@ from rich.console import Console
 from taskflows.admin.core import execute_command_on_servers
 from taskflows.entrypoints import async_entrypoint
 
-from .api import srv_api, start_api_srv
 from .security import (
     config_file,
     generate_hmac_secret,
@@ -77,16 +76,22 @@ def api():
 
 @api.command
 def api_start():
+    from .api import start_api_srv
+
     start_api_srv()
 
 
 @api.command
 def api_restart():
+    from .api import srv_api
+
     asyncio.run(srv_api.restart())
 
 
 @api.command
 def api_stop():
+    from .api import srv_api
+
     asyncio.run(srv_api.stop())
 
 

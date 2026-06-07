@@ -1,0 +1,33 @@
+{
+  "agent_id": "explore-dashboard-yaml@default",
+  "teammate_id": "swarm_teammate_35c760a0b48bb6285303ecb39829b55c",
+  "name": "explore-dashboard-yaml",
+  "team_name": "default",
+  "description": "Explore YAML service creation and dashboard support",
+  "prompt": "Explore the repository to understand how services are created from YAML and whether taskflows.dashboard.Dashboard exists or should be added. Identify relevant files/classes and summarize implementation approach. Do not edit.",
+  "subagent_type": "Explore",
+  "model": null,
+  "backend_type": "in_process",
+  "isolation": "shared",
+  "parent_session_id": "tool:call_enTHB00R1TJCSnsevcFzAhRl",
+  "backend_session_id": "swarm_backend_session_8dbbc70e1737db9e8625836074f66e7b",
+  "workspace_ref": "/home/dan/repos/taskflows",
+  "cwd": "/home/dan/repos/taskflows",
+  "worktree_ref": null,
+  "permission_mode": "read_only",
+  "permissions": [],
+  "inbox_file": "/home/dan/repos/taskflows/.codigote/swarm/teams/default/inboxes/explore-dashboard-yaml.json",
+  "progress_file": "/home/dan/repos/taskflows/.codigote/swarm/default/explore-dashboard-yaml_default/progress.json",
+  "state_file": "/home/dan/repos/taskflows/.codigote/swarm/default/explore-dashboard-yaml_default/state.json",
+  "status": "queued",
+  "run_in_background": false,
+  "resumable": true,
+  "created_at": "2026-06-01T18:01:51.439148+00:00",
+  "updated_at": "2026-06-01T18:01:51.439148+00:00",
+  "resume": {
+    "parent_session_id": "tool:call_enTHB00R1TJCSnsevcFzAhRl",
+    "backend_session_id": "swarm_backend_session_8dbbc70e1737db9e8625836074f66e7b",
+    "cwd": "/home/dan/repos/taskflows",
+    "worktree_ref": null
+  }
+}

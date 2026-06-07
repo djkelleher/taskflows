@@ -1,0 +1,13 @@
+{
+  "agent_id": "explore-dashboard-yaml@default",
+  "team_name": "default",
+  "status": "queued",
+  "progress": {
+    "status": "queued",
+    "event": "spawned"
+  },
+  "progress_file": "/home/dan/repos/taskflows/.codigote/swarm/default/explore-dashboard-yaml_default/progress.json",
+  "state_file": "/home/dan/repos/taskflows/.codigote/swarm/default/explore-dashboard-yaml_default/state.json",
+  "resumable": true,
+  "updated_at": "2026-06-01T18:01:51.439148+00:00"
+}

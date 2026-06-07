@@ -16,7 +16,13 @@ from taskflows.serialization import (
     get_registered_type,
 )
 from taskflows.service import Venv, Service, RestartPolicy
-from taskflows.docker import DockerContainer, Volume
+from taskflows.docker import (
+    ContainerLimits,
+    DockerContainer,
+    DockerImage,
+    Ulimit,
+    Volume,
+)
 from taskflows.schedule import Calendar, Periodic
 from taskflows.constraints import CgroupConfig, Memory, CPUPressure
 
@@ -219,6 +225,9 @@ class TestCgroupConfigSerialization:
             cpu_shares=1024,
             memory_high=512 * 1024 * 1024,
             device_read_bps={"/dev/sda": 10485760},
+            oom_policy="kill",
+            managed_oom_memory_pressure="kill",
+            managed_oom_memory_pressure_limit=60,
         )
         json_str = serialize(cgroup, format="json")
         restored = deserialize(json_str, CgroupConfig, format="json")
@@ -226,6 +235,26 @@ class TestCgroupConfigSerialization:
         assert restored.cpu_shares == cgroup.cpu_shares
         assert restored.memory_high == cgroup.memory_high
         assert restored.device_read_bps == cgroup.device_read_bps
+        assert restored.oom_policy == cgroup.oom_policy
+        assert restored.managed_oom_memory_pressure == (
+            cgroup.managed_oom_memory_pressure
+        )
+        assert restored.managed_oom_memory_pressure_limit == (
+            cgroup.managed_oom_memory_pressure_limit
+        )
+
+    def test_cgroup_yaml_parses_managed_oom_percentage(self):
+        """Test human-readable systemd-oomd percentage parsing."""
+        yaml_str = """
+        type: CgroupConfig
+        managed_oom_memory_pressure: kill
+        managed_oom_memory_pressure_limit: "60%"
+        """
+
+        restored = deserialize(yaml_str, CgroupConfig, format="yaml")
+
+        assert restored.managed_oom_memory_pressure == "kill"
+        assert restored.managed_oom_memory_pressure_limit == 60
 
 
 class TestConstraintsSerialization:
@@ -1175,6 +1204,91 @@ services:
             assert rp.condition == "on-failure"
             assert rp.delay == 10
             assert rp.max_attempts == 5
+        finally:
+            path.unlink()
+
+    def test_docker_ulimits_are_inferred_from_yaml(self):
+        """Test DockerContainer ulimits deserialize to Ulimit objects."""
+        from taskflows.serialization import load_services_from_yaml
+
+        yaml_content = """
+services:
+  - name: docker-ulimits
+    start_command: python app.py
+    environment:
+      image: python:3.11
+      ulimits:
+        - name: nofile
+          soft: 1024
+          hard: 2048
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(yaml_content)
+            path = Path(f.name)
+
+        try:
+            services = load_services_from_yaml(path)
+            env = services[0].environment
+            assert isinstance(env, DockerContainer)
+            assert isinstance(env.ulimits[0], Ulimit)
+            assert env.ulimits[0].name == "nofile"
+            assert env.ulimits[0].soft == 1024
+            assert env.ulimits[0].hard == 2048
+        finally:
+            path.unlink()
+
+    def test_docker_image_and_container_limits_are_inferred_from_yaml(self):
+        """Test nested DockerImage and ContainerLimits deserialize from YAML."""
+        from taskflows.serialization import load_services_from_yaml
+
+        yaml_content = """
+services:
+  - name: docker-image-build
+    start_command: python app.py
+    environment:
+      image:
+        tag: local:test
+        path: /tmp/build
+        container_limits:
+          memory: 1GB
+          memswap: 2GB
+          cpushares: 512
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(yaml_content)
+            path = Path(f.name)
+
+        try:
+            services = load_services_from_yaml(path)
+            env = services[0].environment
+            assert isinstance(env, DockerContainer)
+            assert isinstance(env.image, DockerImage)
+            assert env.image.tag == "local:test"
+            assert env.image.path == "/tmp/build"
+            assert isinstance(env.image.container_limits, ContainerLimits)
+            assert env.image.container_limits.memory == 1024**3
+            assert env.image.container_limits.memswap == 2 * 1024**3
+            assert env.image.container_limits.cpushares == 512
+        finally:
+            path.unlink()
+
+    def test_unknown_service_yaml_key_is_rejected(self):
+        """Test typo keys do not get silently ignored."""
+        from taskflows.serialization import load_services_from_yaml
+
+        yaml_content = """
+services:
+  - name: typo-service
+    start_command: python app.py
+    restrt_policy: always
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(yaml_content)
+            path = Path(f.name)
+
+        try:
+            with pytest.raises(ValueError, match="Unknown field.*restrt_policy"):
+                load_services_from_yaml(path)
         finally:
             path.unlink()
 
