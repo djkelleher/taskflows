@@ -22,9 +22,34 @@
   --color-positive: #00FF52;
   --color-negative: #FF3366;
 
+  /* Semantic tokens required by @danklab/shared-ui (light mode defaults). */
+  --color-warning: #F5A623;
+  --color-info: #00AEFF;
+  --color-surface: #f5f5f5;
+  --color-surface-raised: #ffffff;
+  --color-surface-muted: #ededed;
+  --color-ring: #00AEFF;
+  --color-overlay: rgb(0 0 0 / 0.5);
+  --color-code-background: #171717;
+  --color-code-foreground: #f5f5f5;
+
+  /* Radii + elevation used by shared-ui overlays. */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --shadow-card: 0 1px 3px rgb(0 0 0 / 0.12), 0 1px 2px rgb(0 0 0 / 0.08);
+  --shadow-popover: 0 10px 30px rgb(0 0 0 / 0.2);
+  --shadow-dialog: 0 24px 60px rgb(0 0 0 / 0.3);
+
   /* Fonts */
   --font-sans: "NeueHaasGroteskText Pro", "Inter", system-ui, sans-serif;
 }
+
+/* Generate Tailwind utilities from @danklab/shared-ui's compiled dist using THIS
+   app's tokens above. Do NOT import "@danklab/shared-ui/styles.css" — that would
+   override Taskflows' Revival palette with the library's default tokens. */
+@source "../node_modules/@danklab/shared-ui/dist";
 
 /* Dark mode overrides */
 .dark {
@@ -34,6 +59,17 @@
   --color-card: #171717;
   --color-border: #2a2a2a;
   --color-muted: #a3a3a3;
+
+  /* Dark-mode overrides for the shared-ui semantic tokens. */
+  --color-warning: #FBBF24;
+  --color-surface: #171717;
+  --color-surface-raised: #1f1f1f;
+  --color-surface-muted: #222222;
+  --color-overlay: rgb(0 0 0 / 0.65);
+  --color-code-background: #0a0a0a;
+  --color-code-foreground: #fafafa;
+  --shadow-popover: 0 18px 40px rgb(0 0 0 / 0.5);
+  --shadow-dialog: 0 24px 60px rgb(0 0 0 / 0.6);
 }
 
 body {

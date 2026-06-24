@@ -8,6 +8,10 @@ export default defineConfig({
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+    // @danklab/shared-ui is linked via `file:` and ships its own nested
+    // node_modules/react. Dedupe so the app loads a single React copy and
+    // shared components don't throw the "invalid hook call" (useId) error.
+    dedupe: ["react", "react-dom"],
   },
   server: {
     port: 3000,

@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { Button, Badge, Card, useToast, useConfirm, LoadingSpinner } from "@/components/ui";
+import { EmptyState } from "@/components/ui/shared-ui";
 import { useDeleteEnvironment } from "@/hooks/useEnvironments";
 import { Pencil, Trash2, Plus } from "lucide-react";
 import { logger } from "@/utils/logger";
@@ -74,11 +75,20 @@ export function EnvironmentTable({ environments, isLoading }: EnvironmentTablePr
               </tr>
             ) : environments.length === 0 ? (
               <tr>
-                <td colSpan={4} className="px-4 py-8 text-center text-muted">
-                  No environments found.{" "}
-                  <Link to="/environments/create" className="text-electric-blue hover:underline">
-                    Create one
-                  </Link>
+                <td colSpan={4} className="p-4">
+                  <EmptyState
+                    className="border-none bg-transparent"
+                    title="No environments found"
+                    description="Create your first environment to get started."
+                    action={
+                      <Link to="/environments/create">
+                        <Button variant="primary">
+                          <Plus className="w-4 h-4" />
+                          Create Environment
+                        </Button>
+                      </Link>
+                    }
+                  />
                 </td>
               </tr>
             ) : (

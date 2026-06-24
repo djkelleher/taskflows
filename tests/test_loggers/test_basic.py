@@ -9,6 +9,13 @@ from taskflows.loggers.basic import any_case_env_var, get_logger
 from loguru import logger
 
 
+def _reset_basic_logger_state(basic, original_configured):
+    basic._configured_loggers = original_configured
+    basic._configured_file_sinks.clear()
+    basic._logger_levels.clear()
+    basic._logger_file_paths.clear()
+
+
 class TestEnvVarHandling:
     """Test environment variable handling"""
 
@@ -88,8 +95,9 @@ def test_logger(use_env_vars):
             test_logger.info(random_uuid)
             test_logger.debug(random_uuid)
 
-            log_file = file_dir / f"{name}.log"
+            log_file = file_dir / "taskflows.log"
             assert log_file.is_file()
+            assert not (file_dir / f"{name}.log").exists()
             log_contents = log_file.read_text().strip()
 
             assert log_contents.count("INFO") >= 1
@@ -107,7 +115,7 @@ def test_logger(use_env_vars):
             assert len(files) >= 1
             assert len(files) <= backup_count + 1
     finally:
-        basic._configured_loggers = original_configured
+        _reset_basic_logger_state(basic, original_configured)
         if use_env_vars:
             for var in [
                 f"{name}_LOG_LEVEL",
@@ -148,7 +156,7 @@ def test_no_terminal_logging():
             handlers_after2 = len(logger._core.handlers)
             assert handlers_after2 == handlers_before2
     finally:
-        basic._configured_loggers = original_configured
+        _reset_basic_logger_state(basic, original_configured)
 
 
 def test_show_source_variations():
@@ -174,7 +182,8 @@ def test_show_source_variations():
             contents1 = log_file1.read_text()
             assert "test_basic.py" in contents1
 
-            # Test with filename
+            # Test with filename. With shared file logging enabled by default,
+            # this writes to the same file sink.
             logger2 = get_logger(
                 name=f"test_filename_{uuid4()}",
                 show_source="filename",
@@ -182,11 +191,12 @@ def test_show_source_variations():
             )
             logger2.info("test message")
 
-            log_file2 = [f for f in file_dir.glob("*.log") if f != log_file1][0]
-            contents2 = log_file2.read_text()
+            log_files = list(file_dir.glob("*.log"))
+            assert log_files == [log_file1]
+            contents2 = log_file1.read_text()
             assert "test_basic.py" in contents2
     finally:
-        basic._configured_loggers = original_configured
+        _reset_basic_logger_state(basic, original_configured)
 
 
 def test_multiple_logger_instances():
@@ -205,7 +215,7 @@ def test_multiple_logger_instances():
         # Second call should not reconfigure (name should be in configured set)
         assert name in basic._configured_loggers
     finally:
-        basic._configured_loggers = original_configured
+        _reset_basic_logger_state(basic, original_configured)
 
 
 def test_failed_logger_configuration_is_not_cached():
@@ -232,11 +242,12 @@ def test_failed_logger_configuration_is_not_cached():
             )
             log.info("retry succeeded")
 
-            log_file = Path(temp_dir) / f"{name}.log"
+            log_file = Path(temp_dir) / "taskflows.log"
             assert log_file.is_file()
+            assert not (Path(temp_dir) / f"{name}.log").exists()
             assert "retry succeeded" in log_file.read_text()
     finally:
-        basic._configured_loggers = original_configured
+        _reset_basic_logger_state(basic, original_configured)
 
 
 def test_loggers_env_vars():
@@ -268,10 +279,11 @@ def test_loggers_env_vars():
 
                 # Test that file was created
                 test_logger.warning("test message")
-                log_file = file_dir / f"{name}.log"
+                log_file = file_dir / "taskflows.log"
                 assert log_file.is_file()
+                assert not (file_dir / f"{name}.log").exists()
     finally:
-        basic._configured_loggers = original_configured
+        _reset_basic_logger_state(basic, original_configured)
 
 
 def test_logger_without_name():
@@ -288,12 +300,12 @@ def test_logger_without_name():
             test_logger = get_logger(file_dir=file_dir)
             test_logger.info("test without name")
 
-            # Should create file with process ID
+            # Should use the shared default file name.
             log_files = list(file_dir.glob("*.log"))
             assert len(log_files) == 1
-            assert f"python_{os.getpid()}" in log_files[0].name
+            assert log_files[0].name == "taskflows.log"
     finally:
-        basic._configured_loggers = original_configured
+        _reset_basic_logger_state(basic, original_configured)
 
 
 def test_numeric_log_levels():
@@ -315,4 +327,4 @@ def test_numeric_log_levels():
         logger2 = get_logger(name=name2, level=30)
         logger2.warning("test warning")
     finally:
-        basic._configured_loggers = original_configured
+        _reset_basic_logger_state(basic, original_configured)

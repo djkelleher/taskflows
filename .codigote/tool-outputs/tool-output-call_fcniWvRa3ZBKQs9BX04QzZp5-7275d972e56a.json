@@ -1,0 +1,4062 @@
+{
+  "artifact_id": "tool-output-call_fcniWvRa3ZBKQs9BX04QzZp5-7275d972e56a",
+  "ended_at": "2026-06-08T08:17:37.398990",
+  "error": null,
+  "metadata": {
+    "bytes_read": 37216,
+    "hook_permission_config": {
+      "diagnostics": [],
+      "hooks": [],
+      "permission_rules": [],
+      "shadowed_rules": [],
+      "source_refs": []
+    },
+    "line_numbers": true,
+    "permission_decision": {
+      "allowed": true,
+      "behavior": "allow",
+      "classifier_confidence": 0.86,
+      "classifier_label": "low-risk-tool",
+      "explanation": "read is a low-risk tool. Classifier label `low-risk-tool` assessed command `{\"cell_limit\": 1, \"cell_offset\": 0, \"include_data\": false, \"include_outputs\": false, \"limit\": 1000, \"line_numbers\": true, \"max_bytes\": 40000, \"offset\": 0, \"page_limit\": 1, \"page_offset\": 0, \"path\": \"/home/dan/repos/codigote/src/remote/bridge.py\", \"render\": \"text\"}`.",
+      "hook_results": [],
+      "matched_rule_ids": [],
+      "message": "Tool `read` is allowed.",
+      "requires_approval": false,
+      "updated_input": {
+        "cell_limit": 1,
+        "cell_offset": 0,
+        "include_data": false,
+        "include_outputs": false,
+        "limit": 1000,
+        "line_numbers": true,
+        "max_bytes": 40000,
+        "offset": 0,
+        "page_limit": 1,
+        "page_offset": 0,
+        "path": "/home/dan/repos/codigote/src/remote/bridge.py",
+        "render": "text"
+      }
+    },
+    "post_hook_results": [],
+    "selected_line_count": 1000
+  },
+  "output": {
+    "content": "\"\"\"Client-neutral remote bridge controls for remote clients.\"\"\"\n\nimport base64\nimport binascii\nimport hashlib\nimport hmac\nimport re\nimport secrets\nfrom dataclasses import dataclass\nfrom datetime import datetime, timedelta, timezone\nfrom pathlib import Path\nfrom typing import Any\nfrom urllib.parse import quote, urlsplit, urlunsplit\n\nfrom src.runtime.ids import stable_id\n\n\nclass RemoteBridgeRuntimeError(RuntimeError):\n    \"\"\"Raised when a remote bridge request is invalid or unsafe.\"\"\"\n\n\nREMOTE_DEVICE_TTL_DAYS = 90\nMAX_REMOTE_DEVICE_TTL_DAYS = 365\nREMOTE_SESSION_TTL_HOURS = 24\nMAX_REMOTE_SESSION_TTL_HOURS = 168\nMAX_REMOTE_ATTACHMENTS = 20\nMAX_REMOTE_ATTACHMENT_BYTES = 5_000_000\nMAX_REMOTE_ATTACHMENT_TOTAL_BYTES = 20_000_000\nMAX_REMOTE_MESSAGE_CHARS = 100_000\nMAX_REMOTE_MESSAGE_ID_CHARS = 128\nMAX_REMOTE_ATTACHMENT_NAME_CHARS = 160\nMAX_REMOTE_PATH_SEGMENT_CHARS = 96\nMAX_REMOTE_ATTACHMENT_BASE64_CHARS = ((MAX_REMOTE_ATTACHMENT_BYTES + 2) // 3) * 4\nSUPPORTED_INLINE_IMAGE_TYPES = {\n    \"image/gif\",\n    \"image/jpeg\",\n    \"image/png\",\n    \"image/webp\",\n}\nREMOTE_MODE_COMMANDS = {\n    \"btw\",\n    \"clear\",\n    \"color\",\n    \"copy\",\n    \"cost\",\n    \"exit\",\n    \"feedback\",\n    \"help\",\n    \"keybindings\",\n    \"mobile\",\n    \"plan\",\n    \"session\",\n    \"status\",\n    \"statusline\",\n    \"stickers\",\n    \"theme\",\n    \"usage\",\n    \"vim\",\n}\nBRIDGE_SAFE_LOCAL_COMMANDS = {\n    \"clear\",\n    \"compact\",\n    \"cost\",\n    \"files\",\n    \"release-notes\",\n    \"summary\",\n}\nSAFE_REMOTE_COMMANDS = BRIDGE_SAFE_LOCAL_COMMANDS | {\n    \"context\",\n    \"help\",\n    \"ide\",\n    \"plan\",\n    \"remote\",\n    \"session\",\n    \"status\",\n    \"usage\",\n}\nDEFAULT_ALLOWED_REMOTE_COMMANDS = tuple(sorted(SAFE_REMOTE_COMMANDS))\nBLOCKED_REMOTE_COMMANDS = {\n    \"add-dir\",\n    \"bash\",\n    \"config\",\n    \"debug-tool-call\",\n    \"doctor\",\n    \"edit\",\n    \"exit\",\n    \"install\",\n    \"install-github-app\",\n    \"install-client-app\",\n    \"mcp\",\n    \"plugin\",\n    \"powershell\",\n    \"reload-plugins\",\n    \"reset-limits\",\n    \"sandbox-toggle\",\n    \"shell\",\n    \"write\",\n}\n\n\n@dataclass(frozen=True)\nclass TrustedDeviceEnrollment:\n    \"\"\"One trusted remote device enrollment.\"\"\"\n\n    device_id: str\n    display_name: str\n    token: str\n    token_hash: str\n    trusted: bool\n    enrolled_at: datetime\n    expires_at: datetime\n\n    def public_payload(self) -> dict[str, Any]:\n        \"\"\"Return a JSON-compatible payload safe to return to the enrolling client.\"\"\"\n        return {\n            \"device_id\": self.device_id,\n            \"display_name\": self.display_name,\n            \"trusted\": self.trusted,\n            \"token\": self.token,\n            \"enrolled_at\": self.enrolled_at.isoformat(),\n            \"expires_at\": self.expires_at.isoformat(),\n        }\n\n    def stored_payload(self) -> dict[str, Any]:\n        \"\"\"Return a JSON-compatible persisted payload without the raw token.\"\"\"\n        return {\n            \"device_id\": self.device_id,\n            \"display_name\": self.display_name,\n            \"trusted\": self.trusted,\n            \"token_hash\": self.token_hash,\n            \"enrolled_at\": self.enrolled_at.isoformat(),\n            \"expires_at\": self.expires_at.isoformat(),\n        }\n\n\n@dataclass(frozen=True)\nclass RemoteSessionLink:\n    \"\"\"Remote-control URL and QR payload for one session.\"\"\"\n\n    link_id: str\n    session_id: str\n    device_id: str | None\n    remote_url: str\n    qr_payload: str\n    bridge_token_required: bool\n    allowed_commands: tuple[str, ...]\n    created_at: datetime\n    expires_at: datetime\n\n    def as_json(self) -> dict[str, Any]:\n        \"\"\"Return a JSON-compatible remote session link.\"\"\"\n        return {\n            \"link_id\": self.link_id,\n            \"session_id\": self.session_id,\n            \"device_id\": self.device_id,\n            \"remote_url\": self.remote_url,\n            \"qr_payload\": self.qr_payload,\n            \"qr_payload_format\": \"url\",\n            \"qr_payload_metadata\": {\n                \"session_id\": self.session_id,\n                \"device_id\": self.device_id,\n                \"remote_url\": self.remote_url,\n                \"expires_at\": self.expires_at.isoformat(),\n                \"token_header\": \"X-Codigote-Trusted-Device-Token\",\n            },\n            \"bridge_token_required\": self.bridge_token_required,\n            \"allowed_commands\": list(self.allowed_commands),\n            \"created_at\": self.created_at.isoformat(),\n            \"expires_at\": self.expires_at.isoformat(),\n        }\n\n\n@dataclass(frozen=True)\nclass BridgeCommandDecision:\n    \"\"\"Remote command safety decision.\"\"\"\n\n    allowed: bool\n    command_name: str | None\n    reason: str\n    risk_tier: str\n\n    def as_json(self) -> dict[str, Any]:\n        \"\"\"Return a JSON-compatible command decision.\"\"\"\n        return {\n            \"allowed\": self.allowed,\n            \"command_name\": self.command_name,\n            \"reason\": self.reason,\n            \"risk_tier\": self.risk_tier,\n        }\n\n\n@dataclass(frozen=True)\nclass RemoteAttachmentRecord:\n    \"\"\"One inbound remote attachment written to disk.\"\"\"\n\n    attachment_id: str\n    file_name: str\n    content_type: str\n    path: str\n    size_bytes: int\n\n    def as_json(self) -> dict[str, Any]:\n        \"\"\"Return a JSON-compatible attachment record.\"\"\"\n        return {\n            \"attachment_id\": self.attachment_id,\n            \"file_name\": self.file_name,\n            \"content_type\": self.content_type,\n            \"path\": self.path,\n            \"size_bytes\": self.size_bytes,\n        }\n\n\n@dataclass(frozen=True)\nclass _PreparedRemoteAttachment:\n    \"\"\"Decoded attachment payload ready for a single write pass.\"\"\"\n\n    attachment_id: str\n    file_name: str\n    content_type: str\n    data: bytes\n\n\n@dataclass(frozen=True)\nclass InboundBridgeMessage:\n    \"\"\"Normalized inbound message from a remote client.\"\"\"\n\n    message_id: str\n    prompt: str\n    original_prompt: str\n    attachments: tuple[RemoteAttachmentRecord, ...]\n    command_decision: BridgeCommandDecision\n    received_at: datetime\n\n    def as_json(self) -> dict[str, Any]:\n        \"\"\"Return a JSON-compatible inbound message.\"\"\"\n        return {\n            \"message_id\": self.message_id,\n            \"prompt\": self.prompt,\n            \"original_prompt\": self.original_prompt,\n            \"attachments\": [item.as_json() for item in self.attachments],\n            \"command_decision\": self.command_decision.as_json(),\n            \"received_at\": self.received_at.isoformat(),\n        }\n\n\nclass RemoteBridgeRuntime:\n    \"\"\"Normalize remote bridge trust, links, messages, attachments, and commands.\"\"\"\n\n    def capabilities(self) -> dict[str, Any]:\n        \"\"\"Return the client-neutral remote bridge capability contract.\"\"\"\n        return {\n            \"trusted_devices\": {\n                \"supported\": True,\n                \"token_header\": \"X-Codigote-Trusted-Device-Token\",\n                \"default_ttl_days\": REMOTE_DEVICE_TTL_DAYS,\n                \"max_ttl_days\": MAX_REMOTE_DEVICE_TTL_DAYS,\n                \"verify_endpoint\": \"/v1/sessions/{session_id}/remote/devices/verify\",\n                \"heartbeat_endpoint\": \"/v1/sessions/{session_id}/remote/devices/heartbeat\",\n            },\n            \"session_links\": {\n                \"supported\": True,\n                \"default_ttl_hours\": REMOTE_SESSION_TTL_HOURS,\n                \"max_ttl_hours\": MAX_REMOTE_SESSION_TTL_HOURS,\n                \"url_shape\": \"/remote/sessions/{session_id}\",\n                \"qr_payload\": \"remote_url\",\n                \"qr_payload_formats\": [\"url\", \"metadata\"],\n                \"verify_endpoint\": \"/v1/sessions/{session_id}/remote/session-link/verify\",\n            },\n            \"inbound_messages\": {\n                \"supported\": True,\n                \"history_endpoint\": \"/v1/sessions/{session_id}/remote/messages\",\n                \"polling\": \"GET with after_cursor and limit\",\n                \"max_message_chars\": MAX_REMOTE_MESSAGE_CHARS,\n                \"content_shapes\": [\n                    \"prompt\",\n                    \"text\",\n                    \"content\",\n                    \"message.content\",\n                    \"Anthropic text/image content blocks\",\n                    \"OpenAI input_text/input_image content blocks\",\n                ],\n                \"max_message_id_chars\": MAX_REMOTE_MESSAGE_ID_CHARS,\n            },\n            \"inbound_attachments\": {\n                \"supported\": True,\n                \"max_attachment_bytes\": MAX_REMOTE_ATTACHMENT_BYTES,\n                \"max_attachments\": MAX_REMOTE_ATTACHMENTS,\n                \"max_total_attachment_bytes\": MAX_REMOTE_ATTACHMENT_TOTAL_BYTES,\n                \"fields\": [\"attachments\", \"inline content image blocks\"],\n                \"encoding\": \"base64\",\n                \"storage\": \".codigote/remote_uploads/{session_id}\",\n            },\n            \"command_filtering\": {\n                \"supported\": True,\n                \"safe_commands\": sorted(SAFE_REMOTE_COMMANDS),\n                \"remote_mode_commands\": sorted(REMOTE_MODE_COMMANDS),\n                \"bridge_safe_local_commands\": sorted(BRIDGE_SAFE_LOCAL_COMMANDS),\n                \"blocked_commands\": sorted(BLOCKED_REMOTE_COMMANDS),\n            },\n        }\n\n    def enroll_trusted_device(\n        self,\n        *,\n        display_name: str,\n        trusted: bool = True,\n        ttl_days: int = REMOTE_DEVICE_TTL_DAYS,\n    ) -> TrustedDeviceEnrollment:\n        \"\"\"Create a trusted-device token enrollment.\"\"\"\n        normalized_display_name = display_name.strip() or \"Remote device\"\n        now = datetime.now(timezone.utc)\n        token = secrets.token_urlsafe(32)\n        device_id = stable_id(\n            \"remote_device\",\n            {\n                \"display_name\": normalized_display_name,\n                \"token\": token,\n                \"enrolled_at\": now.isoformat(),\n            },\n        )\n        return TrustedDeviceEnrollment(\n            device_id=device_id,\n            display_name=normalized_display_name,\n            token=token,\n            token_hash=self.hash_device_token(token),\n            trusted=trusted,\n            enrolled_at=now,\n            expires_at=now + timedelta(days=_bounded_ttl(ttl_days, MAX_REMOTE_DEVICE_TTL_DAYS)),\n        )\n\n    def verify_trusted_device(\n        self,\n        *,\n        token: str | None,\n        device_records: tuple[dict[str, Any], ...],\n    ) -> dict[str, Any]:\n        \"\"\"Verify a trusted device token against stored enrollment payloads.\"\"\"\n        if token is None or not token.strip():\n            raise RemoteBridgeRuntimeError(\"Trusted device token is required.\")\n        token_hash = self.hash_device_token(token)\n        now = datetime.now(timezone.utc)\n        for record in self.latest_device_records(device_records):\n            if record.get(\"trusted\") is not True:\n                continue\n            stored_hash = record.get(\"token_hash\")\n            if not isinstance(stored_hash, str):\n                continue\n            if not hmac.compare_digest(stored_hash, token_hash):\n                continue\n            expires_at = _parse_datetime(str(record.get(\"expires_at\", \"\")))\n            if expires_at <= now:\n                raise RemoteBridgeRuntimeError(\"Trusted device token has expired.\")\n            return record\n        raise RemoteBridgeRuntimeError(\"Trusted device token is not recognized.\")\n\n    def revoke_trusted_device(\n        self,\n        *,\n        device_id: str,\n        device_records: tuple[dict[str, Any], ...],\n    ) -> dict[str, Any]:\n        \"\"\"Return a revoked device payload from a stored enrollment.\"\"\"\n        for record in device_records:\n            if record.get(\"device_id\") == device_id:\n                revoked = dict(record)\n                revoked[\"trusted\"] = False\n                revoked[\"revoked_at\"] = datetime.now(timezone.utc).isoformat()\n                return revoked\n        raise RemoteBridgeRuntimeError(f\"Unknown trusted device: {device_id}\")\n\n    def trusted_device_heartbeat(\n        self,\n        *,\n        token: str | None,\n        device_records: tuple[dict[str, Any], ...],\n        client_adapter: str | None = None,\n        client_version: str | None = None,\n    ) -> dict[str, Any]:\n        \"\"\"Verify a trusted device and return heartbeat metadata for persistence.\"\"\"\n        device = self.verify_trusted_device(token=token, device_records=device_records)\n        seen_at = datetime.now(timezone.utc)\n        return {\n            \"device_id\": device[\"device_id\"],\n            \"trusted\": True,\n            \"client_adapter\": client_adapter,\n            \"client_version\": client_version,\n            \"seen_at\": seen_at.isoformat(),\n            \"expires_at\": device.get(\"expires_at\"),\n        }\n\n    def create_session_link(\n        self,\n        *,\n        session_id: str,\n        public_base_url: str,\n        device_id: str | None = None,\n        ttl_hours: int = REMOTE_SESSION_TTL_HOURS,\n        allowed_commands: tuple[str, ...] = DEFAULT_ALLOWED_REMOTE_COMMANDS,\n    ) -> RemoteSessionLink:\n        \"\"\"Create a remote-control URL and QR payload.\"\"\"\n        base = _public_base_url(public_base_url)\n        normalized_allowed_commands = _normalize_allowed_commands(allowed_commands)\n        quoted_session = quote(session_id, safe=\"\")\n        remote_url = f\"{base}/remote/sessions/{quoted_session}\"\n        if device_id is not None:\n            remote_url = f\"{remote_url}?device_id={quote(device_id, safe='')}\"\n        created_at = datetime.now(timezone.utc)\n        expires_at = created_at + timedelta(\n            hours=_bounded_ttl(ttl_hours, MAX_REMOTE_SESSION_TTL_HOURS)\n        )\n        link_id = stable_id(\n            \"remote_session_link\",\n            {\n                \"session_id\": session_id,\n                \"device_id\": device_id,\n                \"remote_url\": remote_url,\n                \"created_at\": created_at.isoformat(),\n            },\n        )\n        return RemoteSessionLink(\n            link_id=link_id,\n            session_id=session_id,\n            device_id=device_id,\n            remote_url=remote_url,\n            qr_payload=remote_url,\n            bridge_token_required=True,\n            allowed_commands=normalized_allowed_commands,\n            created_at=created_at,\n            expires_at=expires_at,\n        )\n\n    def verify_session_link(\n        self,\n        *,\n        session_id: str,\n        session_link_records: tuple[dict[str, Any], ...],\n        device_records: tuple[dict[str, Any], ...],\n        device_token: str | None = None,\n        link_id: str | None = None,\n        device_id: str | None = None,\n    ) -> dict[str, Any]:\n        \"\"\"Verify that a remote session link is current and usable.\"\"\"\n        link = _latest_record(session_link_records) if link_id is None else None\n        if link_id is not None:\n            for record in session_link_records:\n                if record.get(\"link_id\") == link_id:\n                    link = record\n                    break\n        if link is None:\n            raise RemoteBridgeRuntimeError(\"Remote session link is not recognized.\")\n        if link.get(\"session_id\") != session_id:\n            raise RemoteBridgeRuntimeError(\"Remote session link does not match this session.\")\n        expires_at = _parse_datetime(str(link.get(\"expires_at\", \"\")))\n        if expires_at <= datetime.now(timezone.utc):\n            raise RemoteBridgeRuntimeError(\"Remote session link has expired.\")\n        bridge_token_required = link.get(\"bridge_token_required\") is not False\n        if bridge_token_required and (device_token is None or not device_token.strip()):\n            raise RemoteBridgeRuntimeError(\"Trusted device token is required for this link.\")\n        verified_device: dict[str, Any] | None = None\n        if device_token is not None:\n            verified_device = self.verify_trusted_device(\n                token=device_token,\n                device_records=device_records,\n            )\n            link_device_id = link.get(\"device_id\")\n            if isinstance(link_device_id, str) and link_device_id:\n                if verified_device.get(\"device_id\") != link_device_id:\n                    raise RemoteBridgeRuntimeError(\n                        \"Trusted device token does not match remote session link.\"\n                    )\n        if verified_device is None and device_id is not None:\n            link_device_id = link.get(\"device_id\")\n            if isinstance(link_device_id, str) and link_device_id and device_id != link_device_id:\n                raise RemoteBridgeRuntimeError(\n                    \"Trusted device id does not match remote session link.\"\n                )\n        return {\n            \"valid\": True,\n            \"session_id\": session_id,\n            \"link_id\": link.get(\"link_id\"),\n            \"remote_url\": link.get(\"remote_url\"),\n            \"device_id\": link.get(\"device_id\"),\n            \"device_verified\": verified_device is not None,\n            \"verified_device_id\": (\n                verified_device.get(\"device_id\") if verified_device is not None else None\n            ),\n            \"bridge_token_required\": bridge_token_required,\n            \"expires_at\": link.get(\"expires_at\"),\n            \"allowed_commands\": list(_safe_stored_allowed_commands(link)),\n        }\n\n    def remote_status(\n        self,\n        *,\n        session_id: str,\n        device_records: tuple[dict[str, Any], ...],\n        session_link_records: tuple[dict[str, Any], ...],\n    ) -> dict[str, Any]:\n        \"\"\"Return a remote bridge status snapshot for one session.\"\"\"\n        now = datetime.now(timezone.utc)\n        latest_devices = self.latest_device_records(device_records)\n        active_devices = [\n            item\n            for item in latest_devices\n            if item.get(\"trusted\") is True\n            and _parse_datetime(str(item.get(\"expires_at\", \"\"))) > now\n        ]\n        latest_link = _latest_record(session_link_records)\n        safe_link: dict[str, Any] | None = None\n        if latest_link is not None:\n            safe_link = dict(latest_link)\n            safe_link[\"allowed_commands\"] = list(_safe_stored_allowed_commands(safe_link))\n        return {\n            \"session_id\": session_id,\n            \"remote_enabled\": len(active_devices) > 0,\n            \"trusted_device_count\": len(latest_devices),\n            \"active_trusted_device_count\": len(active_devices),\n            \"active_device_ids\": [\n                item[\"device_id\"]\n                for item in active_devices\n                if isinstance(item.get(\"device_id\"), str)\n            ],\n            \"latest_session_link\": safe_link,\n            \"latest_session_link_valid\": (\n                safe_link is not None\n                and _parse_datetime(str(safe_link.get(\"expires_at\", \"\"))) > now\n            ),\n            \"capabilities\": self.capabilities(),\n        }\n\n    def latest_device_records(\n        self, device_records: tuple[dict[str, Any], ...]\n    ) -> list[dict[str, Any]]:\n        \"\"\"Return latest trusted-device audit payloads by device id.\"\"\"\n        return _latest_records_by_key(device_records, key=\"device_id\")\n\n    def filter_remote_command(self, text: str) -> BridgeCommandDecision:\n        \"\"\"Return whether a remote text command is bridge-safe.\"\"\"\n        stripped = text.strip()\n        if not stripped:\n            return BridgeCommandDecision(\n                allowed=False,\n                command_name=None,\n                reason=\"message is empty\",\n                risk_tier=\"invalid\",\n            )\n        if not stripped.startswith(\"/\"):\n            return BridgeCommandDecision(\n                allowed=True,\n                command_name=None,\n                reason=\"plain user message\",\n                risk_tier=\"low\",\n            )\n        command_name = _command_name(stripped)\n        if not command_name:\n            return BridgeCommandDecision(\n                allowed=False,\n                command_name=None,\n                reason=\"slash command is empty\",\n                risk_tier=\"invalid\",\n            )\n        if command_name in BLOCKED_REMOTE_COMMANDS:\n            return BridgeCommandDecision(\n                allowed=False,\n                command_name=command_name,\n                reason=\"command is blocked for remote bridge clients\",\n                risk_tier=\"high\",\n            )\n        if command_name not in SAFE_REMOTE_COMMANDS:\n            return BridgeCommandDecision(\n                allowed=False,\n                command_name=command_name,\n                reason=\"command is not in the remote bridge allowlist\",\n                risk_tier=\"medium\",\n            )\n        return BridgeCommandDecision(\n            allowed=True,\n            command_name=command_name,\n            reason=\"command is bridge-safe\",\n            risk_tier=\"low\",\n        )\n\n    def normalize_inbound_message(\n        self,\n        *,\n        session_id: str,\n        workspace_ref: str,\n        payload: dict[str, Any],\n    ) -> InboundBridgeMessage:\n        \"\"\"Normalize inbound remote text and attachments into a client message.\"\"\"\n        explicit_attachments = _attachment_payloads(payload)\n        prompt, content_attachments = _content_from_payload(\n            payload,\n            allow_empty=bool(explicit_attachments),\n        )\n        if len(prompt) > MAX_REMOTE_MESSAGE_CHARS:\n            raise RemoteBridgeRuntimeError(\"Remote message exceeds maximum length.\")\n        decision = (\n            BridgeCommandDecision(\n                allowed=True,\n                command_name=None,\n                reason=\"attachment-only user message\",\n                risk_tier=\"low\",\n            )\n            if not prompt and (explicit_attachments or content_attachments)\n            else self.filter_remote_command(prompt)\n        )\n        if not decision.allowed:\n            raise RemoteBridgeRuntimeError(decision.reason)\n        attachments = self.resolve_inbound_attachments(\n            session_id=session_id,\n            workspace_ref=workspace_ref,\n            attachments=explicit_attachments + content_attachments,\n        )\n        attachment_refs = \" \".join(f'@\"{item.path}\"' for item in attachments)\n        resolved_prompt = f\"{attachment_refs} {prompt}\".strip() if attachment_refs else prompt\n        message_id = _optional_message_id(payload)\n        if message_id is None:\n            message_id = stable_id(\n                \"remote_message\",\n                {\n                    \"session_id\": session_id,\n                    \"prompt\": prompt,\n                    \"attachments\": tuple(item.as_json() for item in attachments),\n                },\n            )\n        return InboundBridgeMessage(\n            message_id=message_id,\n            prompt=resolved_prompt,\n            original_prompt=prompt,\n            attachments=attachments,\n            command_decision=decision,\n            received_at=datetime.now(timezone.utc),\n        )\n\n    def resolve_inbound_attachments(\n        self,\n        *,\n        session_id: str,\n        workspace_ref: str,\n        attachments: tuple[dict[str, Any], ...],\n    ) -> tuple[RemoteAttachmentRecord, ...]:\n        \"\"\"Write base64 inbound attachments under the session workspace.\"\"\"\n        if not attachments:\n            return ()\n        prepared = _prepare_attachments(session_id=session_id, attachments=attachments)\n        root = _workspace_root(workspace_ref)\n        upload_dir = root / \".codigote\" / \"remote_uploads\" / _safe_path_segment(session_id)\n        upload_dir.mkdir(parents=True, exist_ok=True)\n        records: list[RemoteAttachmentRecord] = []\n        for item in prepared:\n            target = upload_dir / (\n                f\"{_safe_path_segment(item.attachment_id)[:16]}\"\n                f\"-{_bytes_hash(item.data)[:12]}-{item.file_name}\"\n            )\n            target.write_bytes(item.data)\n            records.append(\n                RemoteAttachmentRecord(\n                    attachment_id=item.attachment_id,\n                    file_name=item.file_name,\n                    content_type=item.content_type,\n                    path=str(target),\n                    size_bytes=len(item.data),\n                )\n            )\n        return tuple(records)\n\n    @staticmethod\n    def hash_device_token(token: str) -> str:\n        \"\"\"Return a stable hash for a raw trusted-device token.\"\"\"\n        return hashlib.sha256(token.encode(\"utf-8\")).hexdigest()\n\n\ndef _content_from_payload(\n    payload: dict[str, Any],\n    *,\n    allow_empty: bool = False,\n) -> tuple[str, tuple[dict[str, Any], ...]]:\n    \"\"\"Extract text and inline attachments from an inbound remote payload.\"\"\"\n    message_type = payload.get(\"type\")\n    if message_type is not None and message_type != \"user\":\n        raise RemoteBridgeRuntimeError(\"Inbound remote message must be a user message.\")\n    if \"prompt\" in payload:\n        prompt = payload[\"prompt\"]\n    elif \"text\" in payload:\n        prompt = payload[\"text\"]\n    elif \"content\" in payload:\n        prompt = payload[\"content\"]\n    elif isinstance(payload.get(\"message\"), dict) and \"content\" in payload[\"message\"]:\n        prompt = payload[\"message\"][\"content\"]\n    else:\n        raise RemoteBridgeRuntimeError(\n            \"Inbound remote message must include prompt, text, or content.\"\n        )\n    if isinstance(prompt, str):\n        if not prompt.strip() and not allow_empty:\n            raise RemoteBridgeRuntimeError(\"Inbound remote message is empty.\")\n        return prompt.strip(), ()\n    if isinstance(prompt, list):\n        text_parts: list[str] = []\n        inline_attachments: list[dict[str, Any]] = []\n        for block in prompt:\n            if (\n                isinstance(block, dict)\n                and block.get(\"type\") in {\"text\", \"input_text\"}\n                and isinstance(block.get(\"text\"), str)\n            ):\n                text_parts.append(str(block[\"text\"]))\n            elif isinstance(block, dict) and block.get(\"type\") == \"image\":\n                inline_attachments.append(_image_block_attachment(block, len(inline_attachments)))\n            elif isinstance(block, dict) and block.get(\"type\") == \"input_image\":\n                inline_attachments.append(\n                    _input_image_block_attachment(block, len(inline_attachments))\n                )\n            else:\n                raise RemoteBridgeRuntimeError(\n                    \"Inbound remote content contains an unsupported block.\"\n                )\n        text = \"\\n\".join(text_parts).strip()\n        if text or inline_attachments:\n            return text, tuple(inline_attachments)\n    raise RemoteBridgeRuntimeError(\"Inbound remote content must include text.\")\n\n\ndef _image_block_attachment(block: dict[str, Any], index: int) -> dict[str, Any]:\n    \"\"\"Convert an Anthropic-style base64 image block to an attachment payload.\"\"\"\n    source = block.get(\"source\")\n    if not isinstance(source, dict):\n        raise RemoteBridgeRuntimeError(\"Image content block must include a source object.\")\n    if source.get(\"type\") != \"base64\":\n        raise RemoteBridgeRuntimeError(\"Only base64 image content blocks are supported.\")\n    data = source.get(\"data\")\n    if not isinstance(data, str) or not data:\n        raise RemoteBridgeRuntimeError(\"Image content block must include base64 data.\")\n    content_type = _image_content_type(\n        source.get(\"media_type\")\n        or source.get(\"mediaType\")\n        or _detect_image_content_type_from_base64(data)\n    )\n    extension = _image_extension(content_type)\n    attachment_id = str(\n        block.get(\"id\")\n        or stable_id(\"remote_image\", {\"index\": index, \"data_hash\": _bytes_hash(data.encode())})\n    )\n    return {\n        \"attachment_id\": attachment_id,\n        \"file_name\": f\"inline-image-{index + 1}.{extension}\",\n        \"content_type\": content_type,\n        \"data\": data,\n    }\n\n\ndef _input_image_block_attachment(block: dict[str, Any], index: int) -> dict[str, Any]:\n    \"\"\"Convert an OpenAI-style data URL image block to an attachment payload.\"\"\"\n    image_url = block.get(\"image_url\")\n    if isinstance(image_url, dict):\n        image_url = image_url.get(\"url\")\n    if not isinstance(image_url, str) or not image_url:\n        raise RemoteBridgeRuntimeError(\"Input image content block must include an image_url.\")\n    content_type, data = _data_url_image(image_url)\n    extension = _image_extension(content_type)\n    attachment_id = str(\n        block.get(\"id\")\n        or stable_id(\"remote_image\", {\"index\": index, \"data_hash\": _bytes_hash(data.encode())})\n    )\n    return {\n        \"attachment_id\": attachment_id,\n        \"file_name\": f\"inline-image-{index + 1}.{extension}\",\n        \"content_type\": content_type,\n        \"data\": data,\n    }\n\n\ndef _data_url_image(value: str) -> tuple[str, str]:\n    \"\"\"Return media type and base64 data from an inline image data URL.\"\"\"\n    header, separator, data = value.strip().partition(\",\")\n    normalized_header = header.lower()\n    if (\n        separator != \",\"\n        or not normalized_header.startswith(\"data:\")\n        or not normalized_header.endswith(\";base64\")\n    ):\n        raise RemoteBridgeRuntimeError(\"Input image content block must use a base64 data URL.\")\n    content_type = _image_content_type(\n        normalized_header.removeprefix(\"data:\").removesuffix(\";base64\")\n    )\n    if not data:\n        raise RemoteBridgeRuntimeError(\"Image content block must include base64 data.\")\n    return content_type, data\n\n\ndef _image_content_type(value: Any) -> str:\n    \"\"\"Return a normalized supported image content type.\"\"\"\n    if not isinstance(value, str):\n        raise RemoteBridgeRuntimeError(\"Image content block media type must be image/*.\")\n    content_type = value.strip().lower()\n    if not content_type.startswith(\"image/\"):\n        raise RemoteBridgeRuntimeError(\"Image content block media type must be image/*.\")\n    if content_type not in SUPPORTED_INLINE_IMAGE_TYPES:\n        raise RemoteBridgeRuntimeError(\n            \"Image content block media type must be png, jpeg, gif, or webp.\"\n        )\n    return content_type\n\n\ndef _attachment_payloads(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:\n    \"\"\"Extract attachment payloads from the bridge client fields.\"\"\"\n    value = payload.get(\"attachments\", ())\n    if value is None:\n        return ()\n    if not isinstance(value, list | tuple):\n        raise RemoteBridgeRuntimeError(\"attachments must be an array.\")\n    attachments: list[dict[str, Any]] = []\n    for item in value:\n        if not isinstance(item, dict):\n            raise RemoteBridgeRuntimeError(\"attachments must contain objects.\")\n        attachments.append(dict(item))\n    return tuple(attachments)\n\n\ndef _prepare_attachments(\n    *,\n    session_id: str,\n    attachments: tuple[dict[str, Any], ...],\n) -> tuple[_PreparedRemoteAttachment, ...]:\n    \"\"\"Decode and validate all attachments before writing any files.\"\"\"\n    if len(attachments) > MAX_REMOTE_ATTACHMENTS:\n        raise RemoteBridgeRuntimeError(\n            f\"Remote messages support at most {MAX_REMOTE_ATTACHMENTS} attachments.\"\n        )\n    prepared: list[_PreparedRemoteAttachment] = []\n    total_bytes = 0\n    for item in attachments:\n        file_name = _safe_file_name(str(item.get(\"file_name\") or \"attachment\"))\n        content_type = _content_type(item.get(\"content_type\"))\n        raw_data = _attachment_bytes(item)\n        if len(raw_data) > MAX_REMOTE_ATTACHMENT_BYTES:\n            raise RemoteBridgeRuntimeError(\n                f\"Attachment exceeds {MAX_REMOTE_ATTACHMENT_BYTES} bytes.\"\n            )\n        total_bytes += len(raw_data)\n        if total_bytes > MAX_REMOTE_ATTACHMENT_TOTAL_BYTES:\n            raise RemoteBridgeRuntimeError(\n                f\"Attachments exceed {MAX_REMOTE_ATTACHMENT_TOTAL_BYTES} total bytes.\"\n            )\n        prepared.append(\n            _PreparedRemoteAttachment(\n                attachment_id=_attachment_id(\n                    session_id=session_id,\n                    item=item,\n                    file_name=file_name,\n                    data=raw_data,\n                ),\n                file_name=file_name,\n                content_type=content_type,\n                data=raw_data,\n            )\n        )\n    return tuple(prepared)\n\n\ndef _attachment_id(\n    *,\n    session_id: str,\n    item: dict[str, Any],\n    file_name: str,\n    data: bytes,\n) -> str:\n    \"\"\"Return a bounded stable attachment id.\"\"\"\n    raw_attachment_id = item.get(\"attachment_id\")\n    if raw_attachment_id is not None and raw_attachment_id != \"\":\n        if not isinstance(raw_attachment_id, str):\n            raise RemoteBridgeRuntimeError(\"attachment_id must be text.\")\n        attachment_id = raw_attachment_id.strip()\n        if attachment_id:\n            return _safe_path_segment(attachment_id)\n    return stable_id(\n        \"remote_attachment\",\n        {\n            \"session\": session_id,\n            \"file_name\": file_name,\n            \"data_hash\": _bytes_hash(data),\n        },\n    )\n\n\ndef _attachment_bytes(payload: dict[str, Any]) -> bytes:\n    \"\"\"Decode attachment bytes from the canonical base64 field.\"\"\"\n    data = payload.get(\"data\")\n    if not isinstance(data, str) or not data:\n        raise RemoteBridgeRuntimeError(\"Attachment data must be base64 text.\")\n    if len(data) > MAX_REMOTE_ATTACHMENT_BASE64_CHARS:\n        raise RemoteBridgeRuntimeError(f\"Attachment exceeds {MAX_REMOTE_ATTACHMENT_BYTES} bytes.\")\n    try:\n        return base64.b64decode(data, validate=True)\n    except (binascii.Error, ValueError) as error:\n        raise RemoteBridgeRuntimeError(\"Attachment data is not valid base64.\") from error\n\n\ndef _content_type(value: Any) -> str:\n    \"\"\"Return a conservative attachment content type.\"\"\"\n    if not isinstance(value, str):\n        return \"application/octet-stream\"\n    normalized = value.strip().lower()\n    if not normalized:\n        return \"application/octet-stream\"\n    if not re.fullmatch(r\"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*\", normalized):\n        return \"application/octet-stream\"\n    return normalized[:255]\n\n\ndef _optional_message_id(payload: dict[str, Any]) -> str | None:\n    \"\"\"Return a bounded client message id when one is provided.\"\"\"\n    raw_message_id = payload.get(\"message_id\")\n    if raw_message_id is None or raw_message_id == \"\":\n        return None\n    if not isinstance(raw_message_id, str):\n        raise RemoteBridgeRuntimeError(\"message_id must be text.\")\n    message_id = raw_message_id.strip()\n    if not message_id:\n        return None\n    if len(message_id) > MAX_REMOTE_MESSAGE_ID_CHARS:\n        raise RemoteBridgeRuntimeError(\n            f\"message_id exceeds {MAX_REMOTE_MESSAGE_ID_CHARS} characters.\"\n        )\n    return message_id\n\n\ndef _detect_image_content_type_from_base64(data: str) -> str:\n    \"\"\"Detect common image media types from base64 magic bytes.\"\"\"\n    try:\n        prefix = base64.b64decode(data[:64], validate=False)\n    except (binascii.Error, ValueError):\n        return \"image/png\"\n    if prefix.startswith(b\"\\x89PNG\\r\\n\\x1a\\n\"):\n        return \"image/png\"\n    if prefix.startswith(b\"\\xff\\xd8\\xff\"):\n        return \"image/jpeg\"\n    if prefix.startswith((b\"GIF87a\", b\"GIF89a\")):\n        return \"image/gif\"\n    if prefix.startswith(b\"RIFF\") and prefix[8:12] == b\"WEBP\":\n        return \"image/webp\"\n    return \"image/png\"\n\n\ndef _image_extension(content_type: str) -> str:\n    \"\"\"Return a conservative extension for a supported image media type.\"\"\"\n    if content_type not in SUPPORTED_INLINE_IMAGE_TYPES:\n        raise RemoteBridgeRuntimeError(\n            \"Image content block media type must be png, jpeg, gif, or webp.\"\n        )\n    if content_type == \"image/jpeg\":\n        return \"jpg\"\n    if content_type == \"image/gif\":\n        return \"gif\"\n    if content_type == \"image/webp\":\n        return \"webp\"\n    return \"png\"\n\n\ndef _command_name(text: str) -> str:\n    \"\"\"Extract a normalized slash command name.\"\"\"\n    parts = text[1:].split(maxsplit=1)\n    if not parts:\n        return \"\"\n    token = parts[0]\n    return token.split(\":\", maxsplit=1)[0].strip().lower()\n\n\ndef _public_base_url(value: str) -> str:\n    \"\"\"Normalize a public base URL used for remote session links.\"\"\"\n    stripped = value.strip().rstrip(\"/\")\n    parsed = urlsplit(stripped)\n    if parsed.scheme not in {\"http\", \"https\"} or not parsed.netloc or parsed.hostname is None:\n        raise RemoteBridgeRuntimeError(\n            \"public_base_url must be an absolute http:// or https:// URL.\"\n        )\n    if parsed.username is not None or parsed.password is not None:\n        raise RemoteBridgeRuntimeError(\"public_base_url must not include credentials.\")\n    try:\n        parsed.port\n    except ValueError as error:\n        raise RemoteBridgeRuntimeError(\"public_base_url includes an invalid port.\") from error\n    if parsed.query or parsed.fragment:\n        raise RemoteBridgeRuntimeError(\"public_base_url must not include a query or fragment.\")\n    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip(\"/\"), \"\", \"\"))\n\n\ndef _bounded_ttl(value: int, maximum: int) -> int:\n    \"\"\"Return a TTL clamped to bridge safety bounds.\"\"\"\n    if isinstance(value, bool) or not isinstance(value, int):\n        raise RemoteBridgeRuntimeError(\"TTL values must be integers.\")\n    return min(max(1, value), maximum)\n\n\ndef _normalize_allowed_commands(commands: tuple[str, ...]) -> tuple[str, ...]:\n    \"\"\"Return a sorted, de-duplicated remote command allowlist.\"\"\"\n    normalized: set[str] = set()\n    for command in commands:\n        if not isinstance(command, str):\n",
+    "end_line": 1000,
+    "kind": "text",
+    "line_limit": 1000,
+    "line_offset": 0,
+    "lines": [
+      {
+        "line": 1,
+        "text": "\"\"\"Client-neutral remote bridge controls for remote clients.\"\"\""
+      },
+      {
+        "line": 2,
+        "text": ""
+      },
+      {
+        "line": 3,
+        "text": "import base64"
+      },
+      {
+        "line": 4,
+        "text": "import binascii"
+      },
+      {
+        "line": 5,
+        "text": "import hashlib"
+      },
+      {
+        "line": 6,
+        "text": "import hmac"
+      },
+      {
+        "line": 7,
+        "text": "import re"
+      },
+      {
+        "line": 8,
+        "text": "import secrets"
+      },
+      {
+        "line": 9,
+        "text": "from dataclasses import dataclass"
+      },
+      {
+        "line": 10,
+        "text": "from datetime import datetime, timedelta, timezone"
+      },
+      {
+        "line": 11,
+        "text": "from pathlib import Path"
+      },
+      {
+        "line": 12,
+        "text": "from typing import Any"
+      },
+      {
+        "line": 13,
+        "text": "from urllib.parse import quote, urlsplit, urlunsplit"
+      },
+      {
+        "line": 14,
+        "text": ""
+      },
+      {
+        "line": 15,
+        "text": "from src.runtime.ids import stable_id"
+      },
+      {
+        "line": 16,
+        "text": ""
+      },
+      {
+        "line": 17,
+        "text": ""
+      },
+      {
+        "line": 18,
+        "text": "class RemoteBridgeRuntimeError(RuntimeError):"
+      },
+      {
+        "line": 19,
+        "text": "    \"\"\"Raised when a remote bridge request is invalid or unsafe.\"\"\""
+      },
+      {
+        "line": 20,
+        "text": ""
+      },
+      {
+        "line": 21,
+        "text": ""
+      },
+      {
+        "line": 22,
+        "text": "REMOTE_DEVICE_TTL_DAYS = 90"
+      },
+      {
+        "line": 23,
+        "text": "MAX_REMOTE_DEVICE_TTL_DAYS = 365"
+      },
+      {
+        "line": 24,
+        "text": "REMOTE_SESSION_TTL_HOURS = 24"
+      },
+      {
+        "line": 25,
+        "text": "MAX_REMOTE_SESSION_TTL_HOURS = 168"
+      },
+      {
+        "line": 26,
+        "text": "MAX_REMOTE_ATTACHMENTS = 20"
+      },
+      {
+        "line": 27,
+        "text": "MAX_REMOTE_ATTACHMENT_BYTES = 5_000_000"
+      },
+      {
+        "line": 28,
+        "text": "MAX_REMOTE_ATTACHMENT_TOTAL_BYTES = 20_000_000"
+      },
+      {
+        "line": 29,
+        "text": "MAX_REMOTE_MESSAGE_CHARS = 100_000"
+      },
+      {
+        "line": 30,
+        "text": "MAX_REMOTE_MESSAGE_ID_CHARS = 128"
+      },
+      {
+        "line": 31,
+        "text": "MAX_REMOTE_ATTACHMENT_NAME_CHARS = 160"
+      },
+      {
+        "line": 32,
+        "text": "MAX_REMOTE_PATH_SEGMENT_CHARS = 96"
+      },
+      {
+        "line": 33,
+        "text": "MAX_REMOTE_ATTACHMENT_BASE64_CHARS = ((MAX_REMOTE_ATTACHMENT_BYTES + 2) // 3) * 4"
+      },
+      {
+        "line": 34,
+        "text": "SUPPORTED_INLINE_IMAGE_TYPES = {"
+      },
+      {
+        "line": 35,
+        "text": "    \"image/gif\","
+      },
+      {
+        "line": 36,
+        "text": "    \"image/jpeg\","
+      },
+      {
+        "line": 37,
+        "text": "    \"image/png\","
+      },
+      {
+        "line": 38,
+        "text": "    \"image/webp\","
+      },
+      {
+        "line": 39,
+        "text": "}"
+      },
+      {
+        "line": 40,
+        "text": "REMOTE_MODE_COMMANDS = {"
+      },
+      {
+        "line": 41,
+        "text": "    \"btw\","
+      },
+      {
+        "line": 42,
+        "text": "    \"clear\","
+      },
+      {
+        "line": 43,
+        "text": "    \"color\","
+      },
+      {
+        "line": 44,
+        "text": "    \"copy\","
+      },
+      {
+        "line": 45,
+        "text": "    \"cost\","
+      },
+      {
+        "line": 46,
+        "text": "    \"exit\","
+      },
+      {
+        "line": 47,
+        "text": "    \"feedback\","
+      },
+      {
+        "line": 48,
+        "text": "    \"help\","
+      },
+      {
+        "line": 49,
+        "text": "    \"keybindings\","
+      },
+      {
+        "line": 50,
+        "text": "    \"mobile\","
+      },
+      {
+        "line": 51,
+        "text": "    \"plan\","
+      },
+      {
+        "line": 52,
+        "text": "    \"session\","
+      },
+      {
+        "line": 53,
+        "text": "    \"status\","
+      },
+      {
+        "line": 54,
+        "text": "    \"statusline\","
+      },
+      {
+        "line": 55,
+        "text": "    \"stickers\","
+      },
+      {
+        "line": 56,
+        "text": "    \"theme\","
+      },
+      {
+        "line": 57,
+        "text": "    \"usage\","
+      },
+      {
+        "line": 58,
+        "text": "    \"vim\","
+      },
+      {
+        "line": 59,
+        "text": "}"
+      },
+      {
+        "line": 60,
+        "text": "BRIDGE_SAFE_LOCAL_COMMANDS = {"
+      },
+      {
+        "line": 61,
+        "text": "    \"clear\","
+      },
+      {
+        "line": 62,
+        "text": "    \"compact\","
+      },
+      {
+        "line": 63,
+        "text": "    \"cost\","
+      },
+      {
+        "line": 64,
+        "text": "    \"files\","
+      },
+      {
+        "line": 65,
+        "text": "    \"release-notes\","
+      },
+      {
+        "line": 66,
+        "text": "    \"summary\","
+      },
+      {
+        "line": 67,
+        "text": "}"
+      },
+      {
+        "line": 68,
+        "text": "SAFE_REMOTE_COMMANDS = BRIDGE_SAFE_LOCAL_COMMANDS | {"
+      },
+      {
+        "line": 69,
+        "text": "    \"context\","
+      },
+      {
+        "line": 70,
+        "text": "    \"help\","
+      },
+      {
+        "line": 71,
+        "text": "    \"ide\","
+      },
+      {
+        "line": 72,
+        "text": "    \"plan\","
+      },
+      {
+        "line": 73,
+        "text": "    \"remote\","
+      },
+      {
+        "line": 74,
+        "text": "    \"session\","
+      },
+      {
+        "line": 75,
+        "text": "    \"status\","
+      },
+      {
+        "line": 76,
+        "text": "    \"usage\","
+      },
+      {
+        "line": 77,
+        "text": "}"
+      },
+      {
+        "line": 78,
+        "text": "DEFAULT_ALLOWED_REMOTE_COMMANDS = tuple(sorted(SAFE_REMOTE_COMMANDS))"
+      },
+      {
+        "line": 79,
+        "text": "BLOCKED_REMOTE_COMMANDS = {"
+      },
+      {
+        "line": 80,
+        "text": "    \"add-dir\","
+      },
+      {
+        "line": 81,
+        "text": "    \"bash\","
+      },
+      {
+        "line": 82,
+        "text": "    \"config\","
+      },
+      {
+        "line": 83,
+        "text": "    \"debug-tool-call\","
+      },
+      {
+        "line": 84,
+        "text": "    \"doctor\","
+      },
+      {
+        "line": 85,
+        "text": "    \"edit\","
+      },
+      {
+        "line": 86,
+        "text": "    \"exit\","
+      },
+      {
+        "line": 87,
+        "text": "    \"install\","
+      },
+      {
+        "line": 88,
+        "text": "    \"install-github-app\","
+      },
+      {
+        "line": 89,
+        "text": "    \"install-client-app\","
+      },
+      {
+        "line": 90,
+        "text": "    \"mcp\","
+      },
+      {
+        "line": 91,
+        "text": "    \"plugin\","
+      },
+      {
+        "line": 92,
+        "text": "    \"powershell\","
+      },
+      {
+        "line": 93,
+        "text": "    \"reload-plugins\","
+      },
+      {
+        "line": 94,
+        "text": "    \"reset-limits\","
+      },
+      {
+        "line": 95,
+        "text": "    \"sandbox-toggle\","
+      },
+      {
+        "line": 96,
+        "text": "    \"shell\","
+      },
+      {
+        "line": 97,
+        "text": "    \"write\","
+      },
+      {
+        "line": 98,
+        "text": "}"
+      },
+      {
+        "line": 99,
+        "text": ""
+      },
+      {
+        "line": 100,
+        "text": ""
+      },
+      {
+        "line": 101,
+        "text": "@dataclass(frozen=True)"
+      },
+      {
+        "line": 102,
+        "text": "class TrustedDeviceEnrollment:"
+      },
+      {
+        "line": 103,
+        "text": "    \"\"\"One trusted remote device enrollment.\"\"\""
+      },
+      {
+        "line": 104,
+        "text": ""
+      },
+      {
+        "line": 105,
+        "text": "    device_id: str"
+      },
+      {
+        "line": 106,
+        "text": "    display_name: str"
+      },
+      {
+        "line": 107,
+        "text": "    token: str"
+      },
+      {
+        "line": 108,
+        "text": "    token_hash: str"
+      },
+      {
+        "line": 109,
+        "text": "    trusted: bool"
+      },
+      {
+        "line": 110,
+        "text": "    enrolled_at: datetime"
+      },
+      {
+        "line": 111,
+        "text": "    expires_at: datetime"
+      },
+      {
+        "line": 112,
+        "text": ""
+      },
+      {
+        "line": 113,
+        "text": "    def public_payload(self) -> dict[str, Any]:"
+      },
+      {
+        "line": 114,
+        "text": "        \"\"\"Return a JSON-compatible payload safe to return to the enrolling client.\"\"\""
+      },
+      {
+        "line": 115,
+        "text": "        return {"
+      },
+      {
+        "line": 116,
+        "text": "            \"device_id\": self.device_id,"
+      },
+      {
+        "line": 117,
+        "text": "            \"display_name\": self.display_name,"
+      },
+      {
+        "line": 118,
+        "text": "            \"trusted\": self.trusted,"
+      },
+      {
+        "line": 119,
+        "text": "            \"token\": self.token,"
+      },
+      {
+        "line": 120,
+        "text": "            \"enrolled_at\": self.enrolled_at.isoformat(),"
+      },
+      {
+        "line": 121,
+        "text": "            \"expires_at\": self.expires_at.isoformat(),"
+      },
+      {
+        "line": 122,
+        "text": "        }"
+      },
+      {
+        "line": 123,
+        "text": ""
+      },
+      {
+        "line": 124,
+        "text": "    def stored_payload(self) -> dict[str, Any]:"
+      },
+      {
+        "line": 125,
+        "text": "        \"\"\"Return a JSON-compatible persisted payload without the raw token.\"\"\""
+      },
+      {
+        "line": 126,
+        "text": "        return {"
+      },
+      {
+        "line": 127,
+        "text": "            \"device_id\": self.device_id,"
+      },
+      {
+        "line": 128,
+        "text": "            \"display_name\": self.display_name,"
+      },
+      {
+        "line": 129,
+        "text": "            \"trusted\": self.trusted,"
+      },
+      {
+        "line": 130,
+        "text": "            \"token_hash\": self.token_hash,"
+      },
+      {
+        "line": 131,
+        "text": "            \"enrolled_at\": self.enrolled_at.isoformat(),"
+      },
+      {
+        "line": 132,
+        "text": "            \"expires_at\": self.expires_at.isoformat(),"
+      },
+      {
+        "line": 133,
+        "text": "        }"
+      },
+      {
+        "line": 134,
+        "text": ""
+      },
+      {
+        "line": 135,
+        "text": ""
+      },
+      {
+        "line": 136,
+        "text": "@dataclass(frozen=True)"
+      },
+      {
+        "line": 137,
+        "text": "class RemoteSessionLink:"
+      },
+      {
+        "line": 138,
+        "text": "    \"\"\"Remote-control URL and QR payload for one session.\"\"\""
+      },
+      {
+        "line": 139,
+        "text": ""
+      },
+      {
+        "line": 140,
+        "text": "    link_id: str"
+      },
+      {
+        "line": 141,
+        "text": "    session_id: str"
+      },
+      {
+        "line": 142,
+        "text": "    device_id: str | None"
+      },
+      {
+        "line": 143,
+        "text": "    remote_url: str"
+      },
+      {
+        "line": 144,
+        "text": "    qr_payload: str"
+      },
+      {
+        "line": 145,
+        "text": "    bridge_token_required: bool"
+      },
+      {
+        "line": 146,
+        "text": "    allowed_commands: tuple[str, ...]"
+      },
+      {
+        "line": 147,
+        "text": "    created_at: datetime"
+      },
+      {
+        "line": 148,
+        "text": "    expires_at: datetime"
+      },
+      {
+        "line": 149,
+        "text": ""
+      },
+      {
+        "line": 150,
+        "text": "    def as_json(self) -> dict[str, Any]:"
+      },
+      {
+        "line": 151,
+        "text": "        \"\"\"Return a JSON-compatible remote session link.\"\"\""
+      },
+      {
+        "line": 152,
+        "text": "        return {"
+      },
+      {
+        "line": 153,
+        "text": "            \"link_id\": self.link_id,"
+      },
+      {
+        "line": 154,
+        "text": "            \"session_id\": self.session_id,"
+      },
+      {
+        "line": 155,
+        "text": "            \"device_id\": self.device_id,"
+      },
+      {
+        "line": 156,
+        "text": "            \"remote_url\": self.remote_url,"
+      },
+      {
+        "line": 157,
+        "text": "            \"qr_payload\": self.qr_payload,"
+      },
+      {
+        "line": 158,
+        "text": "            \"qr_payload_format\": \"url\","
+      },
+      {
+        "line": 159,
+        "text": "            \"qr_payload_metadata\": {"
+      },
+      {
+        "line": 160,
+        "text": "                \"session_id\": self.session_id,"
+      },
+      {
+        "line": 161,
+        "text": "                \"device_id\": self.device_id,"
+      },
+      {
+        "line": 162,
+        "text": "                \"remote_url\": self.remote_url,"
+      },
+      {
+        "line": 163,
+        "text": "                \"expires_at\": self.expires_at.isoformat(),"
+      },
+      {
+        "line": 164,
+        "text": "                \"token_header\": \"X-Codigote-Trusted-Device-Token\","
+      },
+      {
+        "line": 165,
+        "text": "            },"
+      },
+      {
+        "line": 166,
+        "text": "            \"bridge_token_required\": self.bridge_token_required,"
+      },
+      {
+        "line": 167,
+        "text": "            \"allowed_commands\": list(self.allowed_commands),"
+      },
+      {
+        "line": 168,
+        "text": "            \"created_at\": self.created_at.isoformat(),"
+      },
+      {
+        "line": 169,
+        "text": "            \"expires_at\": self.expires_at.isoformat(),"
+      },
+      {
+        "line": 170,
+        "text": "        }"
+      },
+      {
+        "line": 171,
+        "text": ""
+      },
+      {
+        "line": 172,
+        "text": ""
+      },
+      {
+        "line": 173,
+        "text": "@dataclass(frozen=True)"
+      },
+      {
+        "line": 174,
+        "text": "class BridgeCommandDecision:"
+      },
+      {
+        "line": 175,
+        "text": "    \"\"\"Remote command safety decision.\"\"\""
+      },
+      {
+        "line": 176,
+        "text": ""
+      },
+      {
+        "line": 177,
+        "text": "    allowed: bool"
+      },
+      {
+        "line": 178,
+        "text": "    command_name: str | None"
+      },
+      {
+        "line": 179,
+        "text": "    reason: str"
+      },
+      {
+        "line": 180,
+        "text": "    risk_tier: str"
+      },
+      {
+        "line": 181,
+        "text": ""
+      },
+      {
+        "line": 182,
+        "text": "    def as_json(self) -> dict[str, Any]:"
+      },
+      {
+        "line": 183,
+        "text": "        \"\"\"Return a JSON-compatible command decision.\"\"\""
+      },
+      {
+        "line": 184,
+        "text": "        return {"
+      },
+      {
+        "line": 185,
+        "text": "            \"allowed\": self.allowed,"
+      },
+      {
+        "line": 186,
+        "text": "            \"command_name\": self.command_name,"
+      },
+      {
+        "line": 187,
+        "text": "            \"reason\": self.reason,"
+      },
+      {
+        "line": 188,
+        "text": "            \"risk_tier\": self.risk_tier,"
+      },
+      {
+        "line": 189,
+        "text": "        }"
+      },
+      {
+        "line": 190,
+        "text": ""
+      },
+      {
+        "line": 191,
+        "text": ""
+      },
+      {
+        "line": 192,
+        "text": "@dataclass(frozen=True)"
+      },
+      {
+        "line": 193,
+        "text": "class RemoteAttachmentRecord:"
+      },
+      {
+        "line": 194,
+        "text": "    \"\"\"One inbound remote attachment written to disk.\"\"\""
+      },
+      {
+        "line": 195,
+        "text": ""
+      },
+      {
+        "line": 196,
+        "text": "    attachment_id: str"
+      },
+      {
+        "line": 197,
+        "text": "    file_name: str"
+      },
+      {
+        "line": 198,
+        "text": "    content_type: str"
+      },
+      {
+        "line": 199,
+        "text": "    path: str"
+      },
+      {
+        "line": 200,
+        "text": "    size_bytes: int"
+      },
+      {
+        "line": 201,
+        "text": ""
+      },
+      {
+        "line": 202,
+        "text": "    def as_json(self) -> dict[str, Any]:"
+      },
+      {
+        "line": 203,
+        "text": "        \"\"\"Return a JSON-compatible attachment record.\"\"\""
+      },
+      {
+        "line": 204,
+        "text": "        return {"
+      },
+      {
+        "line": 205,
+        "text": "            \"attachment_id\": self.attachment_id,"
+      },
+      {
+        "line": 206,
+        "text": "            \"file_name\": self.file_name,"
+      },
+      {
+        "line": 207,
+        "text": "            \"content_type\": self.content_type,"
+      },
+      {
+        "line": 208,
+        "text": "            \"path\": self.path,"
+      },
+      {
+        "line": 209,
+        "text": "            \"size_bytes\": self.size_bytes,"
+      },
+      {
+        "line": 210,
+        "text": "        }"
+      },
+      {
+        "line": 211,
+        "text": ""
+      },
+      {
+        "line": 212,
+        "text": ""
+      },
+      {
+        "line": 213,
+        "text": "@dataclass(frozen=True)"
+      },
+      {
+        "line": 214,
+        "text": "class _PreparedRemoteAttachment:"
+      },
+      {
+        "line": 215,
+        "text": "    \"\"\"Decoded attachment payload ready for a single write pass.\"\"\""
+      },
+      {
+        "line": 216,
+        "text": ""
+      },
+      {
+        "line": 217,
+        "text": "    attachment_id: str"
+      },
+      {
+        "line": 218,
+        "text": "    file_name: str"
+      },
+      {
+        "line": 219,
+        "text": "    content_type: str"
+      },
+      {
+        "line": 220,
+        "text": "    data: bytes"
+      },
+      {
+        "line": 221,
+        "text": ""
+      },
+      {
+        "line": 222,
+        "text": ""
+      },
+      {
+        "line": 223,
+        "text": "@dataclass(frozen=True)"
+      },
+      {
+        "line": 224,
+        "text": "class InboundBridgeMessage:"
+      },
+      {
+        "line": 225,
+        "text": "    \"\"\"Normalized inbound message from a remote client.\"\"\""
+      },
+      {
+        "line": 226,
+        "text": ""
+      },
+      {
+        "line": 227,
+        "text": "    message_id: str"
+      },
+      {
+        "line": 228,
+        "text": "    prompt: str"
+      },
+      {
+        "line": 229,
+        "text": "    original_prompt: str"
+      },
+      {
+        "line": 230,
+        "text": "    attachments: tuple[RemoteAttachmentRecord, ...]"
+      },
+      {
+        "line": 231,
+        "text": "    command_decision: BridgeCommandDecision"
+      },
+      {
+        "line": 232,
+        "text": "    received_at: datetime"
+      },
+      {
+        "line": 233,
+        "text": ""
+      },
+      {
+        "line": 234,
+        "text": "    def as_json(self) -> dict[str, Any]:"
+      },
+      {
+        "line": 235,
+        "text": "        \"\"\"Return a JSON-compatible inbound message.\"\"\""
+      },
+      {
+        "line": 236,
+        "text": "        return {"
+      },
+      {
+        "line": 237,
+        "text": "            \"message_id\": self.message_id,"
+      },
+      {
+        "line": 238,
+        "text": "            \"prompt\": self.prompt,"
+      },
+      {
+        "line": 239,
+        "text": "            \"original_prompt\": self.original_prompt,"
+      },
+      {
+        "line": 240,
+        "text": "            \"attachments\": [item.as_json() for item in self.attachments],"
+      },
+      {
+        "line": 241,
+        "text": "            \"command_decision\": self.command_decision.as_json(),"
+      },
+      {
+        "line": 242,
+        "text": "            \"received_at\": self.received_at.isoformat(),"
+      },
+      {
+        "line": 243,
+        "text": "        }"
+      },
+      {
+        "line": 244,
+        "text": ""
+      },
+      {
+        "line": 245,
+        "text": ""
+      },
+      {
+        "line": 246,
+        "text": "class RemoteBridgeRuntime:"
+      },
+      {
+        "line": 247,
+        "text": "    \"\"\"Normalize remote bridge trust, links, messages, attachments, and commands.\"\"\""
+      },
+      {
+        "line": 248,
+        "text": ""
+      },
+      {
+        "line": 249,
+        "text": "    def capabilities(self) -> dict[str, Any]:"
+      },
+      {
+        "line": 250,
+        "text": "        \"\"\"Return the client-neutral remote bridge capability contract.\"\"\""
+      },
+      {
+        "line": 251,
+        "text": "        return {"
+      },
+      {
+        "line": 252,
+        "text": "            \"trusted_devices\": {"
+      },
+      {
+        "line": 253,
+        "text": "                \"supported\": True,"
+      },
+      {
+        "line": 254,
+        "text": "                \"token_header\": \"X-Codigote-Trusted-Device-Token\","
+      },
+      {
+        "line": 255,
+        "text": "                \"default_ttl_days\": REMOTE_DEVICE_TTL_DAYS,"
+      },
+      {
+        "line": 256,
+        "text": "                \"max_ttl_days\": MAX_REMOTE_DEVICE_TTL_DAYS,"
+      },
+      {
+        "line": 257,
+        "text": "                \"verify_endpoint\": \"/v1/sessions/{session_id}/remote/devices/verify\","
+      },
+      {
+        "line": 258,
+        "text": "                \"heartbeat_endpoint\": \"/v1/sessions/{session_id}/remote/devices/heartbeat\","
+      },
+      {
+        "line": 259,
+        "text": "            },"
+      },
+      {
+        "line": 260,
+        "text": "            \"session_links\": {"
+      },
+      {
+        "line": 261,
+        "text": "                \"supported\": True,"
+      },
+      {
+        "line": 262,
+        "text": "                \"default_ttl_hours\": REMOTE_SESSION_TTL_HOURS,"
+      },
+      {
+        "line": 263,
+        "text": "                \"max_ttl_hours\": MAX_REMOTE_SESSION_TTL_HOURS,"
+      },
+      {
+        "line": 264,
+        "text": "                \"url_shape\": \"/remote/sessions/{session_id}\","
+      },
+      {
+        "line": 265,
+        "text": "                \"qr_payload\": \"remote_url\","
+      },
+      {
+        "line": 266,
+        "text": "                \"qr_payload_formats\": [\"url\", \"metadata\"],"
+      },
+      {
+        "line": 267,
+        "text": "                \"verify_endpoint\": \"/v1/sessions/{session_id}/remote/session-link/verify\","
+      },
+      {
+        "line": 268,
+        "text": "            },"
+      },
+      {
+        "line": 269,
+        "text": "            \"inbound_messages\": {"
+      },
+      {
+        "line": 270,
+        "text": "                \"supported\": True,"
+      },
+      {
+        "line": 271,
+        "text": "                \"history_endpoint\": \"/v1/sessions/{session_id}/remote/messages\","
+      },
+      {
+        "line": 272,
+        "text": "                \"polling\": \"GET with after_cursor and limit\","
+      },
+      {
+        "line": 273,
+        "text": "                \"max_message_chars\": MAX_REMOTE_MESSAGE_CHARS,"
+      },
+      {
+        "line": 274,
+        "text": "                \"content_shapes\": ["
+      },
+      {
+        "line": 275,
+        "text": "                    \"prompt\","
+      },
+      {
+        "line": 276,
+        "text": "                    \"text\","
+      },
+      {
+        "line": 277,
+        "text": "                    \"content\","
+      },
+      {
+        "line": 278,
+        "text": "                    \"message.content\","
+      },
+      {
+        "line": 279,
+        "text": "                    \"Anthropic text/image content blocks\","
+      },
+      {
+        "line": 280,
+        "text": "                    \"OpenAI input_text/input_image content blocks\","
+      },
+      {
+        "line": 281,
+        "text": "                ],"
+      },
+      {
+        "line": 282,
+        "text": "                \"max_message_id_chars\": MAX_REMOTE_MESSAGE_ID_CHARS,"
+      },
+      {
+        "line": 283,
+        "text": "            },"
+      },
+      {
+        "line": 284,
+        "text": "            \"inbound_attachments\": {"
+      },
+      {
+        "line": 285,
+        "text": "                \"supported\": True,"
+      },
+      {
+        "line": 286,
+        "text": "                \"max_attachment_bytes\": MAX_REMOTE_ATTACHMENT_BYTES,"
+      },
+      {
+        "line": 287,
+        "text": "                \"max_attachments\": MAX_REMOTE_ATTACHMENTS,"
+      },
+      {
+        "line": 288,
+        "text": "                \"max_total_attachment_bytes\": MAX_REMOTE_ATTACHMENT_TOTAL_BYTES,"
+      },
+      {
+        "line": 289,
+        "text": "                \"fields\": [\"attachments\", \"inline content image blocks\"],"
+      },
+      {
+        "line": 290,
+        "text": "                \"encoding\": \"base64\","
+      },
+      {
+        "line": 291,
+        "text": "                \"storage\": \".codigote/remote_uploads/{session_id}\","
+      },
+      {
+        "line": 292,
+        "text": "            },"
+      },
+      {
+        "line": 293,
+        "text": "            \"command_filtering\": {"
+      },
+      {
+        "line": 294,
+        "text": "                \"supported\": True,"
+      },
+      {
+        "line": 295,
+        "text": "                \"safe_commands\": sorted(SAFE_REMOTE_COMMANDS),"
+      },
+      {
+        "line": 296,
+        "text": "                \"remote_mode_commands\": sorted(REMOTE_MODE_COMMANDS),"
+      },
+      {
+        "line": 297,
+        "text": "                \"bridge_safe_local_commands\": sorted(BRIDGE_SAFE_LOCAL_COMMANDS),"
+      },
+      {
+        "line": 298,
+        "text": "                \"blocked_commands\": sorted(BLOCKED_REMOTE_COMMANDS),"
+      },
+      {
+        "line": 299,
+        "text": "            },"
+      },
+      {
+        "line": 300,
+        "text": "        }"
+      },
+      {
+        "line": 301,
+        "text": ""
+      },
+      {
+        "line": 302,
+        "text": "    def enroll_trusted_device("
+      },
+      {
+        "line": 303,
+        "text": "        self,"
+      },
+      {
+        "line": 304,
+        "text": "        *,"
+      },
+      {
+        "line": 305,
+        "text": "        display_name: str,"
+      },
+      {
+        "line": 306,
+        "text": "        trusted: bool = True,"
+      },
+      {
+        "line": 307,
+        "text": "        ttl_days: int = REMOTE_DEVICE_TTL_DAYS,"
+      },
+      {
+        "line": 308,
+        "text": "    ) -> TrustedDeviceEnrollment:"
+      },
+      {
+        "line": 309,
+        "text": "        \"\"\"Create a trusted-device token enrollment.\"\"\""
+      },
+      {
+        "line": 310,
+        "text": "        normalized_display_name = display_name.strip() or \"Remote device\""
+      },
+      {
+        "line": 311,
+        "text": "        now = datetime.now(timezone.utc)"
+      },
+      {
+        "line": 312,
+        "text": "        token = secrets.token_urlsafe(32)"
+      },
+      {
+        "line": 313,
+        "text": "        device_id = stable_id("
+      },
+      {
+        "line": 314,
+        "text": "            \"remote_device\","
+      },
+      {
+        "line": 315,
+        "text": "            {"
+      },
+      {
+        "line": 316,
+        "text": "                \"display_name\": normalized_display_name,"
+      },
+      {
+        "line": 317,
+        "text": "                \"token\": token,"
+      },
+      {
+        "line": 318,
+        "text": "                \"enrolled_at\": now.isoformat(),"
+      },
+      {
+        "line": 319,
+        "text": "            },"
+      },
+      {
+        "line": 320,
+        "text": "        )"
+      },
+      {
+        "line": 321,
+        "text": "        return TrustedDeviceEnrollment("
+      },
+      {
+        "line": 322,
+        "text": "            device_id=device_id,"
+      },
+      {
+        "line": 323,
+        "text": "            display_name=normalized_display_name,"
+      },
+      {
+        "line": 324,
+        "text": "            token=token,"
+      },
+      {
+        "line": 325,
+        "text": "            token_hash=self.hash_device_token(token),"
+      },
+      {
+        "line": 326,
+        "text": "            trusted=trusted,"
+      },
+      {
+        "line": 327,
+        "text": "            enrolled_at=now,"
+      },
+      {
+        "line": 328,
+        "text": "            expires_at=now + timedelta(days=_bounded_ttl(ttl_days, MAX_REMOTE_DEVICE_TTL_DAYS)),"
+      },
+      {
+        "line": 329,
+        "text": "        )"
+      },
+      {
+        "line": 330,
+        "text": ""
+      },
+      {
+        "line": 331,
+        "text": "    def verify_trusted_device("
+      },
+      {
+        "line": 332,
+        "text": "        self,"
+      },
+      {
+        "line": 333,
+        "text": "        *,"
+      },
+      {
+        "line": 334,
+        "text": "        token: str | None,"
+      },
+      {
+        "line": 335,
+        "text": "        device_records: tuple[dict[str, Any], ...],"
+      },
+      {
+        "line": 336,
+        "text": "    ) -> dict[str, Any]:"
+      },
+      {
+        "line": 337,
+        "text": "        \"\"\"Verify a trusted device token against stored enrollment payloads.\"\"\""
+      },
+      {
+        "line": 338,
+        "text": "        if token is None or not token.strip():"
+      },
+      {
+        "line": 339,
+        "text": "            raise RemoteBridgeRuntimeError(\"Trusted device token is required.\")"
+      },
+      {
+        "line": 340,
+        "text": "        token_hash = self.hash_device_token(token)"
+      },
+      {
+        "line": 341,
+        "text": "        now = datetime.now(timezone.utc)"
+      },
+      {
+        "line": 342,
+        "text": "        for record in self.latest_device_records(device_records):"
+      },
+      {
+        "line": 343,
+        "text": "            if record.get(\"trusted\") is not True:"
+      },
+      {
+        "line": 344,
+        "text": "                continue"
+      },
+      {
+        "line": 345,
+        "text": "            stored_hash = record.get(\"token_hash\")"
+      },
+      {
+        "line": 346,
+        "text": "            if not isinstance(stored_hash, str):"
+      },
+      {
+        "line": 347,
+        "text": "                continue"
+      },
+      {
+        "line": 348,
+        "text": "            if not hmac.compare_digest(stored_hash, token_hash):"
+      },
+      {
+        "line": 349,
+        "text": "                continue"
+      },
+      {
+        "line": 350,
+        "text": "            expires_at = _parse_datetime(str(record.get(\"expires_at\", \"\")))"
+      },
+      {
+        "line": 351,
+        "text": "            if expires_at <= now:"
+      },
+      {
+        "line": 352,
+        "text": "                raise RemoteBridgeRuntimeError(\"Trusted device token has expired.\")"
+      },
+      {
+        "line": 353,
+        "text": "            return record"
+      },
+      {
+        "line": 354,
+        "text": "        raise RemoteBridgeRuntimeError(\"Trusted device token is not recognized.\")"
+      },
+      {
+        "line": 355,
+        "text": ""
+      },
+      {
+        "line": 356,
+        "text": "    def revoke_trusted_device("
+      },
+      {
+        "line": 357,
+        "text": "        self,"
+      },
+      {
+        "line": 358,
+        "text": "        *,"
+      },
+      {
+        "line": 359,
+        "text": "        device_id: str,"
+      },
+      {
+        "line": 360,
+        "text": "        device_records: tuple[dict[str, Any], ...],"
+      },
+      {
+        "line": 361,
+        "text": "    ) -> dict[str, Any]:"
+      },
+      {
+        "line": 362,
+        "text": "        \"\"\"Return a revoked device payload from a stored enrollment.\"\"\""
+      },
+      {
+        "line": 363,
+        "text": "        for record in device_records:"
+      },
+      {
+        "line": 364,
+        "text": "            if record.get(\"device_id\") == device_id:"
+      },
+      {
+        "line": 365,
+        "text": "                revoked = dict(record)"
+      },
+      {
+        "line": 366,
+        "text": "                revoked[\"trusted\"] = False"
+      },
+      {
+        "line": 367,
+        "text": "                revoked[\"revoked_at\"] = datetime.now(timezone.utc).isoformat()"
+      },
+      {
+        "line": 368,
+        "text": "                return revoked"
+      },
+      {
+        "line": 369,
+        "text": "        raise RemoteBridgeRuntimeError(f\"Unknown trusted device: {device_id}\")"
+      },
+      {
+        "line": 370,
+        "text": ""
+      },
+      {
+        "line": 371,
+        "text": "    def trusted_device_heartbeat("
+      },
+      {
+        "line": 372,
+        "text": "        self,"
+      },
+      {
+        "line": 373,
+        "text": "        *,"
+      },
+      {
+        "line": 374,
+        "text": "        token: str | None,"
+      },
+      {
+        "line": 375,
+        "text": "        device_records: tuple[dict[str, Any], ...],"
+      },
+      {
+        "line": 376,
+        "text": "        client_adapter: str | None = None,"
+      },
+      {
+        "line": 377,
+        "text": "        client_version: str | None = None,"
+      },
+      {
+        "line": 378,
+        "text": "    ) -> dict[str, Any]:"
+      },
+      {
+        "line": 379,
+        "text": "        \"\"\"Verify a trusted device and return heartbeat metadata for persistence.\"\"\""
+      },
+      {
+        "line": 380,
+        "text": "        device = self.verify_trusted_device(token=token, device_records=device_records)"
+      },
+      {
+        "line": 381,
+        "text": "        seen_at = datetime.now(timezone.utc)"
+      },
+      {
+        "line": 382,
+        "text": "        return {"
+      },
+      {
+        "line": 383,
+        "text": "            \"device_id\": device[\"device_id\"],"
+      },
+      {
+        "line": 384,
+        "text": "            \"trusted\": True,"
+      },
+      {
+        "line": 385,
+        "text": "            \"client_adapter\": client_adapter,"
+      },
+      {
+        "line": 386,
+        "text": "            \"client_version\": client_version,"
+      },
+      {
+        "line": 387,
+        "text": "            \"seen_at\": seen_at.isoformat(),"
+      },
+      {
+        "line": 388,
+        "text": "            \"expires_at\": device.get(\"expires_at\"),"
+      },
+      {
+        "line": 389,
+        "text": "        }"
+      },
+      {
+        "line": 390,
+        "text": ""
+      },
+      {
+        "line": 391,
+        "text": "    def create_session_link("
+      },
+      {
+        "line": 392,
+        "text": "        self,"
+      },
+      {
+        "line": 393,
+        "text": "        *,"
+      },
+      {
+        "line": 394,
+        "text": "        session_id: str,"
+      },
+      {
+        "line": 395,
+        "text": "        public_base_url: str,"
+      },
+      {
+        "line": 396,
+        "text": "        device_id: str | None = None,"
+      },
+      {
+        "line": 397,
+        "text": "        ttl_hours: int = REMOTE_SESSION_TTL_HOURS,"
+      },
+      {
+        "line": 398,
+        "text": "        allowed_commands: tuple[str, ...] = DEFAULT_ALLOWED_REMOTE_COMMANDS,"
+      },
+      {
+        "line": 399,
+        "text": "    ) -> RemoteSessionLink:"
+      },
+      {
+        "line": 400,
+        "text": "        \"\"\"Create a remote-control URL and QR payload.\"\"\""
+      },
+      {
+        "line": 401,
+        "text": "        base = _public_base_url(public_base_url)"
+      },
+      {
+        "line": 402,
+        "text": "        normalized_allowed_commands = _normalize_allowed_commands(allowed_commands)"
+      },
+      {
+        "line": 403,
+        "text": "        quoted_session = quote(session_id, safe=\"\")"
+      },
+      {
+        "line": 404,
+        "text": "        remote_url = f\"{base}/remote/sessions/{quoted_session}\""
+      },
+      {
+        "line": 405,
+        "text": "        if device_id is not None:"
+      },
+      {
+        "line": 406,
+        "text": "            remote_url = f\"{remote_url}?device_id={quote(device_id, safe='')}\""
+      },
+      {
+        "line": 407,
+        "text": "        created_at = datetime.now(timezone.utc)"
+      },
+      {
+        "line": 408,
+        "text": "        expires_at = created_at + timedelta("
+      },
+      {
+        "line": 409,
+        "text": "            hours=_bounded_ttl(ttl_hours, MAX_REMOTE_SESSION_TTL_HOURS)"
+      },
+      {
+        "line": 410,
+        "text": "        )"
+      },
+      {
+        "line": 411,
+        "text": "        link_id = stable_id("
+      },
+      {
+        "line": 412,
+        "text": "            \"remote_session_link\","
+      },
+      {
+        "line": 413,
+        "text": "            {"
+      },
+      {
+        "line": 414,
+        "text": "                \"session_id\": session_id,"
+      },
+      {
+        "line": 415,
+        "text": "                \"device_id\": device_id,"
+      },
+      {
+        "line": 416,
+        "text": "                \"remote_url\": remote_url,"
+      },
+      {
+        "line": 417,
+        "text": "                \"created_at\": created_at.isoformat(),"
+      },
+      {
+        "line": 418,
+        "text": "            },"
+      },
+      {
+        "line": 419,
+        "text": "        )"
+      },
+      {
+        "line": 420,
+        "text": "        return RemoteSessionLink("
+      },
+      {
+        "line": 421,
+        "text": "            link_id=link_id,"
+      },
+      {
+        "line": 422,
+        "text": "            session_id=session_id,"
+      },
+      {
+        "line": 423,
+        "text": "            device_id=device_id,"
+      },
+      {
+        "line": 424,
+        "text": "            remote_url=remote_url,"
+      },
+      {
+        "line": 425,
+        "text": "            qr_payload=remote_url,"
+      },
+      {
+        "line": 426,
+        "text": "            bridge_token_required=True,"
+      },
+      {
+        "line": 427,
+        "text": "            allowed_commands=normalized_allowed_commands,"
+      },
+      {
+        "line": 428,
+        "text": "            created_at=created_at,"
+      },
+      {
+        "line": 429,
+        "text": "            expires_at=expires_at,"
+      },
+      {
+        "line": 430,
+        "text": "        )"
+      },
+      {
+        "line": 431,
+        "text": ""
+      },
+      {
+        "line": 432,
+        "text": "    def verify_session_link("
+      },
+      {
+        "line": 433,
+        "text": "        self,"
+      },
+      {
+        "line": 434,
+        "text": "        *,"
+      },
+      {
+        "line": 435,
+        "text": "        session_id: str,"
+      },
+      {
+        "line": 436,
+        "text": "        session_link_records: tuple[dict[str, Any], ...],"
+      },
+      {
+        "line": 437,
+        "text": "        device_records: tuple[dict[str, Any], ...],"
+      },
+      {
+        "line": 438,
+        "text": "        device_token: str | None = None,"
+      },
+      {
+        "line": 439,
+        "text": "        link_id: str | None = None,"
+      },
+      {
+        "line": 440,
+        "text": "        device_id: str | None = None,"
+      },
+      {
+        "line": 441,
+        "text": "    ) -> dict[str, Any]:"
+      },
+      {
+        "line": 442,
+        "text": "        \"\"\"Verify that a remote session link is current and usable.\"\"\""
+      },
+      {
+        "line": 443,
+        "text": "        link = _latest_record(session_link_records) if link_id is None else None"
+      },
+      {
+        "line": 444,
+        "text": "        if link_id is not None:"
+      },
+      {
+        "line": 445,
+        "text": "            for record in session_link_records:"
+      },
+      {
+        "line": 446,
+        "text": "                if record.get(\"link_id\") == link_id:"
+      },
+      {
+        "line": 447,
+        "text": "                    link = record"
+      },
+      {
+        "line": 448,
+        "text": "                    break"
+      },
+      {
+        "line": 449,
+        "text": "        if link is None:"
+      },
+      {
+        "line": 450,
+        "text": "            raise RemoteBridgeRuntimeError(\"Remote session link is not recognized.\")"
+      },
+      {
+        "line": 451,
+        "text": "        if link.get(\"session_id\") != session_id:"
+      },
+      {
+        "line": 452,
+        "text": "            raise RemoteBridgeRuntimeError(\"Remote session link does not match this session.\")"
+      },
+      {
+        "line": 453,
+        "text": "        expires_at = _parse_datetime(str(link.get(\"expires_at\", \"\")))"
+      },
+      {
+        "line": 454,
+        "text": "        if expires_at <= datetime.now(timezone.utc):"
+      },
+      {
+        "line": 455,
+        "text": "            raise RemoteBridgeRuntimeError(\"Remote session link has expired.\")"
+      },
+      {
+        "line": 456,
+        "text": "        bridge_token_required = link.get(\"bridge_token_required\") is not False"
+      },
+      {
+        "line": 457,
+        "text": "        if bridge_token_required and (device_token is None or not device_token.strip()):"
+      },
+      {
+        "line": 458,
+        "text": "            raise RemoteBridgeRuntimeError(\"Trusted device token is required for this link.\")"
+      },
+      {
+        "line": 459,
+        "text": "        verified_device: dict[str, Any] | None = None"
+      },
+      {
+        "line": 460,
+        "text": "        if device_token is not None:"
+      },
+      {
+        "line": 461,
+        "text": "            verified_device = self.verify_trusted_device("
+      },
+      {
+        "line": 462,
+        "text": "                token=device_token,"
+      },
+      {
+        "line": 463,
+        "text": "                device_records=device_records,"
+      },
+      {
+        "line": 464,
+        "text": "            )"
+      },
+      {
+        "line": 465,
+        "text": "            link_device_id = link.get(\"device_id\")"
+      },
+      {
+        "line": 466,
+        "text": "            if isinstance(link_device_id, str) and link_device_id:"
+      },
+      {
+        "line": 467,
+        "text": "                if verified_device.get(\"device_id\") != link_device_id:"
+      },
+      {
+        "line": 468,
+        "text": "                    raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 469,
+        "text": "                        \"Trusted device token does not match remote session link.\""
+      },
+      {
+        "line": 470,
+        "text": "                    )"
+      },
+      {
+        "line": 471,
+        "text": "        if verified_device is None and device_id is not None:"
+      },
+      {
+        "line": 472,
+        "text": "            link_device_id = link.get(\"device_id\")"
+      },
+      {
+        "line": 473,
+        "text": "            if isinstance(link_device_id, str) and link_device_id and device_id != link_device_id:"
+      },
+      {
+        "line": 474,
+        "text": "                raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 475,
+        "text": "                    \"Trusted device id does not match remote session link.\""
+      },
+      {
+        "line": 476,
+        "text": "                )"
+      },
+      {
+        "line": 477,
+        "text": "        return {"
+      },
+      {
+        "line": 478,
+        "text": "            \"valid\": True,"
+      },
+      {
+        "line": 479,
+        "text": "            \"session_id\": session_id,"
+      },
+      {
+        "line": 480,
+        "text": "            \"link_id\": link.get(\"link_id\"),"
+      },
+      {
+        "line": 481,
+        "text": "            \"remote_url\": link.get(\"remote_url\"),"
+      },
+      {
+        "line": 482,
+        "text": "            \"device_id\": link.get(\"device_id\"),"
+      },
+      {
+        "line": 483,
+        "text": "            \"device_verified\": verified_device is not None,"
+      },
+      {
+        "line": 484,
+        "text": "            \"verified_device_id\": ("
+      },
+      {
+        "line": 485,
+        "text": "                verified_device.get(\"device_id\") if verified_device is not None else None"
+      },
+      {
+        "line": 486,
+        "text": "            ),"
+      },
+      {
+        "line": 487,
+        "text": "            \"bridge_token_required\": bridge_token_required,"
+      },
+      {
+        "line": 488,
+        "text": "            \"expires_at\": link.get(\"expires_at\"),"
+      },
+      {
+        "line": 489,
+        "text": "            \"allowed_commands\": list(_safe_stored_allowed_commands(link)),"
+      },
+      {
+        "line": 490,
+        "text": "        }"
+      },
+      {
+        "line": 491,
+        "text": ""
+      },
+      {
+        "line": 492,
+        "text": "    def remote_status("
+      },
+      {
+        "line": 493,
+        "text": "        self,"
+      },
+      {
+        "line": 494,
+        "text": "        *,"
+      },
+      {
+        "line": 495,
+        "text": "        session_id: str,"
+      },
+      {
+        "line": 496,
+        "text": "        device_records: tuple[dict[str, Any], ...],"
+      },
+      {
+        "line": 497,
+        "text": "        session_link_records: tuple[dict[str, Any], ...],"
+      },
+      {
+        "line": 498,
+        "text": "    ) -> dict[str, Any]:"
+      },
+      {
+        "line": 499,
+        "text": "        \"\"\"Return a remote bridge status snapshot for one session.\"\"\""
+      },
+      {
+        "line": 500,
+        "text": "        now = datetime.now(timezone.utc)"
+      },
+      {
+        "line": 501,
+        "text": "        latest_devices = self.latest_device_records(device_records)"
+      },
+      {
+        "line": 502,
+        "text": "        active_devices = ["
+      },
+      {
+        "line": 503,
+        "text": "            item"
+      },
+      {
+        "line": 504,
+        "text": "            for item in latest_devices"
+      },
+      {
+        "line": 505,
+        "text": "            if item.get(\"trusted\") is True"
+      },
+      {
+        "line": 506,
+        "text": "            and _parse_datetime(str(item.get(\"expires_at\", \"\"))) > now"
+      },
+      {
+        "line": 507,
+        "text": "        ]"
+      },
+      {
+        "line": 508,
+        "text": "        latest_link = _latest_record(session_link_records)"
+      },
+      {
+        "line": 509,
+        "text": "        safe_link: dict[str, Any] | None = None"
+      },
+      {
+        "line": 510,
+        "text": "        if latest_link is not None:"
+      },
+      {
+        "line": 511,
+        "text": "            safe_link = dict(latest_link)"
+      },
+      {
+        "line": 512,
+        "text": "            safe_link[\"allowed_commands\"] = list(_safe_stored_allowed_commands(safe_link))"
+      },
+      {
+        "line": 513,
+        "text": "        return {"
+      },
+      {
+        "line": 514,
+        "text": "            \"session_id\": session_id,"
+      },
+      {
+        "line": 515,
+        "text": "            \"remote_enabled\": len(active_devices) > 0,"
+      },
+      {
+        "line": 516,
+        "text": "            \"trusted_device_count\": len(latest_devices),"
+      },
+      {
+        "line": 517,
+        "text": "            \"active_trusted_device_count\": len(active_devices),"
+      },
+      {
+        "line": 518,
+        "text": "            \"active_device_ids\": ["
+      },
+      {
+        "line": 519,
+        "text": "                item[\"device_id\"]"
+      },
+      {
+        "line": 520,
+        "text": "                for item in active_devices"
+      },
+      {
+        "line": 521,
+        "text": "                if isinstance(item.get(\"device_id\"), str)"
+      },
+      {
+        "line": 522,
+        "text": "            ],"
+      },
+      {
+        "line": 523,
+        "text": "            \"latest_session_link\": safe_link,"
+      },
+      {
+        "line": 524,
+        "text": "            \"latest_session_link_valid\": ("
+      },
+      {
+        "line": 525,
+        "text": "                safe_link is not None"
+      },
+      {
+        "line": 526,
+        "text": "                and _parse_datetime(str(safe_link.get(\"expires_at\", \"\"))) > now"
+      },
+      {
+        "line": 527,
+        "text": "            ),"
+      },
+      {
+        "line": 528,
+        "text": "            \"capabilities\": self.capabilities(),"
+      },
+      {
+        "line": 529,
+        "text": "        }"
+      },
+      {
+        "line": 530,
+        "text": ""
+      },
+      {
+        "line": 531,
+        "text": "    def latest_device_records("
+      },
+      {
+        "line": 532,
+        "text": "        self, device_records: tuple[dict[str, Any], ...]"
+      },
+      {
+        "line": 533,
+        "text": "    ) -> list[dict[str, Any]]:"
+      },
+      {
+        "line": 534,
+        "text": "        \"\"\"Return latest trusted-device audit payloads by device id.\"\"\""
+      },
+      {
+        "line": 535,
+        "text": "        return _latest_records_by_key(device_records, key=\"device_id\")"
+      },
+      {
+        "line": 536,
+        "text": ""
+      },
+      {
+        "line": 537,
+        "text": "    def filter_remote_command(self, text: str) -> BridgeCommandDecision:"
+      },
+      {
+        "line": 538,
+        "text": "        \"\"\"Return whether a remote text command is bridge-safe.\"\"\""
+      },
+      {
+        "line": 539,
+        "text": "        stripped = text.strip()"
+      },
+      {
+        "line": 540,
+        "text": "        if not stripped:"
+      },
+      {
+        "line": 541,
+        "text": "            return BridgeCommandDecision("
+      },
+      {
+        "line": 542,
+        "text": "                allowed=False,"
+      },
+      {
+        "line": 543,
+        "text": "                command_name=None,"
+      },
+      {
+        "line": 544,
+        "text": "                reason=\"message is empty\","
+      },
+      {
+        "line": 545,
+        "text": "                risk_tier=\"invalid\","
+      },
+      {
+        "line": 546,
+        "text": "            )"
+      },
+      {
+        "line": 547,
+        "text": "        if not stripped.startswith(\"/\"):"
+      },
+      {
+        "line": 548,
+        "text": "            return BridgeCommandDecision("
+      },
+      {
+        "line": 549,
+        "text": "                allowed=True,"
+      },
+      {
+        "line": 550,
+        "text": "                command_name=None,"
+      },
+      {
+        "line": 551,
+        "text": "                reason=\"plain user message\","
+      },
+      {
+        "line": 552,
+        "text": "                risk_tier=\"low\","
+      },
+      {
+        "line": 553,
+        "text": "            )"
+      },
+      {
+        "line": 554,
+        "text": "        command_name = _command_name(stripped)"
+      },
+      {
+        "line": 555,
+        "text": "        if not command_name:"
+      },
+      {
+        "line": 556,
+        "text": "            return BridgeCommandDecision("
+      },
+      {
+        "line": 557,
+        "text": "                allowed=False,"
+      },
+      {
+        "line": 558,
+        "text": "                command_name=None,"
+      },
+      {
+        "line": 559,
+        "text": "                reason=\"slash command is empty\","
+      },
+      {
+        "line": 560,
+        "text": "                risk_tier=\"invalid\","
+      },
+      {
+        "line": 561,
+        "text": "            )"
+      },
+      {
+        "line": 562,
+        "text": "        if command_name in BLOCKED_REMOTE_COMMANDS:"
+      },
+      {
+        "line": 563,
+        "text": "            return BridgeCommandDecision("
+      },
+      {
+        "line": 564,
+        "text": "                allowed=False,"
+      },
+      {
+        "line": 565,
+        "text": "                command_name=command_name,"
+      },
+      {
+        "line": 566,
+        "text": "                reason=\"command is blocked for remote bridge clients\","
+      },
+      {
+        "line": 567,
+        "text": "                risk_tier=\"high\","
+      },
+      {
+        "line": 568,
+        "text": "            )"
+      },
+      {
+        "line": 569,
+        "text": "        if command_name not in SAFE_REMOTE_COMMANDS:"
+      },
+      {
+        "line": 570,
+        "text": "            return BridgeCommandDecision("
+      },
+      {
+        "line": 571,
+        "text": "                allowed=False,"
+      },
+      {
+        "line": 572,
+        "text": "                command_name=command_name,"
+      },
+      {
+        "line": 573,
+        "text": "                reason=\"command is not in the remote bridge allowlist\","
+      },
+      {
+        "line": 574,
+        "text": "                risk_tier=\"medium\","
+      },
+      {
+        "line": 575,
+        "text": "            )"
+      },
+      {
+        "line": 576,
+        "text": "        return BridgeCommandDecision("
+      },
+      {
+        "line": 577,
+        "text": "            allowed=True,"
+      },
+      {
+        "line": 578,
+        "text": "            command_name=command_name,"
+      },
+      {
+        "line": 579,
+        "text": "            reason=\"command is bridge-safe\","
+      },
+      {
+        "line": 580,
+        "text": "            risk_tier=\"low\","
+      },
+      {
+        "line": 581,
+        "text": "        )"
+      },
+      {
+        "line": 582,
+        "text": ""
+      },
+      {
+        "line": 583,
+        "text": "    def normalize_inbound_message("
+      },
+      {
+        "line": 584,
+        "text": "        self,"
+      },
+      {
+        "line": 585,
+        "text": "        *,"
+      },
+      {
+        "line": 586,
+        "text": "        session_id: str,"
+      },
+      {
+        "line": 587,
+        "text": "        workspace_ref: str,"
+      },
+      {
+        "line": 588,
+        "text": "        payload: dict[str, Any],"
+      },
+      {
+        "line": 589,
+        "text": "    ) -> InboundBridgeMessage:"
+      },
+      {
+        "line": 590,
+        "text": "        \"\"\"Normalize inbound remote text and attachments into a client message.\"\"\""
+      },
+      {
+        "line": 591,
+        "text": "        explicit_attachments = _attachment_payloads(payload)"
+      },
+      {
+        "line": 592,
+        "text": "        prompt, content_attachments = _content_from_payload("
+      },
+      {
+        "line": 593,
+        "text": "            payload,"
+      },
+      {
+        "line": 594,
+        "text": "            allow_empty=bool(explicit_attachments),"
+      },
+      {
+        "line": 595,
+        "text": "        )"
+      },
+      {
+        "line": 596,
+        "text": "        if len(prompt) > MAX_REMOTE_MESSAGE_CHARS:"
+      },
+      {
+        "line": 597,
+        "text": "            raise RemoteBridgeRuntimeError(\"Remote message exceeds maximum length.\")"
+      },
+      {
+        "line": 598,
+        "text": "        decision = ("
+      },
+      {
+        "line": 599,
+        "text": "            BridgeCommandDecision("
+      },
+      {
+        "line": 600,
+        "text": "                allowed=True,"
+      },
+      {
+        "line": 601,
+        "text": "                command_name=None,"
+      },
+      {
+        "line": 602,
+        "text": "                reason=\"attachment-only user message\","
+      },
+      {
+        "line": 603,
+        "text": "                risk_tier=\"low\","
+      },
+      {
+        "line": 604,
+        "text": "            )"
+      },
+      {
+        "line": 605,
+        "text": "            if not prompt and (explicit_attachments or content_attachments)"
+      },
+      {
+        "line": 606,
+        "text": "            else self.filter_remote_command(prompt)"
+      },
+      {
+        "line": 607,
+        "text": "        )"
+      },
+      {
+        "line": 608,
+        "text": "        if not decision.allowed:"
+      },
+      {
+        "line": 609,
+        "text": "            raise RemoteBridgeRuntimeError(decision.reason)"
+      },
+      {
+        "line": 610,
+        "text": "        attachments = self.resolve_inbound_attachments("
+      },
+      {
+        "line": 611,
+        "text": "            session_id=session_id,"
+      },
+      {
+        "line": 612,
+        "text": "            workspace_ref=workspace_ref,"
+      },
+      {
+        "line": 613,
+        "text": "            attachments=explicit_attachments + content_attachments,"
+      },
+      {
+        "line": 614,
+        "text": "        )"
+      },
+      {
+        "line": 615,
+        "text": "        attachment_refs = \" \".join(f'@\"{item.path}\"' for item in attachments)"
+      },
+      {
+        "line": 616,
+        "text": "        resolved_prompt = f\"{attachment_refs} {prompt}\".strip() if attachment_refs else prompt"
+      },
+      {
+        "line": 617,
+        "text": "        message_id = _optional_message_id(payload)"
+      },
+      {
+        "line": 618,
+        "text": "        if message_id is None:"
+      },
+      {
+        "line": 619,
+        "text": "            message_id = stable_id("
+      },
+      {
+        "line": 620,
+        "text": "                \"remote_message\","
+      },
+      {
+        "line": 621,
+        "text": "                {"
+      },
+      {
+        "line": 622,
+        "text": "                    \"session_id\": session_id,"
+      },
+      {
+        "line": 623,
+        "text": "                    \"prompt\": prompt,"
+      },
+      {
+        "line": 624,
+        "text": "                    \"attachments\": tuple(item.as_json() for item in attachments),"
+      },
+      {
+        "line": 625,
+        "text": "                },"
+      },
+      {
+        "line": 626,
+        "text": "            )"
+      },
+      {
+        "line": 627,
+        "text": "        return InboundBridgeMessage("
+      },
+      {
+        "line": 628,
+        "text": "            message_id=message_id,"
+      },
+      {
+        "line": 629,
+        "text": "            prompt=resolved_prompt,"
+      },
+      {
+        "line": 630,
+        "text": "            original_prompt=prompt,"
+      },
+      {
+        "line": 631,
+        "text": "            attachments=attachments,"
+      },
+      {
+        "line": 632,
+        "text": "            command_decision=decision,"
+      },
+      {
+        "line": 633,
+        "text": "            received_at=datetime.now(timezone.utc),"
+      },
+      {
+        "line": 634,
+        "text": "        )"
+      },
+      {
+        "line": 635,
+        "text": ""
+      },
+      {
+        "line": 636,
+        "text": "    def resolve_inbound_attachments("
+      },
+      {
+        "line": 637,
+        "text": "        self,"
+      },
+      {
+        "line": 638,
+        "text": "        *,"
+      },
+      {
+        "line": 639,
+        "text": "        session_id: str,"
+      },
+      {
+        "line": 640,
+        "text": "        workspace_ref: str,"
+      },
+      {
+        "line": 641,
+        "text": "        attachments: tuple[dict[str, Any], ...],"
+      },
+      {
+        "line": 642,
+        "text": "    ) -> tuple[RemoteAttachmentRecord, ...]:"
+      },
+      {
+        "line": 643,
+        "text": "        \"\"\"Write base64 inbound attachments under the session workspace.\"\"\""
+      },
+      {
+        "line": 644,
+        "text": "        if not attachments:"
+      },
+      {
+        "line": 645,
+        "text": "            return ()"
+      },
+      {
+        "line": 646,
+        "text": "        prepared = _prepare_attachments(session_id=session_id, attachments=attachments)"
+      },
+      {
+        "line": 647,
+        "text": "        root = _workspace_root(workspace_ref)"
+      },
+      {
+        "line": 648,
+        "text": "        upload_dir = root / \".codigote\" / \"remote_uploads\" / _safe_path_segment(session_id)"
+      },
+      {
+        "line": 649,
+        "text": "        upload_dir.mkdir(parents=True, exist_ok=True)"
+      },
+      {
+        "line": 650,
+        "text": "        records: list[RemoteAttachmentRecord] = []"
+      },
+      {
+        "line": 651,
+        "text": "        for item in prepared:"
+      },
+      {
+        "line": 652,
+        "text": "            target = upload_dir / ("
+      },
+      {
+        "line": 653,
+        "text": "                f\"{_safe_path_segment(item.attachment_id)[:16]}\""
+      },
+      {
+        "line": 654,
+        "text": "                f\"-{_bytes_hash(item.data)[:12]}-{item.file_name}\""
+      },
+      {
+        "line": 655,
+        "text": "            )"
+      },
+      {
+        "line": 656,
+        "text": "            target.write_bytes(item.data)"
+      },
+      {
+        "line": 657,
+        "text": "            records.append("
+      },
+      {
+        "line": 658,
+        "text": "                RemoteAttachmentRecord("
+      },
+      {
+        "line": 659,
+        "text": "                    attachment_id=item.attachment_id,"
+      },
+      {
+        "line": 660,
+        "text": "                    file_name=item.file_name,"
+      },
+      {
+        "line": 661,
+        "text": "                    content_type=item.content_type,"
+      },
+      {
+        "line": 662,
+        "text": "                    path=str(target),"
+      },
+      {
+        "line": 663,
+        "text": "                    size_bytes=len(item.data),"
+      },
+      {
+        "line": 664,
+        "text": "                )"
+      },
+      {
+        "line": 665,
+        "text": "            )"
+      },
+      {
+        "line": 666,
+        "text": "        return tuple(records)"
+      },
+      {
+        "line": 667,
+        "text": ""
+      },
+      {
+        "line": 668,
+        "text": "    @staticmethod"
+      },
+      {
+        "line": 669,
+        "text": "    def hash_device_token(token: str) -> str:"
+      },
+      {
+        "line": 670,
+        "text": "        \"\"\"Return a stable hash for a raw trusted-device token.\"\"\""
+      },
+      {
+        "line": 671,
+        "text": "        return hashlib.sha256(token.encode(\"utf-8\")).hexdigest()"
+      },
+      {
+        "line": 672,
+        "text": ""
+      },
+      {
+        "line": 673,
+        "text": ""
+      },
+      {
+        "line": 674,
+        "text": "def _content_from_payload("
+      },
+      {
+        "line": 675,
+        "text": "    payload: dict[str, Any],"
+      },
+      {
+        "line": 676,
+        "text": "    *,"
+      },
+      {
+        "line": 677,
+        "text": "    allow_empty: bool = False,"
+      },
+      {
+        "line": 678,
+        "text": ") -> tuple[str, tuple[dict[str, Any], ...]]:"
+      },
+      {
+        "line": 679,
+        "text": "    \"\"\"Extract text and inline attachments from an inbound remote payload.\"\"\""
+      },
+      {
+        "line": 680,
+        "text": "    message_type = payload.get(\"type\")"
+      },
+      {
+        "line": 681,
+        "text": "    if message_type is not None and message_type != \"user\":"
+      },
+      {
+        "line": 682,
+        "text": "        raise RemoteBridgeRuntimeError(\"Inbound remote message must be a user message.\")"
+      },
+      {
+        "line": 683,
+        "text": "    if \"prompt\" in payload:"
+      },
+      {
+        "line": 684,
+        "text": "        prompt = payload[\"prompt\"]"
+      },
+      {
+        "line": 685,
+        "text": "    elif \"text\" in payload:"
+      },
+      {
+        "line": 686,
+        "text": "        prompt = payload[\"text\"]"
+      },
+      {
+        "line": 687,
+        "text": "    elif \"content\" in payload:"
+      },
+      {
+        "line": 688,
+        "text": "        prompt = payload[\"content\"]"
+      },
+      {
+        "line": 689,
+        "text": "    elif isinstance(payload.get(\"message\"), dict) and \"content\" in payload[\"message\"]:"
+      },
+      {
+        "line": 690,
+        "text": "        prompt = payload[\"message\"][\"content\"]"
+      },
+      {
+        "line": 691,
+        "text": "    else:"
+      },
+      {
+        "line": 692,
+        "text": "        raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 693,
+        "text": "            \"Inbound remote message must include prompt, text, or content.\""
+      },
+      {
+        "line": 694,
+        "text": "        )"
+      },
+      {
+        "line": 695,
+        "text": "    if isinstance(prompt, str):"
+      },
+      {
+        "line": 696,
+        "text": "        if not prompt.strip() and not allow_empty:"
+      },
+      {
+        "line": 697,
+        "text": "            raise RemoteBridgeRuntimeError(\"Inbound remote message is empty.\")"
+      },
+      {
+        "line": 698,
+        "text": "        return prompt.strip(), ()"
+      },
+      {
+        "line": 699,
+        "text": "    if isinstance(prompt, list):"
+      },
+      {
+        "line": 700,
+        "text": "        text_parts: list[str] = []"
+      },
+      {
+        "line": 701,
+        "text": "        inline_attachments: list[dict[str, Any]] = []"
+      },
+      {
+        "line": 702,
+        "text": "        for block in prompt:"
+      },
+      {
+        "line": 703,
+        "text": "            if ("
+      },
+      {
+        "line": 704,
+        "text": "                isinstance(block, dict)"
+      },
+      {
+        "line": 705,
+        "text": "                and block.get(\"type\") in {\"text\", \"input_text\"}"
+      },
+      {
+        "line": 706,
+        "text": "                and isinstance(block.get(\"text\"), str)"
+      },
+      {
+        "line": 707,
+        "text": "            ):"
+      },
+      {
+        "line": 708,
+        "text": "                text_parts.append(str(block[\"text\"]))"
+      },
+      {
+        "line": 709,
+        "text": "            elif isinstance(block, dict) and block.get(\"type\") == \"image\":"
+      },
+      {
+        "line": 710,
+        "text": "                inline_attachments.append(_image_block_attachment(block, len(inline_attachments)))"
+      },
+      {
+        "line": 711,
+        "text": "            elif isinstance(block, dict) and block.get(\"type\") == \"input_image\":"
+      },
+      {
+        "line": 712,
+        "text": "                inline_attachments.append("
+      },
+      {
+        "line": 713,
+        "text": "                    _input_image_block_attachment(block, len(inline_attachments))"
+      },
+      {
+        "line": 714,
+        "text": "                )"
+      },
+      {
+        "line": 715,
+        "text": "            else:"
+      },
+      {
+        "line": 716,
+        "text": "                raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 717,
+        "text": "                    \"Inbound remote content contains an unsupported block.\""
+      },
+      {
+        "line": 718,
+        "text": "                )"
+      },
+      {
+        "line": 719,
+        "text": "        text = \"\\n\".join(text_parts).strip()"
+      },
+      {
+        "line": 720,
+        "text": "        if text or inline_attachments:"
+      },
+      {
+        "line": 721,
+        "text": "            return text, tuple(inline_attachments)"
+      },
+      {
+        "line": 722,
+        "text": "    raise RemoteBridgeRuntimeError(\"Inbound remote content must include text.\")"
+      },
+      {
+        "line": 723,
+        "text": ""
+      },
+      {
+        "line": 724,
+        "text": ""
+      },
+      {
+        "line": 725,
+        "text": "def _image_block_attachment(block: dict[str, Any], index: int) -> dict[str, Any]:"
+      },
+      {
+        "line": 726,
+        "text": "    \"\"\"Convert an Anthropic-style base64 image block to an attachment payload.\"\"\""
+      },
+      {
+        "line": 727,
+        "text": "    source = block.get(\"source\")"
+      },
+      {
+        "line": 728,
+        "text": "    if not isinstance(source, dict):"
+      },
+      {
+        "line": 729,
+        "text": "        raise RemoteBridgeRuntimeError(\"Image content block must include a source object.\")"
+      },
+      {
+        "line": 730,
+        "text": "    if source.get(\"type\") != \"base64\":"
+      },
+      {
+        "line": 731,
+        "text": "        raise RemoteBridgeRuntimeError(\"Only base64 image content blocks are supported.\")"
+      },
+      {
+        "line": 732,
+        "text": "    data = source.get(\"data\")"
+      },
+      {
+        "line": 733,
+        "text": "    if not isinstance(data, str) or not data:"
+      },
+      {
+        "line": 734,
+        "text": "        raise RemoteBridgeRuntimeError(\"Image content block must include base64 data.\")"
+      },
+      {
+        "line": 735,
+        "text": "    content_type = _image_content_type("
+      },
+      {
+        "line": 736,
+        "text": "        source.get(\"media_type\")"
+      },
+      {
+        "line": 737,
+        "text": "        or source.get(\"mediaType\")"
+      },
+      {
+        "line": 738,
+        "text": "        or _detect_image_content_type_from_base64(data)"
+      },
+      {
+        "line": 739,
+        "text": "    )"
+      },
+      {
+        "line": 740,
+        "text": "    extension = _image_extension(content_type)"
+      },
+      {
+        "line": 741,
+        "text": "    attachment_id = str("
+      },
+      {
+        "line": 742,
+        "text": "        block.get(\"id\")"
+      },
+      {
+        "line": 743,
+        "text": "        or stable_id(\"remote_image\", {\"index\": index, \"data_hash\": _bytes_hash(data.encode())})"
+      },
+      {
+        "line": 744,
+        "text": "    )"
+      },
+      {
+        "line": 745,
+        "text": "    return {"
+      },
+      {
+        "line": 746,
+        "text": "        \"attachment_id\": attachment_id,"
+      },
+      {
+        "line": 747,
+        "text": "        \"file_name\": f\"inline-image-{index + 1}.{extension}\","
+      },
+      {
+        "line": 748,
+        "text": "        \"content_type\": content_type,"
+      },
+      {
+        "line": 749,
+        "text": "        \"data\": data,"
+      },
+      {
+        "line": 750,
+        "text": "    }"
+      },
+      {
+        "line": 751,
+        "text": ""
+      },
+      {
+        "line": 752,
+        "text": ""
+      },
+      {
+        "line": 753,
+        "text": "def _input_image_block_attachment(block: dict[str, Any], index: int) -> dict[str, Any]:"
+      },
+      {
+        "line": 754,
+        "text": "    \"\"\"Convert an OpenAI-style data URL image block to an attachment payload.\"\"\""
+      },
+      {
+        "line": 755,
+        "text": "    image_url = block.get(\"image_url\")"
+      },
+      {
+        "line": 756,
+        "text": "    if isinstance(image_url, dict):"
+      },
+      {
+        "line": 757,
+        "text": "        image_url = image_url.get(\"url\")"
+      },
+      {
+        "line": 758,
+        "text": "    if not isinstance(image_url, str) or not image_url:"
+      },
+      {
+        "line": 759,
+        "text": "        raise RemoteBridgeRuntimeError(\"Input image content block must include an image_url.\")"
+      },
+      {
+        "line": 760,
+        "text": "    content_type, data = _data_url_image(image_url)"
+      },
+      {
+        "line": 761,
+        "text": "    extension = _image_extension(content_type)"
+      },
+      {
+        "line": 762,
+        "text": "    attachment_id = str("
+      },
+      {
+        "line": 763,
+        "text": "        block.get(\"id\")"
+      },
+      {
+        "line": 764,
+        "text": "        or stable_id(\"remote_image\", {\"index\": index, \"data_hash\": _bytes_hash(data.encode())})"
+      },
+      {
+        "line": 765,
+        "text": "    )"
+      },
+      {
+        "line": 766,
+        "text": "    return {"
+      },
+      {
+        "line": 767,
+        "text": "        \"attachment_id\": attachment_id,"
+      },
+      {
+        "line": 768,
+        "text": "        \"file_name\": f\"inline-image-{index + 1}.{extension}\","
+      },
+      {
+        "line": 769,
+        "text": "        \"content_type\": content_type,"
+      },
+      {
+        "line": 770,
+        "text": "        \"data\": data,"
+      },
+      {
+        "line": 771,
+        "text": "    }"
+      },
+      {
+        "line": 772,
+        "text": ""
+      },
+      {
+        "line": 773,
+        "text": ""
+      },
+      {
+        "line": 774,
+        "text": "def _data_url_image(value: str) -> tuple[str, str]:"
+      },
+      {
+        "line": 775,
+        "text": "    \"\"\"Return media type and base64 data from an inline image data URL.\"\"\""
+      },
+      {
+        "line": 776,
+        "text": "    header, separator, data = value.strip().partition(\",\")"
+      },
+      {
+        "line": 777,
+        "text": "    normalized_header = header.lower()"
+      },
+      {
+        "line": 778,
+        "text": "    if ("
+      },
+      {
+        "line": 779,
+        "text": "        separator != \",\""
+      },
+      {
+        "line": 780,
+        "text": "        or not normalized_header.startswith(\"data:\")"
+      },
+      {
+        "line": 781,
+        "text": "        or not normalized_header.endswith(\";base64\")"
+      },
+      {
+        "line": 782,
+        "text": "    ):"
+      },
+      {
+        "line": 783,
+        "text": "        raise RemoteBridgeRuntimeError(\"Input image content block must use a base64 data URL.\")"
+      },
+      {
+        "line": 784,
+        "text": "    content_type = _image_content_type("
+      },
+      {
+        "line": 785,
+        "text": "        normalized_header.removeprefix(\"data:\").removesuffix(\";base64\")"
+      },
+      {
+        "line": 786,
+        "text": "    )"
+      },
+      {
+        "line": 787,
+        "text": "    if not data:"
+      },
+      {
+        "line": 788,
+        "text": "        raise RemoteBridgeRuntimeError(\"Image content block must include base64 data.\")"
+      },
+      {
+        "line": 789,
+        "text": "    return content_type, data"
+      },
+      {
+        "line": 790,
+        "text": ""
+      },
+      {
+        "line": 791,
+        "text": ""
+      },
+      {
+        "line": 792,
+        "text": "def _image_content_type(value: Any) -> str:"
+      },
+      {
+        "line": 793,
+        "text": "    \"\"\"Return a normalized supported image content type.\"\"\""
+      },
+      {
+        "line": 794,
+        "text": "    if not isinstance(value, str):"
+      },
+      {
+        "line": 795,
+        "text": "        raise RemoteBridgeRuntimeError(\"Image content block media type must be image/*.\")"
+      },
+      {
+        "line": 796,
+        "text": "    content_type = value.strip().lower()"
+      },
+      {
+        "line": 797,
+        "text": "    if not content_type.startswith(\"image/\"):"
+      },
+      {
+        "line": 798,
+        "text": "        raise RemoteBridgeRuntimeError(\"Image content block media type must be image/*.\")"
+      },
+      {
+        "line": 799,
+        "text": "    if content_type not in SUPPORTED_INLINE_IMAGE_TYPES:"
+      },
+      {
+        "line": 800,
+        "text": "        raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 801,
+        "text": "            \"Image content block media type must be png, jpeg, gif, or webp.\""
+      },
+      {
+        "line": 802,
+        "text": "        )"
+      },
+      {
+        "line": 803,
+        "text": "    return content_type"
+      },
+      {
+        "line": 804,
+        "text": ""
+      },
+      {
+        "line": 805,
+        "text": ""
+      },
+      {
+        "line": 806,
+        "text": "def _attachment_payloads(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:"
+      },
+      {
+        "line": 807,
+        "text": "    \"\"\"Extract attachment payloads from the bridge client fields.\"\"\""
+      },
+      {
+        "line": 808,
+        "text": "    value = payload.get(\"attachments\", ())"
+      },
+      {
+        "line": 809,
+        "text": "    if value is None:"
+      },
+      {
+        "line": 810,
+        "text": "        return ()"
+      },
+      {
+        "line": 811,
+        "text": "    if not isinstance(value, list | tuple):"
+      },
+      {
+        "line": 812,
+        "text": "        raise RemoteBridgeRuntimeError(\"attachments must be an array.\")"
+      },
+      {
+        "line": 813,
+        "text": "    attachments: list[dict[str, Any]] = []"
+      },
+      {
+        "line": 814,
+        "text": "    for item in value:"
+      },
+      {
+        "line": 815,
+        "text": "        if not isinstance(item, dict):"
+      },
+      {
+        "line": 816,
+        "text": "            raise RemoteBridgeRuntimeError(\"attachments must contain objects.\")"
+      },
+      {
+        "line": 817,
+        "text": "        attachments.append(dict(item))"
+      },
+      {
+        "line": 818,
+        "text": "    return tuple(attachments)"
+      },
+      {
+        "line": 819,
+        "text": ""
+      },
+      {
+        "line": 820,
+        "text": ""
+      },
+      {
+        "line": 821,
+        "text": "def _prepare_attachments("
+      },
+      {
+        "line": 822,
+        "text": "    *,"
+      },
+      {
+        "line": 823,
+        "text": "    session_id: str,"
+      },
+      {
+        "line": 824,
+        "text": "    attachments: tuple[dict[str, Any], ...],"
+      },
+      {
+        "line": 825,
+        "text": ") -> tuple[_PreparedRemoteAttachment, ...]:"
+      },
+      {
+        "line": 826,
+        "text": "    \"\"\"Decode and validate all attachments before writing any files.\"\"\""
+      },
+      {
+        "line": 827,
+        "text": "    if len(attachments) > MAX_REMOTE_ATTACHMENTS:"
+      },
+      {
+        "line": 828,
+        "text": "        raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 829,
+        "text": "            f\"Remote messages support at most {MAX_REMOTE_ATTACHMENTS} attachments.\""
+      },
+      {
+        "line": 830,
+        "text": "        )"
+      },
+      {
+        "line": 831,
+        "text": "    prepared: list[_PreparedRemoteAttachment] = []"
+      },
+      {
+        "line": 832,
+        "text": "    total_bytes = 0"
+      },
+      {
+        "line": 833,
+        "text": "    for item in attachments:"
+      },
+      {
+        "line": 834,
+        "text": "        file_name = _safe_file_name(str(item.get(\"file_name\") or \"attachment\"))"
+      },
+      {
+        "line": 835,
+        "text": "        content_type = _content_type(item.get(\"content_type\"))"
+      },
+      {
+        "line": 836,
+        "text": "        raw_data = _attachment_bytes(item)"
+      },
+      {
+        "line": 837,
+        "text": "        if len(raw_data) > MAX_REMOTE_ATTACHMENT_BYTES:"
+      },
+      {
+        "line": 838,
+        "text": "            raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 839,
+        "text": "                f\"Attachment exceeds {MAX_REMOTE_ATTACHMENT_BYTES} bytes.\""
+      },
+      {
+        "line": 840,
+        "text": "            )"
+      },
+      {
+        "line": 841,
+        "text": "        total_bytes += len(raw_data)"
+      },
+      {
+        "line": 842,
+        "text": "        if total_bytes > MAX_REMOTE_ATTACHMENT_TOTAL_BYTES:"
+      },
+      {
+        "line": 843,
+        "text": "            raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 844,
+        "text": "                f\"Attachments exceed {MAX_REMOTE_ATTACHMENT_TOTAL_BYTES} total bytes.\""
+      },
+      {
+        "line": 845,
+        "text": "            )"
+      },
+      {
+        "line": 846,
+        "text": "        prepared.append("
+      },
+      {
+        "line": 847,
+        "text": "            _PreparedRemoteAttachment("
+      },
+      {
+        "line": 848,
+        "text": "                attachment_id=_attachment_id("
+      },
+      {
+        "line": 849,
+        "text": "                    session_id=session_id,"
+      },
+      {
+        "line": 850,
+        "text": "                    item=item,"
+      },
+      {
+        "line": 851,
+        "text": "                    file_name=file_name,"
+      },
+      {
+        "line": 852,
+        "text": "                    data=raw_data,"
+      },
+      {
+        "line": 853,
+        "text": "                ),"
+      },
+      {
+        "line": 854,
+        "text": "                file_name=file_name,"
+      },
+      {
+        "line": 855,
+        "text": "                content_type=content_type,"
+      },
+      {
+        "line": 856,
+        "text": "                data=raw_data,"
+      },
+      {
+        "line": 857,
+        "text": "            )"
+      },
+      {
+        "line": 858,
+        "text": "        )"
+      },
+      {
+        "line": 859,
+        "text": "    return tuple(prepared)"
+      },
+      {
+        "line": 860,
+        "text": ""
+      },
+      {
+        "line": 861,
+        "text": ""
+      },
+      {
+        "line": 862,
+        "text": "def _attachment_id("
+      },
+      {
+        "line": 863,
+        "text": "    *,"
+      },
+      {
+        "line": 864,
+        "text": "    session_id: str,"
+      },
+      {
+        "line": 865,
+        "text": "    item: dict[str, Any],"
+      },
+      {
+        "line": 866,
+        "text": "    file_name: str,"
+      },
+      {
+        "line": 867,
+        "text": "    data: bytes,"
+      },
+      {
+        "line": 868,
+        "text": ") -> str:"
+      },
+      {
+        "line": 869,
+        "text": "    \"\"\"Return a bounded stable attachment id.\"\"\""
+      },
+      {
+        "line": 870,
+        "text": "    raw_attachment_id = item.get(\"attachment_id\")"
+      },
+      {
+        "line": 871,
+        "text": "    if raw_attachment_id is not None and raw_attachment_id != \"\":"
+      },
+      {
+        "line": 872,
+        "text": "        if not isinstance(raw_attachment_id, str):"
+      },
+      {
+        "line": 873,
+        "text": "            raise RemoteBridgeRuntimeError(\"attachment_id must be text.\")"
+      },
+      {
+        "line": 874,
+        "text": "        attachment_id = raw_attachment_id.strip()"
+      },
+      {
+        "line": 875,
+        "text": "        if attachment_id:"
+      },
+      {
+        "line": 876,
+        "text": "            return _safe_path_segment(attachment_id)"
+      },
+      {
+        "line": 877,
+        "text": "    return stable_id("
+      },
+      {
+        "line": 878,
+        "text": "        \"remote_attachment\","
+      },
+      {
+        "line": 879,
+        "text": "        {"
+      },
+      {
+        "line": 880,
+        "text": "            \"session\": session_id,"
+      },
+      {
+        "line": 881,
+        "text": "            \"file_name\": file_name,"
+      },
+      {
+        "line": 882,
+        "text": "            \"data_hash\": _bytes_hash(data),"
+      },
+      {
+        "line": 883,
+        "text": "        },"
+      },
+      {
+        "line": 884,
+        "text": "    )"
+      },
+      {
+        "line": 885,
+        "text": ""
+      },
+      {
+        "line": 886,
+        "text": ""
+      },
+      {
+        "line": 887,
+        "text": "def _attachment_bytes(payload: dict[str, Any]) -> bytes:"
+      },
+      {
+        "line": 888,
+        "text": "    \"\"\"Decode attachment bytes from the canonical base64 field.\"\"\""
+      },
+      {
+        "line": 889,
+        "text": "    data = payload.get(\"data\")"
+      },
+      {
+        "line": 890,
+        "text": "    if not isinstance(data, str) or not data:"
+      },
+      {
+        "line": 891,
+        "text": "        raise RemoteBridgeRuntimeError(\"Attachment data must be base64 text.\")"
+      },
+      {
+        "line": 892,
+        "text": "    if len(data) > MAX_REMOTE_ATTACHMENT_BASE64_CHARS:"
+      },
+      {
+        "line": 893,
+        "text": "        raise RemoteBridgeRuntimeError(f\"Attachment exceeds {MAX_REMOTE_ATTACHMENT_BYTES} bytes.\")"
+      },
+      {
+        "line": 894,
+        "text": "    try:"
+      },
+      {
+        "line": 895,
+        "text": "        return base64.b64decode(data, validate=True)"
+      },
+      {
+        "line": 896,
+        "text": "    except (binascii.Error, ValueError) as error:"
+      },
+      {
+        "line": 897,
+        "text": "        raise RemoteBridgeRuntimeError(\"Attachment data is not valid base64.\") from error"
+      },
+      {
+        "line": 898,
+        "text": ""
+      },
+      {
+        "line": 899,
+        "text": ""
+      },
+      {
+        "line": 900,
+        "text": "def _content_type(value: Any) -> str:"
+      },
+      {
+        "line": 901,
+        "text": "    \"\"\"Return a conservative attachment content type.\"\"\""
+      },
+      {
+        "line": 902,
+        "text": "    if not isinstance(value, str):"
+      },
+      {
+        "line": 903,
+        "text": "        return \"application/octet-stream\""
+      },
+      {
+        "line": 904,
+        "text": "    normalized = value.strip().lower()"
+      },
+      {
+        "line": 905,
+        "text": "    if not normalized:"
+      },
+      {
+        "line": 906,
+        "text": "        return \"application/octet-stream\""
+      },
+      {
+        "line": 907,
+        "text": "    if not re.fullmatch(r\"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*\", normalized):"
+      },
+      {
+        "line": 908,
+        "text": "        return \"application/octet-stream\""
+      },
+      {
+        "line": 909,
+        "text": "    return normalized[:255]"
+      },
+      {
+        "line": 910,
+        "text": ""
+      },
+      {
+        "line": 911,
+        "text": ""
+      },
+      {
+        "line": 912,
+        "text": "def _optional_message_id(payload: dict[str, Any]) -> str | None:"
+      },
+      {
+        "line": 913,
+        "text": "    \"\"\"Return a bounded client message id when one is provided.\"\"\""
+      },
+      {
+        "line": 914,
+        "text": "    raw_message_id = payload.get(\"message_id\")"
+      },
+      {
+        "line": 915,
+        "text": "    if raw_message_id is None or raw_message_id == \"\":"
+      },
+      {
+        "line": 916,
+        "text": "        return None"
+      },
+      {
+        "line": 917,
+        "text": "    if not isinstance(raw_message_id, str):"
+      },
+      {
+        "line": 918,
+        "text": "        raise RemoteBridgeRuntimeError(\"message_id must be text.\")"
+      },
+      {
+        "line": 919,
+        "text": "    message_id = raw_message_id.strip()"
+      },
+      {
+        "line": 920,
+        "text": "    if not message_id:"
+      },
+      {
+        "line": 921,
+        "text": "        return None"
+      },
+      {
+        "line": 922,
+        "text": "    if len(message_id) > MAX_REMOTE_MESSAGE_ID_CHARS:"
+      },
+      {
+        "line": 923,
+        "text": "        raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 924,
+        "text": "            f\"message_id exceeds {MAX_REMOTE_MESSAGE_ID_CHARS} characters.\""
+      },
+      {
+        "line": 925,
+        "text": "        )"
+      },
+      {
+        "line": 926,
+        "text": "    return message_id"
+      },
+      {
+        "line": 927,
+        "text": ""
+      },
+      {
+        "line": 928,
+        "text": ""
+      },
+      {
+        "line": 929,
+        "text": "def _detect_image_content_type_from_base64(data: str) -> str:"
+      },
+      {
+        "line": 930,
+        "text": "    \"\"\"Detect common image media types from base64 magic bytes.\"\"\""
+      },
+      {
+        "line": 931,
+        "text": "    try:"
+      },
+      {
+        "line": 932,
+        "text": "        prefix = base64.b64decode(data[:64], validate=False)"
+      },
+      {
+        "line": 933,
+        "text": "    except (binascii.Error, ValueError):"
+      },
+      {
+        "line": 934,
+        "text": "        return \"image/png\""
+      },
+      {
+        "line": 935,
+        "text": "    if prefix.startswith(b\"\\x89PNG\\r\\n\\x1a\\n\"):"
+      },
+      {
+        "line": 936,
+        "text": "        return \"image/png\""
+      },
+      {
+        "line": 937,
+        "text": "    if prefix.startswith(b\"\\xff\\xd8\\xff\"):"
+      },
+      {
+        "line": 938,
+        "text": "        return \"image/jpeg\""
+      },
+      {
+        "line": 939,
+        "text": "    if prefix.startswith((b\"GIF87a\", b\"GIF89a\")):"
+      },
+      {
+        "line": 940,
+        "text": "        return \"image/gif\""
+      },
+      {
+        "line": 941,
+        "text": "    if prefix.startswith(b\"RIFF\") and prefix[8:12] == b\"WEBP\":"
+      },
+      {
+        "line": 942,
+        "text": "        return \"image/webp\""
+      },
+      {
+        "line": 943,
+        "text": "    return \"image/png\""
+      },
+      {
+        "line": 944,
+        "text": ""
+      },
+      {
+        "line": 945,
+        "text": ""
+      },
+      {
+        "line": 946,
+        "text": "def _image_extension(content_type: str) -> str:"
+      },
+      {
+        "line": 947,
+        "text": "    \"\"\"Return a conservative extension for a supported image media type.\"\"\""
+      },
+      {
+        "line": 948,
+        "text": "    if content_type not in SUPPORTED_INLINE_IMAGE_TYPES:"
+      },
+      {
+        "line": 949,
+        "text": "        raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 950,
+        "text": "            \"Image content block media type must be png, jpeg, gif, or webp.\""
+      },
+      {
+        "line": 951,
+        "text": "        )"
+      },
+      {
+        "line": 952,
+        "text": "    if content_type == \"image/jpeg\":"
+      },
+      {
+        "line": 953,
+        "text": "        return \"jpg\""
+      },
+      {
+        "line": 954,
+        "text": "    if content_type == \"image/gif\":"
+      },
+      {
+        "line": 955,
+        "text": "        return \"gif\""
+      },
+      {
+        "line": 956,
+        "text": "    if content_type == \"image/webp\":"
+      },
+      {
+        "line": 957,
+        "text": "        return \"webp\""
+      },
+      {
+        "line": 958,
+        "text": "    return \"png\""
+      },
+      {
+        "line": 959,
+        "text": ""
+      },
+      {
+        "line": 960,
+        "text": ""
+      },
+      {
+        "line": 961,
+        "text": "def _command_name(text: str) -> str:"
+      },
+      {
+        "line": 962,
+        "text": "    \"\"\"Extract a normalized slash command name.\"\"\""
+      },
+      {
+        "line": 963,
+        "text": "    parts = text[1:].split(maxsplit=1)"
+      },
+      {
+        "line": 964,
+        "text": "    if not parts:"
+      },
+      {
+        "line": 965,
+        "text": "        return \"\""
+      },
+      {
+        "line": 966,
+        "text": "    token = parts[0]"
+      },
+      {
+        "line": 967,
+        "text": "    return token.split(\":\", maxsplit=1)[0].strip().lower()"
+      },
+      {
+        "line": 968,
+        "text": ""
+      },
+      {
+        "line": 969,
+        "text": ""
+      },
+      {
+        "line": 970,
+        "text": "def _public_base_url(value: str) -> str:"
+      },
+      {
+        "line": 971,
+        "text": "    \"\"\"Normalize a public base URL used for remote session links.\"\"\""
+      },
+      {
+        "line": 972,
+        "text": "    stripped = value.strip().rstrip(\"/\")"
+      },
+      {
+        "line": 973,
+        "text": "    parsed = urlsplit(stripped)"
+      },
+      {
+        "line": 974,
+        "text": "    if parsed.scheme not in {\"http\", \"https\"} or not parsed.netloc or parsed.hostname is None:"
+      },
+      {
+        "line": 975,
+        "text": "        raise RemoteBridgeRuntimeError("
+      },
+      {
+        "line": 976,
+        "text": "            \"public_base_url must be an absolute http:// or https:// URL.\""
+      },
+      {
+        "line": 977,
+        "text": "        )"
+      },
+      {
+        "line": 978,
+        "text": "    if parsed.username is not None or parsed.password is not None:"
+      },
+      {
+        "line": 979,
+        "text": "        raise RemoteBridgeRuntimeError(\"public_base_url must not include credentials.\")"
+      },
+      {
+        "line": 980,
+        "text": "    try:"
+      },
+      {
+        "line": 981,
+        "text": "        parsed.port"
+      },
+      {
+        "line": 982,
+        "text": "    except ValueError as error:"
+      },
+      {
+        "line": 983,
+        "text": "        raise RemoteBridgeRuntimeError(\"public_base_url includes an invalid port.\") from error"
+      },
+      {
+        "line": 984,
+        "text": "    if parsed.query or parsed.fragment:"
+      },
+      {
+        "line": 985,
+        "text": "        raise RemoteBridgeRuntimeError(\"public_base_url must not include a query or fragment.\")"
+      },
+      {
+        "line": 986,
+        "text": "    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip(\"/\"), \"\", \"\"))"
+      },
+      {
+        "line": 987,
+        "text": ""
+      },
+      {
+        "line": 988,
+        "text": ""
+      },
+      {
+        "line": 989,
+        "text": "def _bounded_ttl(value: int, maximum: int) -> int:"
+      },
+      {
+        "line": 990,
+        "text": "    \"\"\"Return a TTL clamped to bridge safety bounds.\"\"\""
+      },
+      {
+        "line": 991,
+        "text": "    if isinstance(value, bool) or not isinstance(value, int):"
+      },
+      {
+        "line": 992,
+        "text": "        raise RemoteBridgeRuntimeError(\"TTL values must be integers.\")"
+      },
+      {
+        "line": 993,
+        "text": "    return min(max(1, value), maximum)"
+      },
+      {
+        "line": 994,
+        "text": ""
+      },
+      {
+        "line": 995,
+        "text": ""
+      },
+      {
+        "line": 996,
+        "text": "def _normalize_allowed_commands(commands: tuple[str, ...]) -> tuple[str, ...]:"
+      },
+      {
+        "line": 997,
+        "text": "    \"\"\"Return a sorted, de-duplicated remote command allowlist.\"\"\""
+      },
+      {
+        "line": 998,
+        "text": "    normalized: set[str] = set()"
+      },
+      {
+        "line": 999,
+        "text": "    for command in commands:"
+      },
+      {
+        "line": 1000,
+        "text": "        if not isinstance(command, str):"
+      }
+    ],
+    "mime_type": "text/x-python",
+    "numbered_content": "1\t\"\"\"Client-neutral remote bridge controls for remote clients.\"\"\"\n2\t\n3\timport base64\n4\timport binascii\n5\timport hashlib\n6\timport hmac\n7\timport re\n8\timport secrets\n9\tfrom dataclasses import dataclass\n10\tfrom datetime import datetime, timedelta, timezone\n11\tfrom pathlib import Path\n12\tfrom typing import Any\n13\tfrom urllib.parse import quote, urlsplit, urlunsplit\n14\t\n15\tfrom src.runtime.ids import stable_id\n16\t\n17\t\n18\tclass RemoteBridgeRuntimeError(RuntimeError):\n19\t    \"\"\"Raised when a remote bridge request is invalid or unsafe.\"\"\"\n20\t\n21\t\n22\tREMOTE_DEVICE_TTL_DAYS = 90\n23\tMAX_REMOTE_DEVICE_TTL_DAYS = 365\n24\tREMOTE_SESSION_TTL_HOURS = 24\n25\tMAX_REMOTE_SESSION_TTL_HOURS = 168\n26\tMAX_REMOTE_ATTACHMENTS = 20\n27\tMAX_REMOTE_ATTACHMENT_BYTES = 5_000_000\n28\tMAX_REMOTE_ATTACHMENT_TOTAL_BYTES = 20_000_000\n29\tMAX_REMOTE_MESSAGE_CHARS = 100_000\n30\tMAX_REMOTE_MESSAGE_ID_CHARS = 128\n31\tMAX_REMOTE_ATTACHMENT_NAME_CHARS = 160\n32\tMAX_REMOTE_PATH_SEGMENT_CHARS = 96\n33\tMAX_REMOTE_ATTACHMENT_BASE64_CHARS = ((MAX_REMOTE_ATTACHMENT_BYTES + 2) // 3) * 4\n34\tSUPPORTED_INLINE_IMAGE_TYPES = {\n35\t    \"image/gif\",\n36\t    \"image/jpeg\",\n37\t    \"image/png\",\n38\t    \"image/webp\",\n39\t}\n40\tREMOTE_MODE_COMMANDS = {\n41\t    \"btw\",\n42\t    \"clear\",\n43\t    \"color\",\n44\t    \"copy\",\n45\t    \"cost\",\n46\t    \"exit\",\n47\t    \"feedback\",\n48\t    \"help\",\n49\t    \"keybindings\",\n50\t    \"mobile\",\n51\t    \"plan\",\n52\t    \"session\",\n53\t    \"status\",\n54\t    \"statusline\",\n55\t    \"stickers\",\n56\t    \"theme\",\n57\t    \"usage\",\n58\t    \"vim\",\n59\t}\n60\tBRIDGE_SAFE_LOCAL_COMMANDS = {\n61\t    \"clear\",\n62\t    \"compact\",\n63\t    \"cost\",\n64\t    \"files\",\n65\t    \"release-notes\",\n66\t    \"summary\",\n67\t}\n68\tSAFE_REMOTE_COMMANDS = BRIDGE_SAFE_LOCAL_COMMANDS | {\n69\t    \"context\",\n70\t    \"help\",\n71\t    \"ide\",\n72\t    \"plan\",\n73\t    \"remote\",\n74\t    \"session\",\n75\t    \"status\",\n76\t    \"usage\",\n77\t}\n78\tDEFAULT_ALLOWED_REMOTE_COMMANDS = tuple(sorted(SAFE_REMOTE_COMMANDS))\n79\tBLOCKED_REMOTE_COMMANDS = {\n80\t    \"add-dir\",\n81\t    \"bash\",\n82\t    \"config\",\n83\t    \"debug-tool-call\",\n84\t    \"doctor\",\n85\t    \"edit\",\n86\t    \"exit\",\n87\t    \"install\",\n88\t    \"install-github-app\",\n89\t    \"install-client-app\",\n90\t    \"mcp\",\n91\t    \"plugin\",\n92\t    \"powershell\",\n93\t    \"reload-plugins\",\n94\t    \"reset-limits\",\n95\t    \"sandbox-toggle\",\n96\t    \"shell\",\n97\t    \"write\",\n98\t}\n99\t\n100\t\n101\t@dataclass(frozen=True)\n102\tclass TrustedDeviceEnrollment:\n103\t    \"\"\"One trusted remote device enrollment.\"\"\"\n104\t\n105\t    device_id: str\n106\t    display_name: str\n107\t    token: str\n108\t    token_hash: str\n109\t    trusted: bool\n110\t    enrolled_at: datetime\n111\t    expires_at: datetime\n112\t\n113\t    def public_payload(self) -> dict[str, Any]:\n114\t        \"\"\"Return a JSON-compatible payload safe to return to the enrolling client.\"\"\"\n115\t        return {\n116\t            \"device_id\": self.device_id,\n117\t            \"display_name\": self.display_name,\n118\t            \"trusted\": self.trusted,\n119\t            \"token\": self.token,\n120\t            \"enrolled_at\": self.enrolled_at.isoformat(),\n121\t            \"expires_at\": self.expires_at.isoformat(),\n122\t        }\n123\t\n124\t    def stored_payload(self) -> dict[str, Any]:\n125\t        \"\"\"Return a JSON-compatible persisted payload without the raw token.\"\"\"\n126\t        return {\n127\t            \"device_id\": self.device_id,\n128\t            \"display_name\": self.display_name,\n129\t            \"trusted\": self.trusted,\n130\t            \"token_hash\": self.token_hash,\n131\t            \"enrolled_at\": self.enrolled_at.isoformat(),\n132\t            \"expires_at\": self.expires_at.isoformat(),\n133\t        }\n134\t\n135\t\n136\t@dataclass(frozen=True)\n137\tclass RemoteSessionLink:\n138\t    \"\"\"Remote-control URL and QR payload for one session.\"\"\"\n139\t\n140\t    link_id: str\n141\t    session_id: str\n142\t    device_id: str | None\n143\t    remote_url: str\n144\t    qr_payload: str\n145\t    bridge_token_required: bool\n146\t    allowed_commands: tuple[str, ...]\n147\t    created_at: datetime\n148\t    expires_at: datetime\n149\t\n150\t    def as_json(self) -> dict[str, Any]:\n151\t        \"\"\"Return a JSON-compatible remote session link.\"\"\"\n152\t        return {\n153\t            \"link_id\": self.link_id,\n154\t            \"session_id\": self.session_id,\n155\t            \"device_id\": self.device_id,\n156\t            \"remote_url\": self.remote_url,\n157\t            \"qr_payload\": self.qr_payload,\n158\t            \"qr_payload_format\": \"url\",\n159\t            \"qr_payload_metadata\": {\n160\t                \"session_id\": self.session_id,\n161\t                \"device_id\": self.device_id,\n162\t                \"remote_url\": self.remote_url,\n163\t                \"expires_at\": self.expires_at.isoformat(),\n164\t                \"token_header\": \"X-Codigote-Trusted-Device-Token\",\n165\t            },\n166\t            \"bridge_token_required\": self.bridge_token_required,\n167\t            \"allowed_commands\": list(self.allowed_commands),\n168\t            \"created_at\": self.created_at.isoformat(),\n169\t            \"expires_at\": self.expires_at.isoformat(),\n170\t        }\n171\t\n172\t\n173\t@dataclass(frozen=True)\n174\tclass BridgeCommandDecision:\n175\t    \"\"\"Remote command safety decision.\"\"\"\n176\t\n177\t    allowed: bool\n178\t    command_name: str | None\n179\t    reason: str\n180\t    risk_tier: str\n181\t\n182\t    def as_json(self) -> dict[str, Any]:\n183\t        \"\"\"Return a JSON-compatible command decision.\"\"\"\n184\t        return {\n185\t            \"allowed\": self.allowed,\n186\t            \"command_name\": self.command_name,\n187\t            \"reason\": self.reason,\n188\t            \"risk_tier\": self.risk_tier,\n189\t        }\n190\t\n191\t\n192\t@dataclass(frozen=True)\n193\tclass RemoteAttachmentRecord:\n194\t    \"\"\"One inbound remote attachment written to disk.\"\"\"\n195\t\n196\t    attachment_id: str\n197\t    file_name: str\n198\t    content_type: str\n199\t    path: str\n200\t    size_bytes: int\n201\t\n202\t    def as_json(self) -> dict[str, Any]:\n203\t        \"\"\"Return a JSON-compatible attachment record.\"\"\"\n204\t        return {\n205\t            \"attachment_id\": self.attachment_id,\n206\t            \"file_name\": self.file_name,\n207\t            \"content_type\": self.content_type,\n208\t            \"path\": self.path,\n209\t            \"size_bytes\": self.size_bytes,\n210\t        }\n211\t\n212\t\n213\t@dataclass(frozen=True)\n214\tclass _PreparedRemoteAttachment:\n215\t    \"\"\"Decoded attachment payload ready for a single write pass.\"\"\"\n216\t\n217\t    attachment_id: str\n218\t    file_name: str\n219\t    content_type: str\n220\t    data: bytes\n221\t\n222\t\n223\t@dataclass(frozen=True)\n224\tclass InboundBridgeMessage:\n225\t    \"\"\"Normalized inbound message from a remote client.\"\"\"\n226\t\n227\t    message_id: str\n228\t    prompt: str\n229\t    original_prompt: str\n230\t    attachments: tuple[RemoteAttachmentRecord, ...]\n231\t    command_decision: BridgeCommandDecision\n232\t    received_at: datetime\n233\t\n234\t    def as_json(self) -> dict[str, Any]:\n235\t        \"\"\"Return a JSON-compatible inbound message.\"\"\"\n236\t        return {\n237\t            \"message_id\": self.message_id,\n238\t            \"prompt\": self.prompt,\n239\t            \"original_prompt\": self.original_prompt,\n240\t            \"attachments\": [item.as_json() for item in self.attachments],\n241\t            \"command_decision\": self.command_decision.as_json(),\n242\t            \"received_at\": self.received_at.isoformat(),\n243\t        }\n244\t\n245\t\n246\tclass RemoteBridgeRuntime:\n247\t    \"\"\"Normalize remote bridge trust, links, messages, attachments, and commands.\"\"\"\n248\t\n249\t    def capabilities(self) -> dict[str, Any]:\n250\t        \"\"\"Return the client-neutral remote bridge capability contract.\"\"\"\n251\t        return {\n252\t            \"trusted_devices\": {\n253\t                \"supported\": True,\n254\t                \"token_header\": \"X-Codigote-Trusted-Device-Token\",\n255\t                \"default_ttl_days\": REMOTE_DEVICE_TTL_DAYS,\n256\t                \"max_ttl_days\": MAX_REMOTE_DEVICE_TTL_DAYS,\n257\t                \"verify_endpoint\": \"/v1/sessions/{session_id}/remote/devices/verify\",\n258\t                \"heartbeat_endpoint\": \"/v1/sessions/{session_id}/remote/devices/heartbeat\",\n259\t            },\n260\t            \"session_links\": {\n261\t                \"supported\": True,\n262\t                \"default_ttl_hours\": REMOTE_SESSION_TTL_HOURS,\n263\t                \"max_ttl_hours\": MAX_REMOTE_SESSION_TTL_HOURS,\n264\t                \"url_shape\": \"/remote/sessions/{session_id}\",\n265\t                \"qr_payload\": \"remote_url\",\n266\t                \"qr_payload_formats\": [\"url\", \"metadata\"],\n267\t                \"verify_endpoint\": \"/v1/sessions/{session_id}/remote/session-link/verify\",\n268\t            },\n269\t            \"inbound_messages\": {\n270\t                \"supported\": True,\n271\t                \"history_endpoint\": \"/v1/sessions/{session_id}/remote/messages\",\n272\t                \"polling\": \"GET with after_cursor and limit\",\n273\t                \"max_message_chars\": MAX_REMOTE_MESSAGE_CHARS,\n274\t                \"content_shapes\": [\n275\t                    \"prompt\",\n276\t                    \"text\",\n277\t                    \"content\",\n278\t                    \"message.content\",\n279\t                    \"Anthropic text/image content blocks\",\n280\t                    \"OpenAI input_text/input_image content blocks\",\n281\t                ],\n282\t                \"max_message_id_chars\": MAX_REMOTE_MESSAGE_ID_CHARS,\n283\t            },\n284\t            \"inbound_attachments\": {\n285\t                \"supported\": True,\n286\t                \"max_attachment_bytes\": MAX_REMOTE_ATTACHMENT_BYTES,\n287\t                \"max_attachments\": MAX_REMOTE_ATTACHMENTS,\n288\t                \"max_total_attachment_bytes\": MAX_REMOTE_ATTACHMENT_TOTAL_BYTES,\n289\t                \"fields\": [\"attachments\", \"inline content image blocks\"],\n290\t                \"encoding\": \"base64\",\n291\t                \"storage\": \".codigote/remote_uploads/{session_id}\",\n292\t            },\n293\t            \"command_filtering\": {\n294\t                \"supported\": True,\n295\t                \"safe_commands\": sorted(SAFE_REMOTE_COMMANDS),\n296\t                \"remote_mode_commands\": sorted(REMOTE_MODE_COMMANDS),\n297\t                \"bridge_safe_local_commands\": sorted(BRIDGE_SAFE_LOCAL_COMMANDS),\n298\t                \"blocked_commands\": sorted(BLOCKED_REMOTE_COMMANDS),\n299\t            },\n300\t        }\n301\t\n302\t    def enroll_trusted_device(\n303\t        self,\n304\t        *,\n305\t        display_name: str,\n306\t        trusted: bool = True,\n307\t        ttl_days: int = REMOTE_DEVICE_TTL_DAYS,\n308\t    ) -> TrustedDeviceEnrollment:\n309\t        \"\"\"Create a trusted-device token enrollment.\"\"\"\n310\t        normalized_display_name = display_name.strip() or \"Remote device\"\n311\t        now = datetime.now(timezone.utc)\n312\t        token = secrets.token_urlsafe(32)\n313\t        device_id = stable_id(\n314\t            \"remote_device\",\n315\t            {\n316\t                \"display_name\": normalized_display_name,\n317\t                \"token\": token,\n318\t                \"enrolled_at\": now.isoformat(),\n319\t            },\n320\t        )\n321\t        return TrustedDeviceEnrollment(\n322\t            device_id=device_id,\n323\t            display_name=normalized_display_name,\n324\t            token=token,\n325\t            token_hash=self.hash_device_token(token),\n326\t            trusted=trusted,\n327\t            enrolled_at=now,\n328\t            expires_at=now + timedelta(days=_bounded_ttl(ttl_days, MAX_REMOTE_DEVICE_TTL_DAYS)),\n329\t        )\n330\t\n331\t    def verify_trusted_device(\n332\t        self,\n333\t        *,\n334\t        token: str | None,\n335\t        device_records: tuple[dict[str, Any], ...],\n336\t    ) -> dict[str, Any]:\n337\t        \"\"\"Verify a trusted device token against stored enrollment payloads.\"\"\"\n338\t        if token is None or not token.strip():\n339\t            raise RemoteBridgeRuntimeError(\"Trusted device token is required.\")\n340\t        token_hash = self.hash_device_token(token)\n341\t        now = datetime.now(timezone.utc)\n342\t        for record in self.latest_device_records(device_records):\n343\t            if record.get(\"trusted\") is not True:\n344\t                continue\n345\t            stored_hash = record.get(\"token_hash\")\n346\t            if not isinstance(stored_hash, str):\n347\t                continue\n348\t            if not hmac.compare_digest(stored_hash, token_hash):\n349\t                continue\n350\t            expires_at = _parse_datetime(str(record.get(\"expires_at\", \"\")))\n351\t            if expires_at <= now:\n352\t                raise RemoteBridgeRuntimeError(\"Trusted device token has expired.\")\n353\t            return record\n354\t        raise RemoteBridgeRuntimeError(\"Trusted device token is not recognized.\")\n355\t\n356\t    def revoke_trusted_device(\n357\t        self,\n358\t        *,\n359\t        device_id: str,\n360\t        device_records: tuple[dict[str, Any], ...],\n361\t    ) -> dict[str, Any]:\n362\t        \"\"\"Return a revoked device payload from a stored enrollment.\"\"\"\n363\t        for record in device_records:\n364\t            if record.get(\"device_id\") == device_id:\n365\t                revoked = dict(record)\n366\t                revoked[\"trusted\"] = False\n367\t                revoked[\"revoked_at\"] = datetime.now(timezone.utc).isoformat()\n368\t                return revoked\n369\t        raise RemoteBridgeRuntimeError(f\"Unknown trusted device: {device_id}\")\n370\t\n371\t    def trusted_device_heartbeat(\n372\t        self,\n373\t        *,\n374\t        token: str | None,\n375\t        device_records: tuple[dict[str, Any], ...],\n376\t        client_adapter: str | None = None,\n377\t        client_version: str | None = None,\n378\t    ) -> dict[str, Any]:\n379\t        \"\"\"Verify a trusted device and return heartbeat metadata for persistence.\"\"\"\n380\t        device = self.verify_trusted_device(token=token, device_records=device_records)\n381\t        seen_at = datetime.now(timezone.utc)\n382\t        return {\n383\t            \"device_id\": device[\"device_id\"],\n384\t            \"trusted\": True,\n385\t            \"client_adapter\": client_adapter,\n386\t            \"client_version\": client_version,\n387\t            \"seen_at\": seen_at.isoformat(),\n388\t            \"expires_at\": device.get(\"expires_at\"),\n389\t        }\n390\t\n391\t    def create_session_link(\n392\t        self,\n393\t        *,\n394\t        session_id: str,\n395\t        public_base_url: str,\n396\t        device_id: str | None = None,\n397\t        ttl_hours: int = REMOTE_SESSION_TTL_HOURS,\n398\t        allowed_commands: tuple[str, ...] = DEFAULT_ALLOWED_REMOTE_COMMANDS,\n399\t    ) -> RemoteSessionLink:\n400\t        \"\"\"Create a remote-control URL and QR payload.\"\"\"\n401\t        base = _public_base_url(public_base_url)\n402\t        normalized_allowed_commands = _normalize_allowed_commands(allowed_commands)\n403\t        quoted_session = quote(session_id, safe=\"\")\n404\t        remote_url = f\"{base}/remote/sessions/{quoted_session}\"\n405\t        if device_id is not None:\n406\t            remote_url = f\"{remote_url}?device_id={quote(device_id, safe='')}\"\n407\t        created_at = datetime.now(timezone.utc)\n408\t        expires_at = created_at + timedelta(\n409\t            hours=_bounded_ttl(ttl_hours, MAX_REMOTE_SESSION_TTL_HOURS)\n410\t        )\n411\t        link_id = stable_id(\n412\t            \"remote_session_link\",\n413\t            {\n414\t                \"session_id\": session_id,\n415\t                \"device_id\": device_id,\n416\t                \"remote_url\": remote_url,\n417\t                \"created_at\": created_at.isoformat(),\n418\t            },\n419\t        )\n420\t        return RemoteSessionLink(\n421\t            link_id=link_id,\n422\t            session_id=session_id,\n423\t            device_id=device_id,\n424\t            remote_url=remote_url,\n425\t            qr_payload=remote_url,\n426\t            bridge_token_required=True,\n427\t            allowed_commands=normalized_allowed_commands,\n428\t            created_at=created_at,\n429\t            expires_at=expires_at,\n430\t        )\n431\t\n432\t    def verify_session_link(\n433\t        self,\n434\t        *,\n435\t        session_id: str,\n436\t        session_link_records: tuple[dict[str, Any], ...],\n437\t        device_records: tuple[dict[str, Any], ...],\n438\t        device_token: str | None = None,\n439\t        link_id: str | None = None,\n440\t        device_id: str | None = None,\n441\t    ) -> dict[str, Any]:\n442\t        \"\"\"Verify that a remote session link is current and usable.\"\"\"\n443\t        link = _latest_record(session_link_records) if link_id is None else None\n444\t        if link_id is not None:\n445\t            for record in session_link_records:\n446\t                if record.get(\"link_id\") == link_id:\n447\t                    link = record\n448\t                    break\n449\t        if link is None:\n450\t            raise RemoteBridgeRuntimeError(\"Remote session link is not recognized.\")\n451\t        if link.get(\"session_id\") != session_id:\n452\t            raise RemoteBridgeRuntimeError(\"Remote session link does not match this session.\")\n453\t        expires_at = _parse_datetime(str(link.get(\"expires_at\", \"\")))\n454\t        if expires_at <= datetime.now(timezone.utc):\n455\t            raise RemoteBridgeRuntimeError(\"Remote session link has expired.\")\n456\t        bridge_token_required = link.get(\"bridge_token_required\") is not False\n457\t        if bridge_token_required and (device_token is None or not device_token.strip()):\n458\t            raise RemoteBridgeRuntimeError(\"Trusted device token is required for this link.\")\n459\t        verified_device: dict[str, Any] | None = None\n460\t        if device_token is not None:\n461\t            verified_device = self.verify_trusted_device(\n462\t                token=device_token,\n463\t                device_records=device_records,\n464\t            )\n465\t            link_device_id = link.get(\"device_id\")\n466\t            if isinstance(link_device_id, str) and link_device_id:\n467\t                if verified_device.get(\"device_id\") != link_device_id:\n468\t                    raise RemoteBridgeRuntimeError(\n469\t                        \"Trusted device token does not match remote session link.\"\n470\t                    )\n471\t        if verified_device is None and device_id is not None:\n472\t            link_device_id = link.get(\"device_id\")\n473\t            if isinstance(link_device_id, str) and link_device_id and device_id != link_device_id:\n474\t                raise RemoteBridgeRuntimeError(\n475\t                    \"Trusted device id does not match remote session link.\"\n476\t                )\n477\t        return {\n478\t            \"valid\": True,\n479\t            \"session_id\": session_id,\n480\t            \"link_id\": link.get(\"link_id\"),\n481\t            \"remote_url\": link.get(\"remote_url\"),\n482\t            \"device_id\": link.get(\"device_id\"),\n483\t            \"device_verified\": verified_device is not None,\n484\t            \"verified_device_id\": (\n485\t                verified_device.get(\"device_id\") if verified_device is not None else None\n486\t            ),\n487\t            \"bridge_token_required\": bridge_token_required,\n488\t            \"expires_at\": link.get(\"expires_at\"),\n489\t            \"allowed_commands\": list(_safe_stored_allowed_commands(link)),\n490\t        }\n491\t\n492\t    def remote_status(\n493\t        self,\n494\t        *,\n495\t        session_id: str,\n496\t        device_records: tuple[dict[str, Any], ...],\n497\t        session_link_records: tuple[dict[str, Any], ...],\n498\t    ) -> dict[str, Any]:\n499\t        \"\"\"Return a remote bridge status snapshot for one session.\"\"\"\n500\t        now = datetime.now(timezone.utc)\n501\t        latest_devices = self.latest_device_records(device_records)\n502\t        active_devices = [\n503\t            item\n504\t            for item in latest_devices\n505\t            if item.get(\"trusted\") is True\n506\t            and _parse_datetime(str(item.get(\"expires_at\", \"\"))) > now\n507\t        ]\n508\t        latest_link = _latest_record(session_link_records)\n509\t        safe_link: dict[str, Any] | None = None\n510\t        if latest_link is not None:\n511\t            safe_link = dict(latest_link)\n512\t            safe_link[\"allowed_commands\"] = list(_safe_stored_allowed_commands(safe_link))\n513\t        return {\n514\t            \"session_id\": session_id,\n515\t            \"remote_enabled\": len(active_devices) > 0,\n516\t            \"trusted_device_count\": len(latest_devices),\n517\t            \"active_trusted_device_count\": len(active_devices),\n518\t            \"active_device_ids\": [\n519\t                item[\"device_id\"]\n520\t                for item in active_devices\n521\t                if isinstance(item.get(\"device_id\"), str)\n522\t            ],\n523\t            \"latest_session_link\": safe_link,\n524\t            \"latest_session_link_valid\": (\n525\t                safe_link is not None\n526\t                and _parse_datetime(str(safe_link.get(\"expires_at\", \"\"))) > now\n527\t            ),\n528\t            \"capabilities\": self.capabilities(),\n529\t        }\n530\t\n531\t    def latest_device_records(\n532\t        self, device_records: tuple[dict[str, Any], ...]\n533\t    ) -> list[dict[str, Any]]:\n534\t        \"\"\"Return latest trusted-device audit payloads by device id.\"\"\"\n535\t        return _latest_records_by_key(device_records, key=\"device_id\")\n536\t\n537\t    def filter_remote_command(self, text: str) -> BridgeCommandDecision:\n538\t        \"\"\"Return whether a remote text command is bridge-safe.\"\"\"\n539\t        stripped = text.strip()\n540\t        if not stripped:\n541\t            return BridgeCommandDecision(\n542\t                allowed=False,\n543\t                command_name=None,\n544\t                reason=\"message is empty\",\n545\t                risk_tier=\"invalid\",\n546\t            )\n547\t        if not stripped.startswith(\"/\"):\n548\t            return BridgeCommandDecision(\n549\t                allowed=True,\n550\t                command_name=None,\n551\t                reason=\"plain user message\",\n552\t                risk_tier=\"low\",\n553\t            )\n554\t        command_name = _command_name(stripped)\n555\t        if not command_name:\n556\t            return BridgeCommandDecision(\n557\t                allowed=False,\n558\t                command_name=None,\n559\t                reason=\"slash command is empty\",\n560\t                risk_tier=\"invalid\",\n561\t            )\n562\t        if command_name in BLOCKED_REMOTE_COMMANDS:\n563\t            return BridgeCommandDecision(\n564\t                allowed=False,\n565\t                command_name=command_name,\n566\t                reason=\"command is blocked for remote bridge clients\",\n567\t                risk_tier=\"high\",\n568\t            )\n569\t        if command_name not in SAFE_REMOTE_COMMANDS:\n570\t            return BridgeCommandDecision(\n571\t                allowed=False,\n572\t                command_name=command_name,\n573\t                reason=\"command is not in the remote bridge allowlist\",\n574\t                risk_tier=\"medium\",\n575\t            )\n576\t        return BridgeCommandDecision(\n577\t            allowed=True,\n578\t            command_name=command_name,\n579\t            reason=\"command is bridge-safe\",\n580\t            risk_tier=\"low\",\n581\t        )\n582\t\n583\t    def normalize_inbound_message(\n584\t        self,\n585\t        *,\n586\t        session_id: str,\n587\t        workspace_ref: str,\n588\t        payload: dict[str, Any],\n589\t    ) -> InboundBridgeMessage:\n590\t        \"\"\"Normalize inbound remote text and attachments into a client message.\"\"\"\n591\t        explicit_attachments = _attachment_payloads(payload)\n592\t        prompt, content_attachments = _content_from_payload(\n593\t            payload,\n594\t            allow_empty=bool(explicit_attachments),\n595\t        )\n596\t        if len(prompt) > MAX_REMOTE_MESSAGE_CHARS:\n597\t            raise RemoteBridgeRuntimeError(\"Remote message exceeds maximum length.\")\n598\t        decision = (\n599\t            BridgeCommandDecision(\n600\t                allowed=True,\n601\t                command_name=None,\n602\t                reason=\"attachment-only user message\",\n603\t                risk_tier=\"low\",\n604\t            )\n605\t            if not prompt and (explicit_attachments or content_attachments)\n606\t            else self.filter_remote_command(prompt)\n607\t        )\n608\t        if not decision.allowed:\n609\t            raise RemoteBridgeRuntimeError(decision.reason)\n610\t        attachments = self.resolve_inbound_attachments(\n611\t            session_id=session_id,\n612\t            workspace_ref=workspace_ref,\n613\t            attachments=explicit_attachments + content_attachments,\n614\t        )\n615\t        attachment_refs = \" \".join(f'@\"{item.path}\"' for item in attachments)\n616\t        resolved_prompt = f\"{attachment_refs} {prompt}\".strip() if attachment_refs else prompt\n617\t        message_id = _optional_message_id(payload)\n618\t        if message_id is None:\n619\t            message_id = stable_id(\n620\t                \"remote_message\",\n621\t                {\n622\t                    \"session_id\": session_id,\n623\t                    \"prompt\": prompt,\n624\t                    \"attachments\": tuple(item.as_json() for item in attachments),\n625\t                },\n626\t            )\n627\t        return InboundBridgeMessage(\n628\t            message_id=message_id,\n629\t            prompt=resolved_prompt,\n630\t            original_prompt=prompt,\n631\t            attachments=attachments,\n632\t            command_decision=decision,\n633\t            received_at=datetime.now(timezone.utc),\n634\t        )\n635\t\n636\t    def resolve_inbound_attachments(\n637\t        self,\n638\t        *,\n639\t        session_id: str,\n640\t        workspace_ref: str,\n641\t        attachments: tuple[dict[str, Any], ...],\n642\t    ) -> tuple[RemoteAttachmentRecord, ...]:\n643\t        \"\"\"Write base64 inbound attachments under the session workspace.\"\"\"\n644\t        if not attachments:\n645\t            return ()\n646\t        prepared = _prepare_attachments(session_id=session_id, attachments=attachments)\n647\t        root = _workspace_root(workspace_ref)\n648\t        upload_dir = root / \".codigote\" / \"remote_uploads\" / _safe_path_segment(session_id)\n649\t        upload_dir.mkdir(parents=True, exist_ok=True)\n650\t        records: list[RemoteAttachmentRecord] = []\n651\t        for item in prepared:\n652\t            target = upload_dir / (\n653\t                f\"{_safe_path_segment(item.attachment_id)[:16]}\"\n654\t                f\"-{_bytes_hash(item.data)[:12]}-{item.file_name}\"\n655\t            )\n656\t            target.write_bytes(item.data)\n657\t            records.append(\n658\t                RemoteAttachmentRecord(\n659\t                    attachment_id=item.attachment_id,\n660\t                    file_name=item.file_name,\n661\t                    content_type=item.content_type,\n662\t                    path=str(target),\n663\t                    size_bytes=len(item.data),\n664\t                )\n665\t            )\n666\t        return tuple(records)\n667\t\n668\t    @staticmethod\n669\t    def hash_device_token(token: str) -> str:\n670\t        \"\"\"Return a stable hash for a raw trusted-device token.\"\"\"\n671\t        return hashlib.sha256(token.encode(\"utf-8\")).hexdigest()\n672\t\n673\t\n674\tdef _content_from_payload(\n675\t    payload: dict[str, Any],\n676\t    *,\n677\t    allow_empty: bool = False,\n678\t) -> tuple[str, tuple[dict[str, Any], ...]]:\n679\t    \"\"\"Extract text and inline attachments from an inbound remote payload.\"\"\"\n680\t    message_type = payload.get(\"type\")\n681\t    if message_type is not None and message_type != \"user\":\n682\t        raise RemoteBridgeRuntimeError(\"Inbound remote message must be a user message.\")\n683\t    if \"prompt\" in payload:\n684\t        prompt = payload[\"prompt\"]\n685\t    elif \"text\" in payload:\n686\t        prompt = payload[\"text\"]\n687\t    elif \"content\" in payload:\n688\t        prompt = payload[\"content\"]\n689\t    elif isinstance(payload.get(\"message\"), dict) and \"content\" in payload[\"message\"]:\n690\t        prompt = payload[\"message\"][\"content\"]\n691\t    else:\n692\t        raise RemoteBridgeRuntimeError(\n693\t            \"Inbound remote message must include prompt, text, or content.\"\n694\t        )\n695\t    if isinstance(prompt, str):\n696\t        if not prompt.strip() and not allow_empty:\n697\t            raise RemoteBridgeRuntimeError(\"Inbound remote message is empty.\")\n698\t        return prompt.strip(), ()\n699\t    if isinstance(prompt, list):\n700\t        text_parts: list[str] = []\n701\t        inline_attachments: list[dict[str, Any]] = []\n702\t        for block in prompt:\n703\t            if (\n704\t                isinstance(block, dict)\n705\t                and block.get(\"type\") in {\"text\", \"input_text\"}\n706\t                and isinstance(block.get(\"text\"), str)\n707\t            ):\n708\t                text_parts.append(str(block[\"text\"]))\n709\t            elif isinstance(block, dict) and block.get(\"type\") == \"image\":\n710\t                inline_attachments.append(_image_block_attachment(block, len(inline_attachments)))\n711\t            elif isinstance(block, dict) and block.get(\"type\") == \"input_image\":\n712\t                inline_attachments.append(\n713\t                    _input_image_block_attachment(block, len(inline_attachments))\n714\t                )\n715\t            else:\n716\t                raise RemoteBridgeRuntimeError(\n717\t                    \"Inbound remote content contains an unsupported block.\"\n718\t                )\n719\t        text = \"\\n\".join(text_parts).strip()\n720\t        if text or inline_attachments:\n721\t            return text, tuple(inline_attachments)\n722\t    raise RemoteBridgeRuntimeError(\"Inbound remote content must include text.\")\n723\t\n724\t\n725\tdef _image_block_attachment(block: dict[str, Any], index: int) -> dict[str, Any]:\n726\t    \"\"\"Convert an Anthropic-style base64 image block to an attachment payload.\"\"\"\n727\t    source = block.get(\"source\")\n728\t    if not isinstance(source, dict):\n729\t        raise RemoteBridgeRuntimeError(\"Image content block must include a source object.\")\n730\t    if source.get(\"type\") != \"base64\":\n731\t        raise RemoteBridgeRuntimeError(\"Only base64 image content blocks are supported.\")\n732\t    data = source.get(\"data\")\n733\t    if not isinstance(data, str) or not data:\n734\t        raise RemoteBridgeRuntimeError(\"Image content block must include base64 data.\")\n735\t    content_type = _image_content_type(\n736\t        source.get(\"media_type\")\n737\t        or source.get(\"mediaType\")\n738\t        or _detect_image_content_type_from_base64(data)\n739\t    )\n740\t    extension = _image_extension(content_type)\n741\t    attachment_id = str(\n742\t        block.get(\"id\")\n743\t        or stable_id(\"remote_image\", {\"index\": index, \"data_hash\": _bytes_hash(data.encode())})\n744\t    )\n745\t    return {\n746\t        \"attachment_id\": attachment_id,\n747\t        \"file_name\": f\"inline-image-{index + 1}.{extension}\",\n748\t        \"content_type\": content_type,\n749\t        \"data\": data,\n750\t    }\n751\t\n752\t\n753\tdef _input_image_block_attachment(block: dict[str, Any], index: int) -> dict[str, Any]:\n754\t    \"\"\"Convert an OpenAI-style data URL image block to an attachment payload.\"\"\"\n755\t    image_url = block.get(\"image_url\")\n756\t    if isinstance(image_url, dict):\n757\t        image_url = image_url.get(\"url\")\n758\t    if not isinstance(image_url, str) or not image_url:\n759\t        raise RemoteBridgeRuntimeError(\"Input image content block must include an image_url.\")\n760\t    content_type, data = _data_url_image(image_url)\n761\t    extension = _image_extension(content_type)\n762\t    attachment_id = str(\n763\t        block.get(\"id\")\n764\t        or stable_id(\"remote_image\", {\"index\": index, \"data_hash\": _bytes_hash(data.encode())})\n765\t    )\n766\t    return {\n767\t        \"attachment_id\": attachment_id,\n768\t        \"file_name\": f\"inline-image-{index + 1}.{extension}\",\n769\t        \"content_type\": content_type,\n770\t        \"data\": data,\n771\t    }\n772\t\n773\t\n774\tdef _data_url_image(value: str) -> tuple[str, str]:\n775\t    \"\"\"Return media type and base64 data from an inline image data URL.\"\"\"\n776\t    header, separator, data = value.strip().partition(\",\")\n777\t    normalized_header = header.lower()\n778\t    if (\n779\t        separator != \",\"\n780\t        or not normalized_header.startswith(\"data:\")\n781\t        or not normalized_header.endswith(\";base64\")\n782\t    ):\n783\t        raise RemoteBridgeRuntimeError(\"Input image content block must use a base64 data URL.\")\n784\t    content_type = _image_content_type(\n785\t        normalized_header.removeprefix(\"data:\").removesuffix(\";base64\")\n786\t    )\n787\t    if not data:\n788\t        raise RemoteBridgeRuntimeError(\"Image content block must include base64 data.\")\n789\t    return content_type, data\n790\t\n791\t\n792\tdef _image_content_type(value: Any) -> str:\n793\t    \"\"\"Return a normalized supported image content type.\"\"\"\n794\t    if not isinstance(value, str):\n795\t        raise RemoteBridgeRuntimeError(\"Image content block media type must be image/*.\")\n796\t    content_type = value.strip().lower()\n797\t    if not content_type.startswith(\"image/\"):\n798\t        raise RemoteBridgeRuntimeError(\"Image content block media type must be image/*.\")\n799\t    if content_type not in SUPPORTED_INLINE_IMAGE_TYPES:\n800\t        raise RemoteBridgeRuntimeError(\n801\t            \"Image content block media type must be png, jpeg, gif, or webp.\"\n802\t        )\n803\t    return content_type\n804\t\n805\t\n806\tdef _attachment_payloads(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:\n807\t    \"\"\"Extract attachment payloads from the bridge client fields.\"\"\"\n808\t    value = payload.get(\"attachments\", ())\n809\t    if value is None:\n810\t        return ()\n811\t    if not isinstance(value, list | tuple):\n812\t        raise RemoteBridgeRuntimeError(\"attachments must be an array.\")\n813\t    attachments: list[dict[str, Any]] = []\n814\t    for item in value:\n815\t        if not isinstance(item, dict):\n816\t            raise RemoteBridgeRuntimeError(\"attachments must contain objects.\")\n817\t        attachments.append(dict(item))\n818\t    return tuple(attachments)\n819\t\n820\t\n821\tdef _prepare_attachments(\n822\t    *,\n823\t    session_id: str,\n824\t    attachments: tuple[dict[str, Any], ...],\n825\t) -> tuple[_PreparedRemoteAttachment, ...]:\n826\t    \"\"\"Decode and validate all attachments before writing any files.\"\"\"\n827\t    if len(attachments) > MAX_REMOTE_ATTACHMENTS:\n828\t        raise RemoteBridgeRuntimeError(\n829\t            f\"Remote messages support at most {MAX_REMOTE_ATTACHMENTS} attachments.\"\n830\t        )\n831\t    prepared: list[_PreparedRemoteAttachment] = []\n832\t    total_bytes = 0\n833\t    for item in attachments:\n834\t        file_name = _safe_file_name(str(item.get(\"file_name\") or \"attachment\"))\n835\t        content_type = _content_type(item.get(\"content_type\"))\n836\t        raw_data = _attachment_bytes(item)\n837\t        if len(raw_data) > MAX_REMOTE_ATTACHMENT_BYTES:\n838\t            raise RemoteBridgeRuntimeError(\n839\t                f\"Attachment exceeds {MAX_REMOTE_ATTACHMENT_BYTES} bytes.\"\n840\t            )\n841\t        total_bytes += len(raw_data)\n842\t        if total_bytes > MAX_REMOTE_ATTACHMENT_TOTAL_BYTES:\n843\t            raise RemoteBridgeRuntimeError(\n844\t                f\"Attachments exceed {MAX_REMOTE_ATTACHMENT_TOTAL_BYTES} total bytes.\"\n845\t            )\n846\t        prepared.append(\n847\t            _PreparedRemoteAttachment(\n848\t                attachment_id=_attachment_id(\n849\t                    session_id=session_id,\n850\t                    item=item,\n851\t                    file_name=file_name,\n852\t                    data=raw_data,\n853\t                ),\n854\t                file_name=file_name,\n855\t                content_type=content_type,\n856\t                data=raw_data,\n857\t            )\n858\t        )\n859\t    return tuple(prepared)\n860\t\n861\t\n862\tdef _attachment_id(\n863\t    *,\n864\t    session_id: str,\n865\t    item: dict[str, Any],\n866\t    file_name: str,\n867\t    data: bytes,\n868\t) -> str:\n869\t    \"\"\"Return a bounded stable attachment id.\"\"\"\n870\t    raw_attachment_id = item.get(\"attachment_id\")\n871\t    if raw_attachment_id is not None and raw_attachment_id != \"\":\n872\t        if not isinstance(raw_attachment_id, str):\n873\t            raise RemoteBridgeRuntimeError(\"attachment_id must be text.\")\n874\t        attachment_id = raw_attachment_id.strip()\n875\t        if attachment_id:\n876\t            return _safe_path_segment(attachment_id)\n877\t    return stable_id(\n878\t        \"remote_attachment\",\n879\t        {\n880\t            \"session\": session_id,\n881\t            \"file_name\": file_name,\n882\t            \"data_hash\": _bytes_hash(data),\n883\t        },\n884\t    )\n885\t\n886\t\n887\tdef _attachment_bytes(payload: dict[str, Any]) -> bytes:\n888\t    \"\"\"Decode attachment bytes from the canonical base64 field.\"\"\"\n889\t    data = payload.get(\"data\")\n890\t    if not isinstance(data, str) or not data:\n891\t        raise RemoteBridgeRuntimeError(\"Attachment data must be base64 text.\")\n892\t    if len(data) > MAX_REMOTE_ATTACHMENT_BASE64_CHARS:\n893\t        raise RemoteBridgeRuntimeError(f\"Attachment exceeds {MAX_REMOTE_ATTACHMENT_BYTES} bytes.\")\n894\t    try:\n895\t        return base64.b64decode(data, validate=True)\n896\t    except (binascii.Error, ValueError) as error:\n897\t        raise RemoteBridgeRuntimeError(\"Attachment data is not valid base64.\") from error\n898\t\n899\t\n900\tdef _content_type(value: Any) -> str:\n901\t    \"\"\"Return a conservative attachment content type.\"\"\"\n902\t    if not isinstance(value, str):\n903\t        return \"application/octet-stream\"\n904\t    normalized = value.strip().lower()\n905\t    if not normalized:\n906\t        return \"application/octet-stream\"\n907\t    if not re.fullmatch(r\"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*\", normalized):\n908\t        return \"application/octet-stream\"\n909\t    return normalized[:255]\n910\t\n911\t\n912\tdef _optional_message_id(payload: dict[str, Any]) -> str | None:\n913\t    \"\"\"Return a bounded client message id when one is provided.\"\"\"\n914\t    raw_message_id = payload.get(\"message_id\")\n915\t    if raw_message_id is None or raw_message_id == \"\":\n916\t        return None\n917\t    if not isinstance(raw_message_id, str):\n918\t        raise RemoteBridgeRuntimeError(\"message_id must be text.\")\n919\t    message_id = raw_message_id.strip()\n920\t    if not message_id:\n921\t        return None\n922\t    if len(message_id) > MAX_REMOTE_MESSAGE_ID_CHARS:\n923\t        raise RemoteBridgeRuntimeError(\n924\t            f\"message_id exceeds {MAX_REMOTE_MESSAGE_ID_CHARS} characters.\"\n925\t        )\n926\t    return message_id\n927\t\n928\t\n929\tdef _detect_image_content_type_from_base64(data: str) -> str:\n930\t    \"\"\"Detect common image media types from base64 magic bytes.\"\"\"\n931\t    try:\n932\t        prefix = base64.b64decode(data[:64], validate=False)\n933\t    except (binascii.Error, ValueError):\n934\t        return \"image/png\"\n935\t    if prefix.startswith(b\"\\x89PNG\\r\\n\\x1a\\n\"):\n936\t        return \"image/png\"\n937\t    if prefix.startswith(b\"\\xff\\xd8\\xff\"):\n938\t        return \"image/jpeg\"\n939\t    if prefix.startswith((b\"GIF87a\", b\"GIF89a\")):\n940\t        return \"image/gif\"\n941\t    if prefix.startswith(b\"RIFF\") and prefix[8:12] == b\"WEBP\":\n942\t        return \"image/webp\"\n943\t    return \"image/png\"\n944\t\n945\t\n946\tdef _image_extension(content_type: str) -> str:\n947\t    \"\"\"Return a conservative extension for a supported image media type.\"\"\"\n948\t    if content_type not in SUPPORTED_INLINE_IMAGE_TYPES:\n949\t        raise RemoteBridgeRuntimeError(\n950\t            \"Image content block media type must be png, jpeg, gif, or webp.\"\n951\t        )\n952\t    if content_type == \"image/jpeg\":\n953\t        return \"jpg\"\n954\t    if content_type == \"image/gif\":\n955\t        return \"gif\"\n956\t    if content_type == \"image/webp\":\n957\t        return \"webp\"\n958\t    return \"png\"\n959\t\n960\t\n961\tdef _command_name(text: str) -> str:\n962\t    \"\"\"Extract a normalized slash command name.\"\"\"\n963\t    parts = text[1:].split(maxsplit=1)\n964\t    if not parts:\n965\t        return \"\"\n966\t    token = parts[0]\n967\t    return token.split(\":\", maxsplit=1)[0].strip().lower()\n968\t\n969\t\n970\tdef _public_base_url(value: str) -> str:\n971\t    \"\"\"Normalize a public base URL used for remote session links.\"\"\"\n972\t    stripped = value.strip().rstrip(\"/\")\n973\t    parsed = urlsplit(stripped)\n974\t    if parsed.scheme not in {\"http\", \"https\"} or not parsed.netloc or parsed.hostname is None:\n975\t        raise RemoteBridgeRuntimeError(\n976\t            \"public_base_url must be an absolute http:// or https:// URL.\"\n977\t        )\n978\t    if parsed.username is not None or parsed.password is not None:\n979\t        raise RemoteBridgeRuntimeError(\"public_base_url must not include credentials.\")\n980\t    try:\n981\t        parsed.port\n982\t    except ValueError as error:\n983\t        raise RemoteBridgeRuntimeError(\"public_base_url includes an invalid port.\") from error\n984\t    if parsed.query or parsed.fragment:\n985\t        raise RemoteBridgeRuntimeError(\"public_base_url must not include a query or fragment.\")\n986\t    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip(\"/\"), \"\", \"\"))\n987\t\n988\t\n989\tdef _bounded_ttl(value: int, maximum: int) -> int:\n990\t    \"\"\"Return a TTL clamped to bridge safety bounds.\"\"\"\n991\t    if isinstance(value, bool) or not isinstance(value, int):\n992\t        raise RemoteBridgeRuntimeError(\"TTL values must be integers.\")\n993\t    return min(max(1, value), maximum)\n994\t\n995\t\n996\tdef _normalize_allowed_commands(commands: tuple[str, ...]) -> tuple[str, ...]:\n997\t    \"\"\"Return a sorted, de-duplicated remote command allowlist.\"\"\"\n998\t    normalized: set[str] = set()\n999\t    for command in commands:\n1000\t        if not isinstance(command, str):",
+    "path": "/home/dan/repos/codigote/src/remote/bridge.py",
+    "start_line": 1,
+    "total_lines": 1108,
+    "truncated": true
+  },
+  "started_at": "2026-06-08T08:17:37.397908",
+  "status": "completed",
+  "tool_call_id": "call_fcniWvRa3ZBKQs9BX04QzZp5",
+  "tool_name": "read"
+}
