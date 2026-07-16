@@ -228,6 +228,54 @@ def generate_secret():
     click.echo(generate_jwt_secret())
 
 
+@cli.group("monitor")
+def monitor():
+    """Dead-man switch: alert when scheduled services did NOT run."""
+
+
+@monitor.command("check")
+def monitor_check():
+    """Run one missed-run check pass over all monitored services."""
+    from taskflows.monitor import check_missed_runs
+
+    problems = asyncio.run(check_missed_runs())
+    if not problems:
+        click.echo(click.style("All monitored services healthy", fg="green"))
+        return
+    for service_name, issues in problems.items():
+        click.echo(click.style(f"{service_name}:", fg="red", bold=True))
+        for issue in issues:
+            click.echo(f"  - {issue}")
+    raise SystemExit(1)
+
+
+@monitor.command("install")
+@click.option(
+    "--period",
+    type=int,
+    default=300,
+    show_default=True,
+    help="How often (seconds) the monitor checks for missed runs.",
+)
+def monitor_install(period: int):
+    """Install and start the taskflows-monitor service."""
+    from taskflows.monitor import build_monitor_service
+
+    srv = build_monitor_service(period_seconds=period)
+    asyncio.run(srv.create())
+    asyncio.run(srv.start())
+    click.echo(f"Installed taskflows-monitor (checks every {period}s)")
+
+
+@monitor.command("uninstall")
+def monitor_uninstall():
+    """Stop and remove the taskflows-monitor service."""
+    from taskflows.monitor import build_monitor_service
+
+    asyncio.run(build_monitor_service().remove())
+    click.echo("Removed taskflows-monitor")
+
+
 @cli.command(name="next")
 @click.argument("match", required=False)
 @click.option(

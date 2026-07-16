@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 _SYMBOL_MODULES = {
     # tasks + alerts
     "Alerts": "alerts",
+    "MissedRunAlert": "monitor",
     "get_current_task_id": "tasks",
     "run_task": "tasks",
     "task": "tasks",
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
     )
     from .docker import ContainerLimits, DockerContainer, DockerImage, Ulimit, Volume
     from .entrypoints import async_entrypoint, get_shutdown_handler
+    from .monitor import MissedRunAlert
     from .schedule import Calendar, Periodic
     from .serialization import load_services_from_yaml, save_services_to_yaml
     from .service import RestartPolicy, Service, ServiceRegistry, Venv, Watchdog

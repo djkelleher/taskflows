@@ -386,6 +386,7 @@ async def remove_units(
         logger.info(f"Preserving Docker containers: {container_names}")
     for srv in service_files:
         files.extend(services_data_dir.glob(f"{extract_service_name(srv)}#*.pickle"))
+        files.extend(services_data_dir.glob(f"{extract_service_name(srv)}#monitor.json"))
     for file in files:
         logger.info(f"Deleting {file}")
         file.unlink(missing_ok=True)

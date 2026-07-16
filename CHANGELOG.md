@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Dead-man switch (`alert_on_missed_run`):** services can declare
+  `Service(alert_on_missed_run=MissedRunAlert(send_to=..., grace_seconds=300))`;
+  the self-hosted monitor service (`tf monitor install`) periodically checks
+  systemd timer/service state and alerts when a timer is dead or disabled, a
+  run is overdue past the grace period, or the last run failed. `tf monitor
+  check` runs one pass manually (non-zero exit when anything is unhealthy).
 - **`tf run module:func`** — run any Python function as a one-off task from
   the CLI with `--kw key=value` arguments, `--retries`, and `--timeout`
   (full task semantics: alerts, metrics, hard timeouts); non-zero exit on

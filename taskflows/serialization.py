@@ -553,10 +553,15 @@ def _serialize_value(value: Any, include_none: bool = False) -> Any:
     if isinstance(value, Path):
         return str(value)
 
-    # Handle Pydantic models
+    # Handle Pydantic models (recurse per-field so nested registered types —
+    # e.g. msgflows destinations inside Alerts/MissedRunAlert — keep their
+    # type markers; model_dump would flatten them to plain dicts)
     if isinstance(value, BaseModel):
-        data = value.model_dump(mode="json")
-        data["type"] = _get_type_name(value)
+        data = {"type": _get_type_name(value)}
+        for model_field in type(value).model_fields:
+            serialized = _serialize_value(getattr(value, model_field), include_none)
+            if include_none or serialized is not None:
+                data[model_field] = serialized
         return _filter_none(data, include_none)
 
     # Handle dataclasses
@@ -970,6 +975,8 @@ def _ensure_types_registered():
         return
     _types_registered = True
     # Import here to avoid circular imports
+    from msgflows import DiscordChannel, EmailAddrs, SlackChannel
+
     from taskflows.constraints import (
         CgroupConfig,
         CPUPressure,
@@ -988,6 +995,7 @@ def _ensure_types_registered():
         Ulimit,
         Volume,
     )
+    from taskflows.monitor import MissedRunAlert
     from taskflows.schedule import Calendar, Periodic
     from taskflows.service import RestartPolicy, Service, Venv, Watchdog
 
@@ -996,6 +1004,11 @@ def _ensure_types_registered():
     register_type(Service)
     register_type(RestartPolicy)
     register_type(Watchdog)
+    register_type(MissedRunAlert)
+    # msgflows alert destinations (used by Alerts / MissedRunAlert configs)
+    register_type(SlackChannel)
+    register_type(EmailAddrs)
+    register_type(DiscordChannel)
 
     # Dashboard types
     register_type(Dashboard)

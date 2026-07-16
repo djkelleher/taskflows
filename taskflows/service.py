@@ -35,6 +35,7 @@ from .docker import (  # noqa: F401, E402
 )
 from .environments import Venv
 from .exec import PickledFunction
+from .monitor import MissedRunAlert
 from .schedule import Schedule
 from .systemd.dbus import (  # noqa: F401, E402
     escape_path,
@@ -358,6 +359,10 @@ class Service:
     # (see taskflows.notify); systemd restarts it if they stop. Not supported
     # with DockerContainer environments.
     watchdog: Optional["Watchdog"] = None
+    # dead-man switch: alert these destinations when a scheduled run did NOT
+    # happen (timer dead/overdue) or the last run failed. Requires the
+    # taskflows-monitor service (tf monitor install). See taskflows.monitor.
+    alert_on_missed_run: Optional["MissedRunAlert"] = None
     startup_requirements: Sequence[HardwareConstraint | SystemLoadConstraint] = None
     # Specifies a timeout (in seconds) that starts running when the queued job is actually started.
     # If limit is reached, the job will be cancelled, the unit however will not change state or even enter the "failed" mode.
@@ -793,6 +798,11 @@ class Service:
         )
         await self.remove(preserve_container=preserve_container)
         self.write_unit_files()
+
+        if self.alert_on_missed_run:
+            from .monitor import write_monitor_config
+
+            write_monitor_config(self.name, self.alert_on_missed_run)
 
         # Write pickle files and ensure cleanup on error
         for func in self._pkl_funcs:
