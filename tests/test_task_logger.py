@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 import pytest
-from taskflows.alerts import MsgDst
+from msgflows import MsgDst
 
 from taskflows.tasks import (
     Alerts,

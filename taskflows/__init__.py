@@ -12,10 +12,11 @@ from .docker import ContainerLimits, DockerContainer, DockerImage, Ulimit, Volum
 from .dashboard import Dashboard, LogsCountPlot, LogsPanelConfig, LogsTextSearch
 from .entrypoints import async_entrypoint, get_shutdown_handler
 from .schedule import Calendar, Periodic
-from .service import Service, ServiceRegistry, Venv
-from .tasks import get_current_task_id, run_task, task
+from .service import RestartPolicy, Service, ServiceRegistry, Venv
+from .tasks import Alerts, get_current_task_id, run_task, task
 
 __all__ = [
+    "Alerts",
     "CPUPressure",
     "CPUs",
     "Calendar",
@@ -32,6 +33,7 @@ __all__ = [
     "LogsPanelConfig",
     "LogsTextSearch",
     "Periodic",
+    "RestartPolicy",
     "Service",
     "ServiceRegistry",
     "SystemLoadConstraint",

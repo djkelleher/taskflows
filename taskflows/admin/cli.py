@@ -30,7 +30,7 @@ from typing import Optional
 
 import click
 import yaml
-from taskflows.alerts.components import Table
+from msgflows.components import Table
 from click import Group
 from rich.console import Console
 

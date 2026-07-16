@@ -11,10 +11,10 @@ from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
-from taskflows.alerts.components import Component, Map, Table, Text
-from taskflows.alerts.utils import as_code_block
+from msgflows.components import Component, Map, Table, Text
+from msgflows.utils import as_code_block
 
-from taskflows.dynamic_imports import find_instances
+from dynamic_imports import find_instances
 from taskflows.common import (
     config,
     load_service_files,
