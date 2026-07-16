@@ -46,8 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`TASKFLOWS_GRAFANA`, `TASKFLOWS_LOKI_URL`, or an API key), so alerts no
   longer contain dead localhost links by default.
 
+- `service.py` decomposed: D-Bus connection management and unit query/lifecycle
+  functions now live in `taskflows.systemd` (`start_units`, `stop_units`, …;
+  the old underscored names remain as aliases), `Venv` lives in
+  `taskflows.environments`, and `Service.render_unit_files()` exposes unit-file
+  rendering as pure data (`{filename: content}`) separate from writing.
+
 ### Removed
 - Committed personal artifacts (`data/`, `.codigote/`, coverage files).
+- The deprecated `task_history` stub, `tf history` command, and `/history`
+  API endpoint (run history is delegated to Loki/Grafana).
+- Legacy dead code: `exec._run_function`, `exec._migrate_unsigned_pickle`,
+  `CgroupConfig._parse_device_bandwidth_limits`.
 
 ## [0.19.1] - 2026-07-16
 

@@ -56,21 +56,14 @@ def normalize_unit_text(text: str, replacements: dict[str, str] | None = None) -
 
 
 @pytest.fixture
-def render_units(tmp_path, monkeypatch):
-    """Render a Service's unit files into tmp_path and return normalized contents."""
+def render_units():
+    """Render a Service's unit files and return normalized contents."""
 
     def render(service: Service, replacements: dict[str, str] | None = None) -> str:
-        unit_dir = tmp_path / "units"
-        unit_dir.mkdir(exist_ok=True)
-        monkeypatch.setattr("taskflows.service.systemd_dir", unit_dir)
-        service._write_timer_units()
-        service._write_service_units()
         parts = []
-        for file in sorted(unit_dir.iterdir()):
-            parts.append(f"=== {file.name} ===")
-            parts.append(normalize_unit_text(file.read_text(), replacements))
-        for file in unit_dir.iterdir():
-            file.unlink()
+        for filename, content in sorted(service.render_unit_files().items()):
+            parts.append(f"=== {filename} ===")
+            parts.append(normalize_unit_text(content, replacements))
         return "\n".join(parts)
 
     return render

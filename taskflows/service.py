@@ -1,27 +1,19 @@
-import asyncio
 import os
-import re
-import shlex
 import stat
-import subprocess
 import threading
 from collections.abc import Callable, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from pprint import pformat
 from typing import Literal, Optional, Union
 
-import docker.errors
-from dbus_next import BusType
-from dbus_next.aio import MessageBus
-from dbus_next.errors import DBusError
 from pydantic.dataclasses import dataclass as pdataclass
 
+# Re-exported for backwards compatibility — these moved to taskflows.common,
+# taskflows.docker, and taskflows.systemd but are widely imported from here.
 from .common import (
     _SYSTEMD_FILE_PREFIX,
-    extract_service_name,
+    extract_service_name,  # noqa: F401, E402
     load_service_files,
     logger,
     secure_write_text,
@@ -34,15 +26,36 @@ from .constraints import (
     SystemLoadConstraint,
     systemd_directive_name,
 )
-from .docker import (
+from .docker import (  # noqa: F401, E402
     DockerContainer,
     DockerImage,
     Volume,
     delete_docker_container,
     get_docker_client,
 )
+from .environments import Venv
 from .exec import PickledFunction
 from .schedule import Schedule
+from .systemd.dbus import (  # noqa: F401, E402
+    escape_path,
+    reload_unit_files,
+    session_dbus,
+    systemd_manager,
+)
+from .systemd.units import (  # noqa: F401, E402
+    disable_units,
+    enable_units,
+    get_schedule_info,
+    get_unit_file_states,
+    get_unit_files,
+    get_units,
+    is_start_service,
+    remove_units,
+    restart_units,
+    service_logs,
+    start_units,
+    stop_units,
+)
 
 ServiceT = Union[str, "Service"]
 ServicesT = ServiceT | Sequence[ServiceT]
@@ -285,85 +298,6 @@ class RestartPolicy:
         if self.delay:
             entries.add(f"RestartSec={self.delay}")
         return entries
-
-
-@dataclass
-class Venv:
-    env_name: str
-    custom_path: str | Path | None = None
-
-    @staticmethod
-    def _run_command(exe: Path, env_name: str, command: str) -> str:
-        runner = shlex.quote(str(exe))
-        quoted_env_name = shlex.quote(env_name)
-        live_output_flag = Venv._live_output_flag(exe)
-        executable_separator = "--"
-        live_output_part = f" {live_output_flag}" if live_output_flag else ""
-
-        return (
-            f"{runner} run -n {quoted_env_name}{live_output_part} {executable_separator} {command}"
-        )
-
-    @staticmethod
-    def _live_output_flag(exe: Path) -> str:
-        try:
-            completed = subprocess.run(
-                [str(exe), "run", "--help"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            help_text = f"{completed.stdout}\n{completed.stderr}"
-        except (OSError, subprocess.SubprocessError):
-            help_text = ""
-
-        if "--attach" in help_text:
-            return "-a ''"
-        if "--no-capture-output" in help_text:
-            return "--no-capture-output"
-        if "--live-stream" in help_text:
-            return "--live-stream"
-        if exe.name in {"mamba", "micromamba"}:
-            return ""
-        return "--no-capture-output"
-
-    def create_env_command(self, command: str) -> str:
-        # If custom path is provided, use it directly
-        if self.custom_path:
-            exe = Path(self.custom_path)
-            if not exe.is_file():
-                raise FileNotFoundError(f"Custom executable not found: {exe}")
-            return self._run_command(exe, self.env_name, command)
-
-        home = Path.home()
-        exes = (
-            # Mamba distributions
-            home.joinpath("mambaforge", "bin", "mamba"),
-            home.joinpath("miniforge3", "bin", "mamba"),
-            home.joinpath("micromamba", "bin", "micromamba"),
-            home.joinpath(".local", "bin", "micromamba"),
-            # Conda distributions
-            home.joinpath("miniconda3", "condabin", "conda"),
-            home.joinpath("miniconda3", "bin", "conda"),
-            home.joinpath("anaconda3", "condabin", "conda"),
-            home.joinpath("anaconda3", "bin", "conda"),
-            home.joinpath("miniconda", "condabin", "conda"),
-            home.joinpath("miniconda", "bin", "conda"),
-            home.joinpath("anaconda", "condabin", "conda"),
-            home.joinpath("anaconda", "bin", "conda"),
-            # Common system-wide locations
-            Path("/opt/conda/bin/conda"),
-            Path("/opt/miniconda3/bin/conda"),
-            Path("/opt/anaconda3/bin/conda"),
-            # Pyenv conda installations
-            home.joinpath(".pyenv", "versions", "miniconda3-latest", "bin", "conda"),
-            home.joinpath(".pyenv", "versions", "anaconda3-latest", "bin", "conda"),
-        )
-        for exe in exes:
-            if exe.is_file():
-                return self._run_command(exe, self.env_name, command)
-        raise FileNotFoundError(f"Virtualenv not found! Checked: {exes}")
 
 
 @dataclass
@@ -769,26 +703,26 @@ class Service:
 
     async def start(self):
         """Start this service."""
-        await _start_service(self.unit_files)
+        await start_units(self.unit_files)
 
     async def stop(self, timers: bool = False):
         """Stop this service."""
-        await _stop_service(self.unit_files if timers else self.service_files)
+        await stop_units(self.unit_files if timers else self.service_files)
 
     async def restart(self):
         """Restart this service."""
-        await _restart_service(self.service_files)
+        await restart_units(self.service_files)
 
     async def enable(self, timers_only: bool = False):
         """Enable this service."""
         if timers_only:
-            await _enable_service(self.timer_files)
+            await enable_units(self.timer_files)
         else:
-            await _enable_service(self.unit_files)
+            await enable_units(self.unit_files)
 
     async def disable(self):
         """Disable this service."""
-        await _disable_service(self.unit_files)
+        await disable_units(self.unit_files)
 
     async def remove(self, preserve_container: bool = False):
         """Remove this service.
@@ -796,7 +730,7 @@ class Service:
         Args:
             preserve_container: If True, don't delete the Docker container (for persisted containers)
         """
-        await _remove_service(
+        await remove_units(
             service_files=self.service_files,
             timer_files=self.timer_files,
             preserve_container=preserve_container,
@@ -811,8 +745,7 @@ class Service:
             isinstance(self.environment, DockerContainer) and self.environment.persisted
         )
         await self.remove(preserve_container=preserve_container)
-        self._write_timer_units()
-        self._write_service_units()
+        self.write_unit_files()
 
         # Write pickle files and ensure cleanup on error
         for func in self._pkl_funcs:
@@ -838,7 +771,7 @@ class Service:
 
             await self.enable(timers_only=not self.enabled)
             # Start timers now
-            await _start_service(self.timer_files)
+            await start_units(self.timer_files)
             if not defer_reload:
                 await reload_unit_files()
         except Exception as e:
@@ -905,12 +838,50 @@ class Service:
             raise
         return env_vars
 
-    def _write_timer_units(self):
+    @property
+    def base_file_stem(self) -> str:
+        return f"{_SYSTEMD_FILE_PREFIX}{self.name.replace(' ', '_')}"
+
+    def _unit_file_name(
+        self, unit_type: Literal["timer", "service"], prefix: str | None = None
+    ) -> str:
+        file_stem = self.base_file_stem
+        if prefix:
+            file_stem = f"{prefix}-{file_stem}"
+        return f"{file_stem}.{unit_type}"
+
+    def render_unit_files(self) -> dict[str, str]:
+        """Render all systemd unit files for this service as {filename: content}.
+
+        Pure with respect to the filesystem — nothing is written. Used by
+        create()/write_unit_files() and by anything that wants to diff the
+        desired state against installed units.
+        """
+        rendered = self._render_timer_units()
+        rendered.update(self._render_service_units())
+        return rendered
+
+    def write_unit_files(self) -> list[str]:
+        """Write all rendered unit files to the systemd user directory."""
+        systemd_dir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for filename, content in self.render_unit_files().items():
+            file = systemd_dir / filename
+            if file.exists():
+                logger.warning(f"Replacing existing unit: {file}")
+            else:
+                logger.info(f"Creating new unit: {file}")
+            secure_write_text(file, content, mode=stat.S_IRUSR | stat.S_IWUSR)
+            paths.append(str(file))
+        return paths
+
+    def _render_timer_units(self) -> dict[str, str]:
         from taskflows.security_validation import (
             validate_systemd_line,
             validate_systemd_value,
         )
 
+        rendered: dict[str, str] = {}
         for prefix, schedule in (
             (None, self.start_schedule),
             ("stop", self.stop_schedule),
@@ -934,30 +905,39 @@ class Service:
                 "[Install]",
                 "WantedBy=timers.target",
             ]
-            self._write_systemd_file("timer", "\n".join(content), prefix=prefix)
+            rendered[self._unit_file_name("timer", prefix)] = "\n".join(content)
+        return rendered
 
-    def _write_service_units(self):
-        srv_file = self._write_service_file(unit=self.unit_entries, service=self.service_entries)
+    def _render_service_units(self) -> dict[str, str]:
+        main_unit = self._unit_file_name("service")
+        rendered = {
+            main_unit: self._render_service_file(
+                unit=self.unit_entries, service=self.service_entries
+            )
+        }
         # TODO ExecCondition, ExecStartPre, ExecStartPost?
         if self.stop_schedule:
-            service = [f"ExecStart=systemctl --user stop {os.path.basename(srv_file)}"]
             # Pass unit entries to stop service as well to maintain consistency
-            self._write_service_file(unit=self.unit_entries, service=service, prefix="stop")
+            rendered[self._unit_file_name("service", "stop")] = self._render_service_file(
+                unit=self.unit_entries,
+                service=[f"ExecStart=systemctl --user stop {main_unit}"],
+                prefix="stop",
+            )
         if self.restart_schedule:
-            service = [f"ExecStart=systemctl --user restart {os.path.basename(srv_file)}"]
             # Pass unit entries to restart service as well to maintain consistency
-            self._write_service_file(unit=self.unit_entries, service=service, prefix="restart")
+            rendered[self._unit_file_name("service", "restart")] = self._render_service_file(
+                unit=self.unit_entries,
+                service=[f"ExecStart=systemctl --user restart {main_unit}"],
+                prefix="restart",
+            )
+        return rendered
 
-    @property
-    def base_file_stem(self) -> str:
-        return f"{_SYSTEMD_FILE_PREFIX}{self.name.replace(' ', '_')}"
-
-    def _write_service_file(
+    def _render_service_file(
         self,
         unit: list[str] | set[str] | None = None,
         service: list[str] | set[str] | None = None,
         prefix: str | None = None,
-    ):
+    ) -> str:
         from taskflows.security_validation import (
             validate_systemd_line,
             validate_systemd_value,
@@ -986,25 +966,7 @@ class Service:
             "[Install]",
             "WantedBy=default.target",
         ]
-        return self._write_systemd_file("service", "\n".join(content), prefix=prefix)
-
-    def _write_systemd_file(
-        self,
-        unit_type: Literal["timer", "service"],
-        content: str,
-        prefix: str | None = None,
-    ) -> str:
-        systemd_dir.mkdir(parents=True, exist_ok=True)
-        file_stem = self.base_file_stem
-        if prefix:
-            file_stem = f"{prefix}-{file_stem}"
-        file = systemd_dir / f"{file_stem}.{unit_type}"
-        if file.exists():
-            logger.warning(f"Replacing existing unit: {file}")
-        else:
-            logger.info(f"Creating new unit: {file}")
-        secure_write_text(file, content, mode=stat.S_IRUSR | stat.S_IWUSR)
-        return str(file)
+        return "\n".join(content)
 
     def __repr__(self):
         return str(self)
@@ -1140,585 +1102,10 @@ class Service:
         return deserialize_from_file(path, cls, format=format)
 
 
-def service_logs(service_name: str, n_lines: int = 1000):
-    """Get logs for a service.
-
-    For Docker containers: reads from docker logs
-    For systemd services: reads from journalctl
-
-    Args:
-        service_name (str): The name of the service to show logs for.
-        n_lines (int): Number of log lines to retrieve.
-
-    Returns:
-        str: The log output.
-    """
-    from taskflows.security_validation import validate_service_name
-
-    service_name = validate_service_name(service_name)
-    n_lines = max(1, min(int(n_lines), 100_000))
-    container_name = f"{_SYSTEMD_FILE_PREFIX}{service_name}"
-
-    # Check if this is a Docker container
-    try:
-        client = get_docker_client()
-        container = client.containers.get(container_name)
-        # Docker container exists - use docker logs
-        logs = container.logs(tail=n_lines, timestamps=True).decode("utf-8")
-        return logs.strip()
-    except docker.errors.NotFound:
-        pass  # Not a Docker container, fall through to journalctl
-    except Exception as e:
-        logger.debug(f"Docker check failed for {container_name}: {e}")
-
-    # Fall back to journalctl for systemd services
-    cmd = [
-        "journalctl",
-        "--user",
-        "-u",
-        f"{_SYSTEMD_FILE_PREFIX}{service_name}",
-        "-n",
-        str(n_lines),
-    ]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=int(os.getenv("TASKFLOWS_JOURNALCTL_TIMEOUT_SECONDS", "15")),
-    )
-    txt = []
-    if result.stderr:
-        txt.append(result.stderr)
-    if result.stdout:
-        txt.append(result.stdout)
-    return "\n\n".join(txt).strip()
-
-
-# DBus connection management with automatic reconnection (async dbus-next)
-# Uses asyncio for non-blocking D-Bus operations
-# Use a dict to store locks per event loop to avoid "bound to different event loop" errors
-_dbus_connection_locks: dict = {}
-_dbus_session_bus: MessageBus | None = None
-_dbus_manager = None
-_dbus_manager_introspection = None
-_dbus_last_error_time = 0
-_dbus_error_cooldown = 5  # Seconds between reconnection attempts
-
-
-def _get_dbus_lock() -> asyncio.Lock:
-    """Get the asyncio lock for the current event loop.
-
-    This handles the case where tests run with different event loops.
-    Each event loop gets its own lock.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    loop_id = id(loop) if loop else 0
-    if loop_id not in _dbus_connection_locks:
-        _dbus_connection_locks[loop_id] = asyncio.Lock()
-    return _dbus_connection_locks[loop_id]
-
-
-async def _reset_dbus_connections():
-    """Reset DBus connections (called when connection becomes stale)."""
-    global _dbus_session_bus, _dbus_manager, _dbus_manager_introspection
-    if _dbus_session_bus is not None:
-        with suppress(Exception):
-            _dbus_session_bus.disconnect()
-    _dbus_session_bus = None
-    _dbus_manager = None
-    _dbus_manager_introspection = None
-    logger.info("DBus connections reset for reconnection")
-
-
-async def _session_dbus_unlocked() -> MessageBus:
-    """Internal: Get or create the D-Bus session bus connection without acquiring lock.
-
-    MUST be called with _get_dbus_lock() already held.
-    """
-    global _dbus_session_bus, _dbus_last_error_time
-    import time
-
-    # Try to use existing connection
-    if _dbus_session_bus is not None and _dbus_session_bus.connected:
-        return _dbus_session_bus
-
-    if _dbus_session_bus is not None:
-        logger.warning("DBus session bus disconnected, reconnecting...")
-        _dbus_session_bus = None
-
-    # Apply cooldown to avoid tight reconnection loops
-    current_time = time.time()
-    if current_time - _dbus_last_error_time < _dbus_error_cooldown:
-        await asyncio.sleep(0.5)  # Brief delay
-
-    # Create new connection
-    try:
-        logger.info("Creating new DBus session bus connection")
-        _dbus_session_bus = await MessageBus(bus_type=BusType.SESSION).connect()
-        logger.info("DBus session bus connection established successfully")
-        return _dbus_session_bus
-    except Exception as e:
-        _dbus_last_error_time = current_time
-        logger.error(f"Failed to create DBus session bus: {e}", exc_info=True)
-        raise
-
-
-async def session_dbus() -> MessageBus:
-    """Get or create the D-Bus session bus connection.
-
-    Implements automatic reconnection on connection failure.
-    Handles systemd restarts gracefully.
-
-    Returns:
-        MessageBus instance
-
-    Raises:
-        DBusError: If connection cannot be established
-    """
-    async with _get_dbus_lock():
-        return await _session_dbus_unlocked()
-
-
-async def systemd_manager():
-    """Get or create the systemd D-Bus manager interface.
-
-    Implements automatic reconnection on connection failure.
-    Handles systemd restarts gracefully.
-
-    Returns:
-        Proxy interface to systemd manager
-
-    Raises:
-        DBusError: If manager cannot be accessed
-    """
-    global _dbus_manager, _dbus_manager_introspection
-
-    async with _get_dbus_lock():
-        # Get bus (will reconnect if needed) - use unlocked version since we already hold the lock
-        bus = await _session_dbus_unlocked()
-
-        # Try to use existing manager if bus is still the same
-        if _dbus_manager is not None:
-            try:
-                # Health check: try a simple property access
-                version = await _dbus_manager.get_version()
-                return _dbus_manager
-            except (DBusError, Exception) as e:
-                logger.warning(f"DBus manager health check failed: {e}")
-                await _reset_dbus_connections()
-                bus = await _session_dbus_unlocked()
-
-        # Create new manager interface
-        try:
-            logger.info("Creating new systemd D-Bus manager interface")
-            _dbus_manager_introspection = await bus.introspect(
-                "org.freedesktop.systemd1", "/org/freedesktop/systemd1"
-            )
-            proxy = bus.get_proxy_object(
-                "org.freedesktop.systemd1",
-                "/org/freedesktop/systemd1",
-                _dbus_manager_introspection,
-            )
-            _dbus_manager = proxy.get_interface("org.freedesktop.systemd1.Manager")
-            # Verify manager works
-            version = await _dbus_manager.get_version()
-            logger.info(f"Systemd D-Bus manager connected (version: {version})")
-            return _dbus_manager
-        except Exception as e:
-            logger.error(f"Failed to create systemd manager: {e}", exc_info=True)
-            await _reset_dbus_connections()
-            raise
-
-
-async def _dbus_operation_with_retry(operation, operation_name, max_retries=2):
-    """Execute a D-Bus operation with automatic retry on connection failure.
-
-    Args:
-        operation: Async callable that performs the D-Bus operation
-        operation_name: Human-readable name for logging
-        max_retries: Maximum number of retry attempts
-
-    Returns:
-        Result of the operation
-
-    Raises:
-        DBusError: If all retries fail
-    """
-    for attempt in range(max_retries + 1):
-        try:
-            return await operation()
-        except DBusError as e:
-            error_str = str(e).lower()
-
-            # Check if this is a connection-related error
-            is_connection_error = any(
-                keyword in error_str
-                for keyword in [
-                    "connection",
-                    "disconnected",
-                    "not available",
-                    "no reply",
-                ]
-            )
-
-            if is_connection_error and attempt < max_retries:
-                logger.warning(
-                    f"DBus operation '{operation_name}' failed with connection error "
-                    f"(attempt {attempt + 1}/{max_retries + 1}): {e}"
-                )
-                # Reset connections and retry
-                await _reset_dbus_connections()
-                await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
-                continue
-            # Non-connection error or final attempt - propagate
-            if attempt == max_retries:
-                logger.error(
-                    f"DBus operation '{operation_name}' failed after {max_retries + 1} attempts: {e}"
-                )
-            raise
-        except Exception as e:
-            # Unexpected error - always propagate
-            logger.error(
-                f"Unexpected error in DBus operation '{operation_name}': {e}",
-                exc_info=True,
-            )
-            raise
-    raise RuntimeError(f"DBus operation '{operation_name}' exhausted retries")
-
-
-async def reload_unit_files():
-    """Reload systemd unit files with automatic retry on connection failure."""
-
-    async def _reload():
-        mgr = await systemd_manager()
-        await mgr.call_reload()
-
-    await _dbus_operation_with_retry(_reload, "reload_unit_files")
-
-
-async def escape_path(path) -> str:
-    """Escape a path so that it can be used in a systemd file."""
-    mgr = await systemd_manager()
-    return await mgr.call_escape_path(path)
-
-
-async def _get_unit_proxy(bus: MessageBus, unit_path: str):
-    """Get a proxy object for a unit at the given path."""
-    introspection = await bus.introspect("org.freedesktop.systemd1", unit_path)
-    return bus.get_proxy_object("org.freedesktop.systemd1", unit_path, introspection)
-
-
-async def get_schedule_info(unit: str):
-    """Get the schedule information for a unit."""
-    unit_stem = Path(unit).stem
-    if not unit_stem.startswith(_SYSTEMD_FILE_PREFIX):
-        unit_stem = f"{_SYSTEMD_FILE_PREFIX}{unit_stem}"
-    manager = await systemd_manager()
-    bus = await session_dbus()
-
-    # Load service unit
-    service_path = await manager.call_load_unit(f"{unit_stem}.service")
-    service_proxy = await _get_unit_proxy(bus, service_path)
-    service_props = service_proxy.get_interface("org.freedesktop.DBus.Properties")
-
-    schedule = {
-        # timestamp of the last time a unit entered the active state.
-        "Last Start": await service_props.call_get(
-            "org.freedesktop.systemd1.Unit", "ActiveEnterTimestamp"
-        ),
-        # timestamp of the last time a unit exited the active state.
-        "Last Finish": await service_props.call_get(
-            "org.freedesktop.systemd1.Unit", "ActiveExitTimestamp"
-        ),
-    }
-
-    # Load timer unit
-    timer_path = await manager.call_load_unit(f"{unit_stem}.timer")
-    timer_proxy = await _get_unit_proxy(bus, timer_path)
-    timer_props = timer_proxy.get_interface("org.freedesktop.DBus.Properties")
-
-    schedule["Next Start"] = await timer_props.call_get(
-        "org.freedesktop.systemd1.Timer", "NextElapseUSecRealtime"
-    )
-
-    missing_dt = datetime(1970, 1, 1, 0, 0, 0)
-
-    def timestamp_to_dt(timestamp):
-        try:
-            # Handle Variant type from dbus-next
-            if hasattr(timestamp, "value"):
-                timestamp = timestamp.value
-            dt = datetime.fromtimestamp(timestamp / 1_000_000)
-            if dt == missing_dt:
-                return None
-            return dt
-        except (ValueError, TypeError):
-            # "year 586524 is out of range" or type error
-            return None
-
-    schedule = {field: timestamp_to_dt(val) for field, val in schedule.items()}
-
-    # TimersCalendar
-    timers_cal = []
-    timers_calendar_raw = await timer_props.call_get(
-        "org.freedesktop.systemd1.Timer", "TimersCalendar"
-    )
-    # Handle Variant type
-    if hasattr(timers_calendar_raw, "value"):
-        timers_calendar_raw = timers_calendar_raw.value
-    for timer in timers_calendar_raw:
-        base, spec, next_start = timer
-        timers_cal.append(
-            {
-                "base": base,
-                "spec": spec,
-                "next_start": timestamp_to_dt(next_start),
-            }
-        )
-    schedule["Timers Calendar"] = timers_cal
-    if (not schedule["Next Start"]) and (
-        next_start := [t["next_start"] for t in timers_cal if t["next_start"]]
-    ):
-        schedule["Next Start"] = min(next_start)
-
-    # TimersMonotonic
-    timers_mono = []
-    timers_monotonic_raw = await timer_props.call_get(
-        "org.freedesktop.systemd1.Timer", "TimersMonotonic"
-    )
-    # Handle Variant type
-    if hasattr(timers_monotonic_raw, "value"):
-        timers_monotonic_raw = timers_monotonic_raw.value
-    for timer in timers_monotonic_raw:
-        base, offset, next_start = timer
-        timers_mono.append(
-            {
-                "base": base,
-                "offset": offset,
-                "next_start": timestamp_to_dt(next_start),
-            }
-        )
-    schedule["Timers Monotonic"] = timers_mono
-    return schedule
-
-
-async def get_unit_files(
-    unit_type: Literal["service", "timer"] | None = None,
-    match: str | None = None,
-    states: str | Sequence[str] | None = None,
-) -> list[str]:
-    """Get a list of paths of taskflows unit files."""
-    file_states = await get_unit_file_states(unit_type=unit_type, match=match, states=states)
-    return list(file_states.keys())
-
-
-async def get_unit_file_states(
-    unit_type: Literal["service", "timer"] | None = None,
-    match: str | None = None,
-    states: str | Sequence[str] | None = None,
-) -> dict[str, str]:
-    """Map taskflows unit file path to unit state."""
-    states = states or []
-    pattern = _make_unit_match_pattern(unit_type=unit_type, match=match)
-    mgr = await systemd_manager()
-    files = await mgr.call_list_unit_files_by_patterns(states, [pattern])
-    logger.debug(f"Found {len(files)} units matching: {pattern}")
-    if not files:
-        logger.error(f"No taskflows unit files found matching: {pattern}")
-    return {str(file): str(state) for file, state in files}
-
-
-async def get_units(
-    unit_type: Literal["service", "timer"] | None = None,
-    match: str | None = None,
-    states: str | Sequence[str] | None = None,
-) -> list[dict[str, str]]:
-    """Get metadata for taskflows units."""
-    states = states or []
-    pattern = _make_unit_match_pattern(unit_type=unit_type, match=match)
-    mgr = await systemd_manager()
-    files = await mgr.call_list_units_by_patterns(states, [pattern])
-    fields = [
-        "unit_name",
-        "description",
-        "load_state",
-        "active_state",
-        "sub_state",
-        "followed",
-        "unit_path",
-        "job_id",
-        "job_type",
-        "job_path",
-    ]
-    units = [{k: str(v) for k, v in zip(fields, f, strict=False)} for f in files]
-    logger.debug(f"Found {len(units)} units matching: {pattern}")
-    return units
-
-
-def _make_unit_match_pattern(
-    unit_type: Literal["service", "timer"] | None = None, match: str | None = None
-) -> str:
-    pattern = match or "*"
-    if unit_type and not pattern.endswith(f".{unit_type}"):
-        pattern += f".{unit_type}"
-    else:
-        pattern += ".*"
-    if _SYSTEMD_FILE_PREFIX not in pattern:
-        pattern = f"*{_SYSTEMD_FILE_PREFIX}{pattern}"
-    return re.sub(r"\*{2,}", "*", pattern)
-
-
-def is_start_service(unit_file: str) -> bool:
-    """Check if a unit file is a main start service (not an auxiliary stop/restart service).
-
-    Args:
-        unit_file: Unit file path or filename
-
-    Returns:
-        True if the unit is the main service (doesn't start with "stop-" or "restart-")
-    """
-    filename = os.path.basename(unit_file) if os.path.sep in unit_file else unit_file
-    return not filename.startswith(("stop-", "restart-"))
-
-
-async def _start_service(files: Sequence[str]):
-    from taskflows.metrics import get_metrics
-
-    service_state = get_metrics().service_state
-    mgr = await systemd_manager()
-    for sf in files:
-        sf = os.path.basename(sf)
-        if is_start_service(sf):
-            service_name = extract_service_name(sf)
-            logger.info(f"Running: {sf}")
-            await mgr.call_start_unit(sf, "replace")
-            # Track service state change
-            service_state.labels(service_name=service_name, state="active").set(1)
-            service_state.labels(service_name=service_name, state="inactive").set(0)
-
-
-async def _stop_service(files: Sequence[str]):
-    from taskflows.metrics import get_metrics
-
-    service_state = get_metrics().service_state
-    mgr = await systemd_manager()
-    for sf in files:
-        sf = os.path.basename(sf)
-        service_name = extract_service_name(sf)
-        logger.info(f"Stopping: {sf}")
-        try:
-            await mgr.call_stop_unit(sf, "replace")
-            # Track service state change
-            service_state.labels(service_name=service_name, state="inactive").set(1)
-            service_state.labels(service_name=service_name, state="active").set(0)
-        except DBusError as err:
-            logger.warning(f"Could not stop {sf}: ({type(err)}) {err}")
-
-        # remove any failed status caused by stopping service.
-        # await mgr.call_reset_failed_unit(sf)
-
-
-async def _restart_service(files: Sequence[str]):
-    from taskflows.metrics import get_metrics
-
-    service_restarts = get_metrics().service_restarts
-
-    units = [os.path.basename(f) for f in files]
-    # only restart main service units
-    units = [u for u in units if is_start_service(u)]
-    mgr = await systemd_manager()
-    for sf in units:
-        service_name = extract_service_name(sf)
-        logger.info(f"Restarting: {sf}")
-        try:
-            await mgr.call_restart_unit(sf, "replace")
-            # Track restart
-            service_restarts.labels(service_name=service_name, reason="manual").inc()
-        except DBusError as err:
-            logger.warning(f"Could not restart {sf}: ({type(err)}) {err}")
-
-
-async def _enable_service(files: Sequence[str]):
-    mgr = await systemd_manager()
-    logger.info(f"Enabling: {pformat(files)}")
-
-    async def enable_files(files, is_retry=False):
-        try:
-            # the first bool controls whether the unit shall be enabled for runtime only (true, /run), or persistently (false, /etc).
-            # The second one controls whether symlinks pointing to other units shall be replaced if necessary.
-            await mgr.call_enable_unit_files(files, False, True)
-        except DBusError as err:
-            logger.warning(f"Could not enable {files}: ({type(err)}) {err}")
-            if not is_retry and len(files) > 1:
-                for file in files:
-                    await enable_files([file], is_retry=True)
-
-    await enable_files(files)
-
-
-async def _disable_service(files: Sequence[str]):
-    mgr = await systemd_manager()
-    files = [os.path.basename(f) for f in files]
-    logger.info(f"Disabling: {pformat(files)}")
-
-    async def disable_files(files, is_retry=False):
-        try:
-            # the first bool controls whether the unit shall be enabled for runtime only (true, /run), or persistently (false, /etc).
-            # The second one controls whether symlinks pointing to other units shall be replaced if necessary.
-            result = await mgr.call_disable_unit_files(files, False)
-            for meta in result:
-                # meta has: the type of the change (one of symlink or unlink), the file name of the symlink and the destination of the symlink.
-                logger.info(f"{meta[0]} {meta[1]} {meta[2]}")
-        except DBusError as err:
-            logger.warning(f"Could not disable {files}: ({type(err)}) {err}")
-            if not is_retry and len(files) > 1:
-                for file in files:
-                    await disable_files([file], is_retry=True)
-
-    await disable_files(files)
-
-
-async def _remove_service(
-    service_files: Sequence[str],
-    timer_files: Sequence[str],
-    preserve_container: bool = False,
-):
-    def valid_file_paths(files):
-        files = [Path(f) for f in files]
-        return [f for f in files if f.is_file()]
-
-    service_files = valid_file_paths(service_files)
-    timer_files = valid_file_paths(timer_files)
-    logger.info(f"Removing {len(service_files)} services and {len(timer_files)} timers")
-    files = service_files + timer_files
-    await _stop_service(files)
-    await _disable_service(files)
-    container_names = set()
-    mgr = await systemd_manager()
-    for srv_file in service_files:
-        logger.info(f"Cleaning cache and runtime directories: {srv_file}.")
-        try:
-            # the possible values are "configuration", "state", "logs", "cache", "runtime", "fdstore", and "all".
-            await mgr.call_clean_unit(srv_file.name, ["all"])
-        except DBusError as err:
-            logger.warning(f"Could not clean {srv_file}: ({type(err)}) {err}")
-        container_name = re.search(r"docker (?:start|stop) ([\w-]+)", srv_file.read_text())
-        if container_name:
-            container_names.add(container_name.group(1))
-    if not preserve_container:
-        for cname in container_names:
-            delete_docker_container(cname)
-    else:
-        logger.info(f"Preserving Docker containers: {container_names}")
-    for srv in service_files:
-        files.extend(services_data_dir.glob(f"{extract_service_name(srv)}#*.pickle"))
-    for file in files:
-        logger.info(f"Deleting {file}")
-        file.unlink(missing_ok=True)
-    logger.info(f"Finished removing {len(service_files)} services and {len(timer_files)} timers")
-    await reload_unit_files()
+# Backwards-compatible aliases for the pre-decomposition private names
+_start_service = start_units
+_stop_service = stop_units
+_restart_service = restart_units
+_enable_service = enable_units
+_disable_service = disable_units
+_remove_service = remove_units

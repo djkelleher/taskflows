@@ -176,8 +176,8 @@ def test_service_logs_sets_journalctl_timeout(monkeypatch):
     completed = MagicMock(stdout="logs", stderr="")
 
     with (
-        patch("taskflows.service.get_docker_client", side_effect=RuntimeError("no docker")),
-        patch("taskflows.service.subprocess.run", return_value=completed) as run,
+        patch("taskflows.systemd.units.get_docker_client", side_effect=RuntimeError("no docker")),
+        patch("taskflows.systemd.units.subprocess.run", return_value=completed) as run,
     ):
         assert service_logs("test-service") == "logs"
 
@@ -214,7 +214,7 @@ def test_venv_command_uses_attach_when_runner_supports_it(tmp_path):
     help_output = '--attach STREAM\n-a "" for disabling stream redirection'
 
     with patch(
-        "taskflows.service.subprocess.run",
+        "taskflows.environments.subprocess.run",
         return_value=MagicMock(stdout=help_output, stderr=""),
     ):
         command = Venv(env_name="prod env", custom_path=runner).create_env_command("python -V")
@@ -227,7 +227,7 @@ def test_venv_command_uses_no_capture_when_runner_supports_it(tmp_path):
     runner.touch()
 
     with patch(
-        "taskflows.service.subprocess.run",
+        "taskflows.environments.subprocess.run",
         return_value=MagicMock(stdout="--no-capture-output", stderr=""),
     ):
         command = Venv(env_name="prod env", custom_path=runner).create_env_command("python -V")
@@ -240,7 +240,7 @@ def test_venv_command_omits_live_output_flag_for_mamba_when_probe_fails(tmp_path
     runner.touch()
 
     with patch(
-        "taskflows.service.subprocess.run",
+        "taskflows.environments.subprocess.run",
         side_effect=OSError("not executable"),
     ):
         command = Venv(env_name="prod env", custom_path=runner).create_env_command("python -V")
