@@ -80,6 +80,7 @@ class TestAPIAuthentication(unittest.TestCase):
         """Test that all protected endpoints fail without authentication."""
         endpoints = [
             ("GET", "/list-servers"),
+            ("GET", "/next"),
             ("GET", "/metrics"),
             ("GET", "/list"),
             ("GET", "/status"),
@@ -113,6 +114,11 @@ class TestAPIAuthentication(unittest.TestCase):
         # Mock necessary dependencies - patch where used (api module), not where defined
         with (
             patch("taskflows.admin.api.list_servers", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "taskflows.admin.api.next_runs",
+                new_callable=AsyncMock,
+                return_value={"next_runs": {}, "hostname": "test"},
+            ),
             patch(
                 "taskflows.admin.api.list_services",
                 new_callable=AsyncMock,
@@ -193,6 +199,7 @@ class TestAPIAuthentication(unittest.TestCase):
         """Helper to test all endpoints with valid auth."""
         test_cases = [
             ("GET", "/list-servers", None, 200),
+            ("GET", "/next?iterations=1", None, 200),
             ("GET", "/metrics", None, 200),
             ("GET", "/list", None, 200),
             ("GET", "/status", None, 200),

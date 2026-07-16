@@ -35,6 +35,7 @@ from taskflows.admin.core import (
     list_servers,
     list_services,
     logs,
+    next_runs,
     remove,
     restart,
     show,
@@ -123,7 +124,7 @@ AUTH_PREFIXES = ("/auth/",)
 PUBLIC_AUTH_PATHS = {"/auth/login", "/auth/refresh"}
 TOP_LEVEL_API_PATHS = {
     "/list-servers",
-    "/history",
+    "/next",
     "/list",
     "/status",
     "/create",
@@ -516,6 +517,14 @@ async def metrics_endpoint():
 @app.get("/list-servers")
 async def list_servers_endpoint():
     return await list_servers(as_json=True)
+
+
+@app.get("/next")
+async def next_runs_endpoint(
+    match: str | None = Query(None),
+    iterations: int = Query(5, ge=1, le=50),
+):
+    return await next_runs(match=match, iterations=iterations, as_json=True)
 
 
 @app.get("/list")

@@ -177,6 +177,92 @@ async def list_services(
     return Table(service_rows, title=f"{title} ({len(services)})")
 
 
+async def next_runs(
+    host: str | None = None,
+    match: str | None = None,
+    iterations: int = 5,
+    as_json: bool = False,
+) -> Table:
+    """Show the upcoming activation times for scheduled (timer) services.
+
+    Calendar schedules are expanded with systemd-analyze; periodic
+    (boot/interval) timers report the next elapse systemd has computed.
+    Times are rendered in the configured display timezone.
+
+    Args:
+        host: Host address of the admin API server. If None, runs locally.
+        match: Optional pattern to filter services.
+        iterations: How many upcoming runs to show per calendar schedule.
+        as_json: Return raw JSON data instead of a Table component.
+    """
+    if host is None:
+        from taskflows.schedule import analyze_calendar_spec
+
+        tz = ZoneInfo(config.display_timezone)
+        files = await get_unit_files(match=match, unit_type="timer")
+        services: dict[str, list[str]] = {}
+        for f in files:
+            srv_name = extract_service_name(f)
+            try:
+                content = Path(f).read_text()
+            except OSError as err:
+                services[srv_name] = [f"error reading timer: {err}"]
+                continue
+            specs = [
+                line.split("=", 1)[1].strip()
+                for line in content.splitlines()
+                if line.startswith("OnCalendar=")
+            ]
+            runs: list[str] = []
+            for spec in specs:
+                try:
+                    runs.extend(
+                        analyze_calendar_spec(
+                            spec, iterations=iterations, timezone=config.display_timezone
+                        )
+                    )
+                except ValueError as err:
+                    runs.append(str(err))
+            if not specs:
+                # Periodic (OnBootSec/OnUnitActiveSec) timer: use systemd's own next elapse
+                info = await get_schedule_info(Path(f).name)
+                raw = info.get("Next Start")
+                value = getattr(raw, "value", raw)
+                try:
+                    usec = int(value)
+                except (TypeError, ValueError):
+                    usec = 0
+                if usec > 0:
+                    next_dt = datetime.fromtimestamp(usec / 1_000_000, tz=tz)
+                    runs.append(next_dt.strftime("%a %Y-%m-%d %H:%M:%S %Z"))
+                else:
+                    runs.append("no scheduled elapse (periodic timer not active)")
+            services[srv_name] = runs
+        data = with_hostname({"next_runs": services})
+    else:
+        params = {"iterations": iterations}
+        if match:
+            params["match"] = match
+        data = call_api(host, "/next", method="GET", params=params, timeout=30)
+
+    if as_json:
+        return data
+
+    if "error" in data:
+        return Table([{"Error": data["error"]}], title="Next Runs - Error")
+
+    rows = [
+        {"Service": srv, "Next Runs": "\n".join(runs) if runs else "-"}
+        for srv, runs in sorted(data.get("next_runs", {}).items())
+    ]
+    title = "Upcoming Runs"
+    if match:
+        title += f" - Matching '{match}'"
+    if not rows:
+        return Table([], title=f"{title} (None)")
+    return Table(rows, title=f"{title} ({len(rows)})")
+
+
 async def status(
     host: str | None = None,
     match: str | None = None,
@@ -965,6 +1051,7 @@ async def execute_command_on_servers(command: str, servers=None, **kwargs) -> di
     command_map = {
         "health": health_check,
         "list": list_services,
+        "next": next_runs,
         "status": status,
         "logs": logs,
         "show": show,

@@ -1,7 +1,41 @@
 # from pydantic.dataclasses import dataclass
+import os
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
+
+
+def analyze_calendar_spec(spec: str, iterations: int = 5, timezone: str | None = None) -> list[str]:
+    """Compute upcoming elapse times for an OnCalendar spec via systemd-analyze.
+
+    Returns human-readable timestamps (rendered in `timezone` when given).
+    Raises ValueError if systemd-analyze rejects the spec or is unavailable.
+    """
+    env = dict(os.environ)
+    if timezone:
+        env["TZ"] = timezone
+    try:
+        result = subprocess.run(
+            ["systemd-analyze", "calendar", f"--iterations={iterations}", spec],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        raise ValueError(f"systemd-analyze unavailable: {err}") from err
+    if result.returncode != 0:
+        raise ValueError(
+            f"systemd-analyze could not parse {spec!r}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    times = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith(("Next elapse:", "Iteration #")):
+            times.append(line.split(": ", 1)[1].strip())
+    return times
 
 
 def _validate_systemd_timer_value(value: str, field_name: str) -> str:
@@ -42,6 +76,9 @@ class Calendar(Schedule):
     persistent: bool = True
     # max allowed deviation from declared start time.
     accuracy: str = "1ms"
+    # delay each activation by a random amount up to this many seconds
+    # (RandomizedDelaySec) — spreads fleet-wide thundering herds.
+    randomized_delay: int | None = None
 
     def __post_init__(self):
         self.schedule = _validate_systemd_timer_value(self.schedule, "schedule")
@@ -49,10 +86,16 @@ class Calendar(Schedule):
         self.unit_entries.add(f"OnCalendar={self.schedule}")
         if self.persistent:
             self.unit_entries.add("Persistent=true")
+        if self.randomized_delay:
+            self.unit_entries.add(f"RandomizedDelaySec={self.randomized_delay}")
 
     @classmethod
     def from_datetime(cls, dt: datetime):
         return cls(schedule=dt.strftime("%a %Y-%m-%d %H:%M:%S %Z").strip())
+
+    def next_runs(self, n: int = 5, timezone: str | None = None) -> list[str]:
+        """Upcoming activation times for this calendar spec (via systemd-analyze)."""
+        return analyze_calendar_spec(self.schedule, iterations=n, timezone=timezone)
 
 
 @dataclass
@@ -70,6 +113,9 @@ class Periodic(Schedule):
     relative_to: Literal["finish", "start"]
     # max allowed deviation from declared start time.
     accuracy: str = "1ms"
+    # delay each activation by a random amount up to this many seconds
+    # (RandomizedDelaySec) — spreads fleet-wide thundering herds.
+    randomized_delay: int | None = None
 
     def __post_init__(self):
         if self.start_on not in ("boot", "login", "command"):
@@ -93,3 +139,5 @@ class Periodic(Schedule):
         elif self.relative_to == "finish":
             # defines a timer relative to when the unit the timer unit is activating was last deactivated.
             self.unit_entries.add(f"OnUnitInactiveSec={self.period}s")
+        if self.randomized_delay:
+            self.unit_entries.add(f"RandomizedDelaySec={self.randomized_delay}")

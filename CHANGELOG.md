@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`tf run module:func`** — run any Python function as a one-off task from
+  the CLI with `--kw key=value` arguments, `--retries`, and `--timeout`
+  (full task semantics: alerts, metrics, hard timeouts); non-zero exit on
+  failure.
+- **`tf next [match] -n 5`** — show upcoming activation times for scheduled
+  services (calendar schedules expanded via systemd-analyze, periodic timers
+  via systemd's next elapse), rendered in the configured display timezone;
+  works across registered servers and via the new `/next` API endpoint.
+- **`tf start <match> --wait`** — block until started service(s) exit and
+  report pass/fail with a matching exit code.
+- `Calendar`/`Periodic` schedules accept `randomized_delay` (seconds),
+  emitting `RandomizedDelaySec=` to spread fleet-wide thundering herds;
+  `Calendar.next_runs(n)` computes upcoming activations.
 - **systemd watchdog support (hang detection):** `Service(watchdog=Watchdog(
   interval_seconds=30))` emits `Type=notify`/`WatchdogSec=` so systemd
   restarts the service if liveness pings stop — catching hung (not just

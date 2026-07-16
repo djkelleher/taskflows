@@ -35,7 +35,7 @@ from msgflows.components import Table
 from rich.console import Console
 
 from taskflows.admin.core import execute_command_on_servers
-from taskflows.entrypoints import async_entrypoint
+from taskflows.entrypoints import async_entrypoint, parse_str_kwargs
 
 from .security import (
     config_file,
@@ -228,6 +228,86 @@ def generate_secret():
     click.echo(generate_jwt_secret())
 
 
+@cli.command(name="next")
+@click.argument("match", required=False)
+@click.option(
+    "-n",
+    "--iterations",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Number of upcoming runs to show per calendar schedule.",
+)
+@click.option(
+    "--server",
+    "-s",
+    multiple=True,
+    help="Server(s) to query. Can be specified multiple times. If not specified, queries all registered servers.",
+)
+@async_entrypoint(blocking=True)
+async def next_cmd(match: str | None, iterations: int, server: tuple = ()):
+    """Show upcoming run times for scheduled services.
+
+    Example: tf next my-job -n 3
+    """
+    kwargs = {"iterations": iterations}
+    if match:
+        kwargs["match"] = match
+    results = await execute_command_on_servers("next", servers=server, **kwargs)
+    _print_results(results)
+
+
+@cli.command(name="run")
+@click.argument("target")
+@click.option(
+    "--kw",
+    "-k",
+    "kw",
+    multiple=True,
+    help="key=value keyword argument for the function (repeatable).",
+)
+@click.option("--name", default=None, help="Task name (defaults to the function name).")
+@click.option("--retries", type=int, default=0, show_default=True, help="Retries on failure.")
+@click.option("--timeout", type=float, default=None, help="Timeout in seconds.")
+def run_cmd(target: str, kw: tuple, name: str | None, retries: int, timeout: float | None):
+    """Run a Python function as a one-off task (retries/timeout/alert semantics apply).
+
+    TARGET is 'module.path:function'; the current directory is importable.
+
+    Example: tf run myapp.jobs:refresh_data --kw date=2026-07-16 --retries 2
+    """
+    import sys
+    from importlib import import_module
+
+    from taskflows.tasks import run_task
+
+    module_name, sep, func_name = target.partition(":")
+    if not sep or not func_name:
+        raise click.UsageError("TARGET must be in the form 'module.path:function'")
+    sys.path.insert(0, os.getcwd())
+    try:
+        func = getattr(import_module(module_name), func_name)
+    except (ImportError, AttributeError) as err:
+        raise click.UsageError(f"Could not import {target!r}: {err}") from err
+
+    async def _run():
+        return await run_task(
+            func,
+            name=name or func_name,
+            required=True,
+            retries=retries,
+            timeout=timeout,
+            **parse_str_kwargs(kw),
+        )
+
+    try:
+        result = asyncio.run(_run())
+    except Exception as err:
+        raise click.ClickException(f"Task failed: {err}") from err
+    if result is not None:
+        click.echo(result)
+
+
 @cli.command(name="list")
 @click.argument("match", required=False)
 @click.option(
@@ -375,14 +455,23 @@ async def cli_create(search_in, include, exclude, server: tuple = ()):
     "-s",
     help="Server to execute on. If not specified, executes on the server that has the matching service.",
 )
+@click.option(
+    "--wait",
+    "-w",
+    is_flag=True,
+    help="Block until the started service(s) exit and report pass/fail (local only).",
+)
 @async_entrypoint(blocking=True)
 async def start(
     match: str,
     timers: bool = False,
     services: bool = False,
     server: str | None = None,
+    wait: bool = False,
 ):
     """Start services/timers on specified server."""
+    if wait and server:
+        raise click.UsageError("--wait is only supported for local services")
     kwargs = {"match": match}
     if timers:
         kwargs["timers"] = timers
@@ -391,6 +480,40 @@ async def start(
 
     results = await execute_command_on_servers("start", servers=server, **kwargs)
     _print_results(results)
+
+    if wait:
+        failed = await _wait_for_services_to_exit(match)
+        if failed:
+            raise click.ClickException(f"Service(s) failed: {', '.join(sorted(failed))}")
+        click.echo(click.style("All started services finished successfully", fg="green"))
+
+
+async def _wait_for_services_to_exit(match: str, poll_interval: float = 2.0) -> set[str]:
+    """Poll matched service units until none are active; return names that failed.
+
+    A unit that unloads (disappears from systemd) after exiting counts as
+    finished successfully; units left in the "failed" state are reported.
+    """
+    from taskflows.systemd import get_units, is_start_service
+
+    failed: set[str] = set()
+    while True:
+        units = [
+            u
+            for u in await get_units(unit_type="service", match=match)
+            if is_start_service(u["unit_name"])
+        ]
+        running = []
+        for unit in units:
+            state = unit["active_state"]
+            if state == "failed":
+                failed.add(unit["unit_name"])
+            elif state in ("active", "activating", "reloading", "deactivating"):
+                running.append(unit["unit_name"])
+        if not running:
+            return failed
+        click.echo(f"Waiting for: {', '.join(sorted(running))}")
+        await asyncio.sleep(poll_interval)
 
 
 @cli.command
