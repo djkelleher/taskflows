@@ -6,12 +6,13 @@ import os
 import re
 import signal
 import threading
+from collections.abc import Callable, Sequence
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import partial, wraps
 from logging import Logger
 from multiprocessing.context import BaseContext
-from typing import Any, Callable, List, Literal, Optional, Sequence
+from typing import Any, Literal, Optional
 from unittest.mock import Mock
 from urllib.parse import urlencode
 
@@ -19,16 +20,22 @@ import anyio
 import cloudpickle
 import structlog.contextvars
 from anyio.from_thread import BlockingPortal
+from msgflows import (
+    ContentType,
+    DiscordChannel,
+    EmailAddrs,
+    Emoji,
+    FontSize,
+    MsgDst,
+    SlackChannel,
+    Text,
+    send_alert,
+)
 from pydantic import BaseModel
 
-from msgflows import (ContentType, DiscordChannel, EmailAddrs, Emoji, FontSize,
-                      MsgDst, SlackChannel, Text, send_alert)
-
-from .common import config
+from .common import config, logql_string
 from .common import logger as default_logger
-from .common import logql_string
-from .loggers import (clear_request_context, generate_request_id,
-                      set_request_context)
+from .loggers import clear_request_context, generate_request_id, set_request_context
 from .loggers.structured import request_id_var, trace_id_var
 
 TaskEvent = Literal["start", "error", "finish"]
@@ -57,8 +64,8 @@ def get_current_task_id() -> str | None:
 
 def build_loki_query_url(
     task_name: str,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     error_only: bool = False,
 ) -> str:
     """
@@ -74,7 +81,7 @@ def build_loki_query_url(
         URL string for Grafana Explore with the Loki query
     """
     if end_time is None:
-        end_time = datetime.now(timezone.utc)
+        end_time = datetime.now(UTC)
     if start_time is None:
         start_time = end_time - timedelta(hours=1)  # Default to 1 hour lookback
 
@@ -127,8 +134,8 @@ class _RuntimeManager:
 
     def __init__(self):
         if not self._initialized:
-            self._portal: Optional[BlockingPortal] = None
-            self._thread: Optional[threading.Thread] = None
+            self._portal: BlockingPortal | None = None
+            self._thread: threading.Thread | None = None
             self._portal_healthy: bool = False
             self._last_health_check: float = 0
             self._health_check_interval: float = 1.0  # Check health every 1 second
@@ -195,9 +202,7 @@ class _RuntimeManager:
                 default_logger.debug("Portal health check passed")
                 portal = self._portal
                 if portal is None:
-                    raise RuntimeError(
-                        "Async portal health check passed without a portal"
-                    )
+                    raise RuntimeError("Async portal health check passed without a portal")
                 return portal
 
             # Restart portal if needed
@@ -208,15 +213,11 @@ class _RuntimeManager:
                         try:
                             # Clean up old portal if it exists
                             if self._portal is not None:
-                                default_logger.debug(
-                                    "Stopping old portal before restart"
-                                )
+                                default_logger.debug("Stopping old portal before restart")
                                 try:
                                     self._portal.call(self._portal.stop)
                                 except Exception as e:
-                                    default_logger.debug(
-                                        f"Error stopping old portal: {e}"
-                                    )
+                                    default_logger.debug(f"Error stopping old portal: {e}")
 
                             # Start new runtime
                             self._start_runtime()
@@ -225,9 +226,7 @@ class _RuntimeManager:
                             if self._is_portal_healthy():
                                 self._portal_healthy = True
                                 self._last_health_check = time.time()
-                                default_logger.info(
-                                    "Portal successfully restarted and verified"
-                                )
+                                default_logger.info("Portal successfully restarted and verified")
                                 portal = self._portal
                                 if portal is None:
                                     raise RuntimeError(
@@ -240,9 +239,7 @@ class _RuntimeManager:
                                 )
 
                         except Exception as e:
-                            default_logger.error(
-                                f"Portal restart failed: {e}", exc_info=True
-                            )
+                            default_logger.error(f"Portal restart failed: {e}", exc_info=True)
                             self._portal_healthy = False
 
             # Wait before retry (except on last attempt)
@@ -293,9 +290,7 @@ class _RuntimeManager:
 
         # Check if there was an error during startup
         if "error" in error_holder:
-            raise RuntimeError(
-                f"Async runtime failed to start: {error_holder['error']}"
-            )
+            raise RuntimeError(f"Async runtime failed to start: {error_holder['error']}")
 
         self._portal = portal_holder.get("portal")
         if not self._portal:
@@ -334,8 +329,7 @@ def _sync_timeout_worker(serialized_call: bytes, child_conn) -> None:
             child_conn.send(
                 (
                     "error_repr",
-                    f"{type(exc).__name__}: {exc} "
-                    f"(also failed to serialize exception: {send_exc})",
+                    f"{type(exc).__name__}: {exc} (also failed to serialize exception: {send_exc})",
                 )
             )
     else:
@@ -424,8 +418,7 @@ async def _run_sync_with_hard_timeout(
                     continue
                 finished = True
                 raise RuntimeError(
-                    f"Task process exited without returning a result "
-                    f"(exit code {proc.exitcode})"
+                    f"Task process exited without returning a result (exit code {proc.exitcode})"
                 )
 
             if asyncio.get_running_loop().time() >= deadline:
@@ -445,9 +438,7 @@ async def _run_sync_with_hard_timeout(
                         proc.kill()
                     await asyncio.to_thread(proc.join, 2)
                 finished = True
-                raise TimeoutError(
-                    f"Synchronous task timed out after {timeout} seconds"
-                )
+                raise TimeoutError(f"Synchronous task timed out after {timeout} seconds")
 
             remaining = max(0, deadline - asyncio.get_running_loop().time())
             await asyncio.sleep(min(0.05, remaining))
@@ -483,10 +474,7 @@ class Alerts(BaseModel):
         valid_destination_types = (EmailAddrs, SlackChannel, DiscordChannel)
         for destination in self.send_to:
             is_test_double = isinstance(destination, Mock)
-            if (
-                not isinstance(destination, valid_destination_types)
-                and not is_test_double
-            ):
+            if not isinstance(destination, valid_destination_types) and not is_test_double:
                 raise TypeError(
                     "send_to entries must be EmailAddrs, SlackChannel, "
                     f"or DiscordChannel instances, got {type(destination).__name__}"
@@ -497,18 +485,16 @@ class Alerts(BaseModel):
 
 def _normalize_alerts(
     alerts: Optional["Alerts | MsgDst | Sequence[Alerts | MsgDst]"],
-) -> Optional[List[Alerts]]:
+) -> list[Alerts] | None:
     """Normalize alert configuration to a list of Alerts objects."""
     if not alerts:
         return None
-    if isinstance(alerts, Alerts) or isinstance(
-        alerts, (EmailAddrs, SlackChannel, DiscordChannel)
-    ):
+    if isinstance(alerts, (Alerts, EmailAddrs, SlackChannel, DiscordChannel)):
         alerts = [alerts]
     return [a if isinstance(a, Alerts) else Alerts(send_to=a) for a in alerts]
 
 
-def _validate_task_options(retries: int, timeout: Optional[float]) -> None:
+def _validate_task_options(retries: int, timeout: float | None) -> None:
     if retries < 0:
         raise ValueError("retries must be greater than or equal to 0")
     if timeout is not None and timeout <= 0:
@@ -522,9 +508,9 @@ class TaskLogger:
         self,
         name: str,
         required: bool,
-        alerts: Optional[Sequence[Alerts]] = None,
+        alerts: Sequence[Alerts] | None = None,
         error_msg_max_length: int = 5000,
-        task_id: Optional[str] = None,
+        task_id: str | None = None,
     ):
         """
         Initialize a TaskLogger instance.
@@ -556,7 +542,7 @@ class TaskLogger:
         set_request_context(task_id=self.task_id, task_name=self.name)
 
         # record the start time of the task
-        self.start_time = datetime.now(timezone.utc)
+        self.start_time = datetime.now(UTC)
 
         # if there are any start alerts configured, send them
         if send_to := self._event_alerts("start"):
@@ -588,7 +574,7 @@ class TaskLogger:
             loki_url = build_loki_query_url(
                 task_name=self.name,
                 start_time=self.start_time,
-                end_time=datetime.now(timezone.utc),
+                end_time=datetime.now(UTC),
                 error_only=True,
             )
 
@@ -623,7 +609,7 @@ class TaskLogger:
         """
         try:
             # record the finish time
-            finish_time = datetime.now(timezone.utc)
+            finish_time = datetime.now(UTC)
 
             # if there are any finish alerts configured, send them
             if send_to := self._event_alerts("finish"):
@@ -700,7 +686,7 @@ class TaskLogger:
                         # constructed with just a string message
                         raise RuntimeError(
                             f"{len(self.errors)} errors executing task {self.name}:\n{errors_str}"
-                        )
+                        ) from None
                 raise RuntimeError(
                     f"{len(self.errors)} errors executing task {self.name}: {self.errors}"
                 )
@@ -709,25 +695,20 @@ class TaskLogger:
             _current_task_id.set(None)
             clear_request_context()
 
-    def _event_alerts(self, event: Literal["start", "error", "finish"]) -> List[MsgDst]:
+    def _event_alerts(self, event: Literal["start", "error", "finish"]) -> list[MsgDst]:
         """Get the list of destinations to send alerts for the given event."""
-        return [
-            dst
-            for alert in self.alerts
-            if event in alert.send_on
-            for dst in alert.send_to
-        ]
+        return [dst for alert in self.alerts if event in alert.send_on for dst in alert.send_to]
 
 
 async def _async_task_wrapper(
     func: Callable,
     retries: int,
-    timeout: Optional[float],
+    timeout: float | None,
     task_logger: TaskLogger,
     logger: Logger,
-    is_async: Optional[bool] = None,
+    is_async: bool | None = None,
     task_args: Sequence[Any] = (),
-    task_kwargs: Optional[dict[str, Any]] = None,
+    task_kwargs: dict[str, Any] | None = None,
 ):
     """
     Async wrapper for a task function.
@@ -737,17 +718,14 @@ async def _async_task_wrapper(
     """
     import time
 
-    from taskflows.metrics import (task_count, task_duration, task_errors,
-                                   task_retries)
+    from taskflows.metrics import task_count, task_duration, task_errors, task_retries
 
     await task_logger.on_task_start()
     start_time = time.perf_counter()
     status = "failure"  # Default status
 
     # Determine if function is async (use cached value if provided)
-    func_is_async = (
-        is_async if is_async is not None else asyncio.iscoroutinefunction(func)
-    )
+    func_is_async = is_async if is_async is not None else asyncio.iscoroutinefunction(func)
     task_kwargs = task_kwargs or {}
 
     # Retry loop: range(retries + 1) gives us (retries + 1) total attempts
@@ -773,16 +751,12 @@ async def _async_task_wrapper(
                     )
                 else:
                     result = await asyncio.to_thread(run_in_context)
-            await task_logger.on_task_finish(
-                success=True, retries=i, return_value=result
-            )
+            await task_logger.on_task_finish(success=True, retries=i, return_value=result)
             # Track success metrics
             status = "success"
             task_count.labels(task_name=task_logger.name, status="success").inc()
             duration = time.perf_counter() - start_time
-            task_duration.labels(task_name=task_logger.name, status="success").observe(
-                duration
-            )
+            task_duration.labels(task_name=task_logger.name, status="success").observe(duration)
             return result
         except TimeoutError as exp:
             msg = f"Task {task_logger.name} timed out. Retries remaining: {retries - i}.\n({type(exp)}) -- {exp}"
@@ -793,9 +767,7 @@ async def _async_task_wrapper(
             else:
                 # Final timeout failure
                 status = "timeout"
-                task_errors.labels(
-                    task_name=task_logger.name, error_type="timeout"
-                ).inc()
+                task_errors.labels(task_name=task_logger.name, error_type="timeout").inc()
                 task_count.labels(task_name=task_logger.name, status="timeout").inc()
         except Exception as exp:
             msg = f"Error executing task {task_logger.name}. Retries remaining: {retries - i}.\n({type(exp)}) -- {exp}"
@@ -806,17 +778,13 @@ async def _async_task_wrapper(
             else:
                 # Final failure
                 error_type = type(exp).__name__
-                task_errors.labels(
-                    task_name=task_logger.name, error_type=error_type
-                ).inc()
+                task_errors.labels(task_name=task_logger.name, error_type=error_type).inc()
                 task_count.labels(task_name=task_logger.name, status="failure").inc()
 
     # Track final duration for failures
     if status != "success":
         duration = time.perf_counter() - start_time
-        task_duration.labels(task_name=task_logger.name, status=status).observe(
-            duration
-        )
+        task_duration.labels(task_name=task_logger.name, status=status).observe(duration)
 
     await task_logger.on_task_finish(success=False, retries=retries)
     return None
@@ -824,12 +792,12 @@ async def _async_task_wrapper(
 
 async def run_task(
     func: Callable,
-    name: Optional[str] = None,
+    name: str | None = None,
     required: bool = False,
     retries: int = 0,
-    timeout: Optional[float] = None,
-    alerts: Optional[Sequence[Alerts | MsgDst]] = None,
-    logger: Optional[Logger] = None,
+    timeout: float | None = None,
+    alerts: Sequence[Alerts | MsgDst] | None = None,
+    logger: Logger | None = None,
     *args,
     **kwargs,
 ):
@@ -867,12 +835,12 @@ async def run_task(
 
 
 def task(
-    name: Optional[str] = None,
+    name: str | None = None,
     required: bool = False,
     retries: int = 0,
-    timeout: Optional[float] = None,
-    alerts: Optional[Sequence[Alerts | MsgDst]] = None,
-    logger: Optional[Logger] = None,
+    timeout: float | None = None,
+    alerts: Sequence[Alerts | MsgDst] | None = None,
+    logger: Logger | None = None,
 ):
     """Decorator for both sync and async task functions.
 

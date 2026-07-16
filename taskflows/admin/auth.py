@@ -4,15 +4,14 @@ import secrets
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from datetime import UTC, datetime, timedelta
 
 import jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
 
-from taskflows.common import logger, secure_write_text, services_data_dir
 from taskflows.admin.security import _locked_json_store
+from taskflows.common import logger, secure_write_text, services_data_dir
 
 # Environment variable names for credentials
 ENV_ADMIN_USER = "TF_ADMIN_USER"
@@ -41,7 +40,7 @@ class User(BaseModel):
     password_hash: str
     role: str = "admin"
     created_at: datetime
-    last_login: Optional[datetime] = None
+    last_login: datetime | None = None
 
 
 class JWTToken(BaseModel):
@@ -67,7 +66,7 @@ class TokenPayload(BaseModel):
     exp: datetime
     iat: datetime
     type: str
-    jti: Optional[str] = None
+    jti: str | None = None
 
 
 class UIConfig(BaseModel):
@@ -114,35 +113,27 @@ def load_ui_config() -> UIConfig:
 
 def save_ui_config(config: UIConfig) -> None:
     """Save UI configuration to file."""
-    secure_write_text(
-        ui_config_file, json.dumps(config.model_dump(), indent=2, default=str)
-    )
+    secure_write_text(ui_config_file, json.dumps(config.model_dump(), indent=2, default=str))
 
 
-def load_users() -> Dict[str, User]:
+def load_users() -> dict[str, User]:
     """Load users from file."""
     if users_file.exists():
         users_data = _load_json_object(users_file, "Users file")
-        return {
-            username: User(**user_data) for username, user_data in users_data.items()
-        }
+        return {username: User(**user_data) for username, user_data in users_data.items()}
     return {}
 
 
-def save_users(users: Dict[str, User]) -> None:
+def save_users(users: dict[str, User]) -> None:
     """Save users to file."""
-    users_data = {
-        username: user.model_dump(mode="json") for username, user in users.items()
-    }
+    users_data = {username: user.model_dump(mode="json") for username, user in users.items()}
     secure_write_text(users_file, json.dumps(users_data, indent=2, default=str))
 
 
-def _cleanup_refresh_tokens(tokens: Dict[str, dict]) -> None:
+def _cleanup_refresh_tokens(tokens: dict[str, dict]) -> None:
     current_time = int(time.time())
     expired = [
-        token_id
-        for token_id, data in tokens.items()
-        if int(data.get("exp", 0)) <= current_time
+        token_id for token_id, data in tokens.items() if int(data.get("exp", 0)) <= current_time
     ]
     for token_id in expired:
         tokens.pop(token_id, None)
@@ -207,7 +198,7 @@ def create_admin_user(username: str, password: str) -> User:
         username=username,
         password_hash=password_hash,
         role="admin",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
     users[username] = user
@@ -217,7 +208,7 @@ def create_admin_user(username: str, password: str) -> User:
     return user
 
 
-def get_user(username: str) -> Optional[User]:
+def get_user(username: str) -> User | None:
     """Get a user by username."""
     users = load_users()
     return users.get(username)
@@ -227,11 +218,11 @@ def update_user_last_login(username: str) -> None:
     """Update user's last login timestamp."""
     users = load_users()
     if username in users:
-        users[username].last_login = datetime.now(timezone.utc)
+        users[username].last_login = datetime.now(UTC)
         save_users(users)
 
 
-def _authenticate_and_update_login(username: str, password: str) -> Optional[User]:
+def _authenticate_and_update_login(username: str, password: str) -> User | None:
     """Authenticate a file-based user and update last_login in one read+write."""
     users = load_users()
     user = users.get(username)
@@ -241,7 +232,7 @@ def _authenticate_and_update_login(username: str, password: str) -> Optional[Use
     if not verify_password(password, user.password_hash):
         logger.warning(f"Invalid password for user {username}")
         return None
-    user.last_login = datetime.now(timezone.utc)
+    user.last_login = datetime.now(UTC)
     save_users(users)
     return user
 
@@ -257,11 +248,11 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
 
 def create_access_token(username: str, jwt_secret: str) -> str:
     """Create a JWT access token."""
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(UTC) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": username,
         "exp": expire,
-        "iat": datetime.now(timezone.utc),
+        "iat": datetime.now(UTC),
         "type": "access",
     }
     return jwt.encode(payload, jwt_secret, algorithm=JWT_ALGORITHM)
@@ -269,12 +260,12 @@ def create_access_token(username: str, jwt_secret: str) -> str:
 
 def create_refresh_token(username: str, jwt_secret: str) -> str:
     """Create a JWT refresh token."""
-    expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    expire = datetime.now(UTC) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     token_id = uuid.uuid4().hex
     payload = {
         "sub": username,
         "exp": expire,
-        "iat": datetime.now(timezone.utc),
+        "iat": datetime.now(UTC),
         "type": "refresh",
         "jti": token_id,
     }
@@ -283,25 +274,17 @@ def create_refresh_token(username: str, jwt_secret: str) -> str:
     return token
 
 
-def verify_token(
-    token: str, jwt_secret: str, token_type: str = "access"
-) -> Optional[str]:
+def verify_token(token: str, jwt_secret: str, token_type: str = "access") -> str | None:
     """Verify a JWT token and return the username if valid."""
     try:
         payload = jwt.decode(token, jwt_secret, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != token_type:
-            logger.warning(
-                f"Token type mismatch: expected {token_type}, got {payload.get('type')}"
-            )
+            logger.warning(f"Token type mismatch: expected {token_type}, got {payload.get('type')}")
             return None
         username = payload.get("sub")
         if token_type == "refresh":
             token_id = payload.get("jti")
-            if (
-                not token_id
-                or not username
-                or not _is_refresh_token_active(token_id, username)
-            ):
+            if not token_id or not username or not _is_refresh_token_active(token_id, username):
                 logger.warning("Refresh token is revoked or unknown")
                 return None
         return username
@@ -313,7 +296,7 @@ def verify_token(
         return None
 
 
-def authenticate_user(username: str, password: str) -> Optional[User]:
+def authenticate_user(username: str, password: str) -> User | None:
     """Authenticate a user with username and password.
 
     Checks environment variables TF_ADMIN_USER and TF_ADMIN_PASSWORD first,
@@ -323,17 +306,21 @@ def authenticate_user(username: str, password: str) -> Optional[User]:
     env_user = os.getenv(ENV_ADMIN_USER)
     env_password = os.getenv(ENV_ADMIN_PASSWORD)
 
-    if env_user and env_password:
-        if username == env_user and secrets.compare_digest(password, env_password):
-            logger.debug("User authenticated via environment variables")
-            return User(
-                username=username,
-                password_hash="",  # Not needed for env-based auth
-                role="admin",
-                created_at=datetime.now(timezone.utc),
-            )
-        # If env vars are set but don't match, still check file-based users
-        # This allows both methods to coexist
+    if (
+        env_user
+        and env_password
+        and username == env_user
+        and secrets.compare_digest(password, env_password)
+    ):
+        logger.debug("User authenticated via environment variables")
+        return User(
+            username=username,
+            password_hash="",  # Not needed for env-based auth
+            role="admin",
+            created_at=datetime.now(UTC),
+        )
+    # If env vars are set but don't match, still check file-based users
+    # This allows both methods to coexist
 
     # Fall back to file-based users
     return _authenticate_and_update_login(username, password)

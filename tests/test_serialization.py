@@ -2,20 +2,12 @@
 
 import json
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from taskflows.serialization import (
-    serialize,
-    deserialize,
-    to_dict,
-    serialize_to_file,
-    deserialize_from_file,
-    get_registered_type,
-)
-from taskflows.service import Venv, Service, RestartPolicy
+from taskflows.constraints import CgroupConfig, CPUPressure, Memory
 from taskflows.docker import (
     ContainerLimits,
     DockerContainer,
@@ -24,7 +16,15 @@ from taskflows.docker import (
     Volume,
 )
 from taskflows.schedule import Calendar, Periodic
-from taskflows.constraints import CgroupConfig, Memory, CPUPressure
+from taskflows.serialization import (
+    deserialize,
+    deserialize_from_file,
+    get_registered_type,
+    serialize,
+    serialize_to_file,
+    to_dict,
+)
+from taskflows.service import RestartPolicy, Service, Venv
 
 
 class TestTypeRegistry:
@@ -117,9 +117,7 @@ class TestDockerContainerSerialization:
             name="web-server",
             volumes=[
                 Volume(host_path="/data", container_path="/usr/share/nginx/html"),
-                Volume(
-                    host_path="/config", container_path="/etc/nginx", read_only=True
-                ),
+                Volume(host_path="/config", container_path="/etc/nginx", read_only=True),
             ],
         )
         data = to_dict(container)
@@ -236,9 +234,7 @@ class TestCgroupConfigSerialization:
         assert restored.memory_high == cgroup.memory_high
         assert restored.device_read_bps == cgroup.device_read_bps
         assert restored.oom_policy == cgroup.oom_policy
-        assert restored.managed_oom_memory_pressure == (
-            cgroup.managed_oom_memory_pressure
-        )
+        assert restored.managed_oom_memory_pressure == (cgroup.managed_oom_memory_pressure)
         assert restored.managed_oom_memory_pressure_limit == (
             cgroup.managed_oom_memory_pressure_limit
         )
@@ -422,10 +418,10 @@ class TestEdgeCases:
 
     def test_datetime_serialization(self):
         """Test datetime serialization."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         data = {"timestamp": now}
 
-        from taskflows.serialization import _serialize_value, _deserialize_value
+        from taskflows.serialization import _deserialize_value, _serialize_value
 
         serialized = _serialize_value(data)
         assert serialized["timestamp"]["type"] == "datetime"
@@ -435,7 +431,7 @@ class TestEdgeCases:
 
     def test_set_serialization(self):
         """Test set serialization."""
-        from taskflows.serialization import _serialize_value, _deserialize_value
+        from taskflows.serialization import _deserialize_value, _serialize_value
 
         data = {"items": {"a", "b", "c"}}
         serialized = _serialize_value(data)
@@ -951,8 +947,8 @@ services:
 
     def test_infer_calendar_from_schedule(self):
         """Test that Calendar is inferred from schedule key."""
-        from taskflows.serialization import load_services_from_yaml
         from taskflows.schedule import Calendar
+        from taskflows.serialization import load_services_from_yaml
 
         yaml_content = """
 services:
@@ -976,8 +972,8 @@ services:
 
     def test_infer_calendar_from_string(self):
         """Test that a string schedule becomes a Calendar."""
-        from taskflows.serialization import load_services_from_yaml
         from taskflows.schedule import Calendar
+        from taskflows.serialization import load_services_from_yaml
 
         yaml_content = """
 services:
@@ -993,16 +989,14 @@ services:
             services = load_services_from_yaml(path)
             assert len(services) == 1
             assert isinstance(services[0].start_schedule, Calendar)
-            assert (
-                services[0].start_schedule.schedule == "Mon-Sun 02:00 America/New_York"
-            )
+            assert services[0].start_schedule.schedule == "Mon-Sun 02:00 America/New_York"
         finally:
             path.unlink()
 
     def test_infer_periodic_from_period(self):
         """Test that Periodic is inferred from period key."""
-        from taskflows.serialization import load_services_from_yaml
         from taskflows.schedule import Periodic
+        from taskflows.serialization import load_services_from_yaml
 
         yaml_content = """
 services:
@@ -1294,8 +1288,8 @@ services:
 
     def test_mixed_explicit_and_inferred_types(self):
         """Test mixing explicit type fields with inferred types."""
-        from taskflows.serialization import load_services_from_yaml
         from taskflows.schedule import Calendar, Periodic
+        from taskflows.serialization import load_services_from_yaml
 
         yaml_content = """
 services:
@@ -1351,6 +1345,7 @@ class TestServiceRegistrySerialization:
     def test_registry_to_json(self):
         """Test serializing ServiceRegistry to JSON."""
         import json
+
         from taskflows.service import ServiceRegistry
 
         registry = ServiceRegistry(
@@ -1368,9 +1363,7 @@ class TestServiceRegistrySerialization:
         from taskflows.service import ServiceRegistry
 
         original = ServiceRegistry(
-            Service(
-                name="web", start_command="python web.py", description="Web server"
-            ),
+            Service(name="web", start_command="python web.py", description="Web server"),
             Service(name="worker", start_command="python worker.py", enabled=True),
         )
 
@@ -1437,8 +1430,8 @@ class TestServiceRegistrySerialization:
 
     def test_registry_with_complex_services(self):
         """Test ServiceRegistry with services that have environments and schedules."""
-        from taskflows.service import ServiceRegistry
         from taskflows.schedule import Calendar
+        from taskflows.service import ServiceRegistry
 
         registry = ServiceRegistry(
             Service(
@@ -1644,8 +1637,8 @@ services:
 
     def test_yaml_with_human_readable_time(self):
         """Test loading YAML with human-readable time durations."""
-        from taskflows.serialization import load_services_from_yaml
         from taskflows.schedule import Periodic
+        from taskflows.serialization import load_services_from_yaml
 
         yaml_content = """
 services:
@@ -1733,8 +1726,8 @@ services:
 
     def test_memory_constraint_with_human_readable(self):
         """Test Memory constraint with human-readable amount."""
-        from taskflows.serialization import load_services_from_yaml
         from taskflows.constraints import Memory
+        from taskflows.serialization import load_services_from_yaml
 
         yaml_content = """
 services:

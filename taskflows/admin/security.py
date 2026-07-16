@@ -5,11 +5,10 @@ import secrets
 import threading
 import time
 from contextlib import contextmanager
-from typing import List, Optional
 
 from pydantic import BaseModel
-from taskflows.common import secure_write_text, services_data_dir
 
+from taskflows.common import secure_write_text, services_data_dir
 
 _hmac_nonce_lock = threading.Lock()
 _csrf_token_lock = threading.Lock()
@@ -40,10 +39,10 @@ class SecurityConfig(BaseModel):
 
     # CORS (enabled when UI is enabled)
     enable_cors: bool = False
-    allowed_origins: List[str] = ["http://localhost:3000", "http://localhost:7777"]
-    allowed_methods: List[str] = ["GET", "POST", "PUT", "DELETE"]
+    allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:7777"]
+    allowed_methods: list[str] = ["GET", "POST", "PUT", "DELETE"]
     # Restrict allowed headers to prevent CSRF - only allow necessary headers
-    allowed_headers: List[str] = [
+    allowed_headers: list[str] = [
         "Authorization",
         "Content-Type",
         "X-CSRF-Token",
@@ -67,36 +66,33 @@ def _locked_json_store(path, process_lock, default_factory=dict):
     """Load/update a JSON store while holding thread and process locks."""
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with process_lock:
-        with open(lock_path, "a+") as lock_file:
-            try:
-                import fcntl
+    with process_lock, open(lock_path, "a+") as lock_file:
+        try:
+            import fcntl
 
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            except ImportError:
-                fcntl = None
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            fcntl = None
 
-            try:
-                if path.exists():
-                    try:
-                        data = json.loads(path.read_text())
-                    except json.JSONDecodeError as exc:
-                        raise RuntimeError(
-                            f"Security state file {path} is corrupt; refusing to reset it"
-                        ) from exc
-                    if not isinstance(data, dict):
-                        raise RuntimeError(
-                            f"Security state file {path} must contain a JSON object"
-                        )
-                else:
-                    data = default_factory()
-                original_data = json.dumps(data, sort_keys=True, default=str)
-                yield data
-                if json.dumps(data, sort_keys=True, default=str) != original_data:
-                    secure_write_text(path, json.dumps(data, indent=2, default=str))
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        try:
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text())
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"Security state file {path} is corrupt; refusing to reset it"
+                    ) from exc
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"Security state file {path} must contain a JSON object")
+            else:
+                data = default_factory()
+            original_data = json.dumps(data, sort_keys=True, default=str)
+            yield data
+            if json.dumps(data, sort_keys=True, default=str) != original_data:
+                secure_write_text(path, json.dumps(data, indent=2, default=str))
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def load_security_config() -> SecurityConfig:
@@ -123,10 +119,10 @@ def _canonical_hmac_message(
     timestamp: str,
     body: str = "",
     *,
-    method: Optional[str] = None,
-    path: Optional[str] = None,
+    method: str | None = None,
+    path: str | None = None,
     query_string: str = "",
-    nonce: Optional[str] = None,
+    nonce: str | None = None,
 ) -> str:
     """Build the canonical message signed by HMAC."""
     if method is None or path is None or nonce is None:
@@ -148,10 +144,10 @@ def calculate_hmac_signature(
     timestamp: str,
     body: str = "",
     *,
-    method: Optional[str] = None,
-    path: Optional[str] = None,
+    method: str | None = None,
+    path: str | None = None,
     query_string: str = "",
-    nonce: Optional[str] = None,
+    nonce: str | None = None,
 ) -> str:
     """Calculate HMAC signature for a request.
 
@@ -174,19 +170,13 @@ def calculate_hmac_signature(
     return hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
 
 
-def _is_nonce_available(
-    nonce: Optional[str], window_seconds: int
-) -> tuple[bool, Optional[str]]:
+def _is_nonce_available(nonce: str | None, window_seconds: int) -> tuple[bool, str | None]:
     if not nonce:
         return False, "HMAC nonce required"
 
     current_time = int(time.time())
     with _locked_json_store(_hmac_nonces_file, _hmac_nonce_lock) as nonces:
-        expired = [
-            n
-            for n, ts in nonces.items()
-            if abs(current_time - int(ts)) > window_seconds
-        ]
+        expired = [n for n, ts in nonces.items() if abs(current_time - int(ts)) > window_seconds]
         for old_nonce in expired:
             nonces.pop(old_nonce, None)
 
@@ -209,11 +199,11 @@ def validate_hmac_request(
     body: str = "",
     window_seconds: int = 300,
     *,
-    method: Optional[str] = None,
-    path: Optional[str] = None,
+    method: str | None = None,
+    path: str | None = None,
     query_string: str = "",
-    nonce: Optional[str] = None,
-) -> tuple[bool, Optional[str]]:
+    nonce: str | None = None,
+) -> tuple[bool, str | None]:
     """Validate an HMAC-authenticated request.
 
     Args:
@@ -269,8 +259,8 @@ def create_hmac_headers(
     secret: str,
     body: str = "",
     *,
-    method: Optional[str] = None,
-    path: Optional[str] = None,
+    method: str | None = None,
+    path: str | None = None,
     query_string: str = "",
 ) -> dict[str, str]:
     """Create HMAC headers for a request.
@@ -347,7 +337,7 @@ def create_csrf_token_data(username: str, secret: str) -> dict:
 
 def validate_csrf_token(
     token: str, username: str, expiry: int, signature: str, secret: str
-) -> tuple[bool, Optional[str]]:
+) -> tuple[bool, str | None]:
     """Validate a CSRF token.
 
     Args:
@@ -404,7 +394,7 @@ def store_csrf_token(username: str, token_data: dict) -> None:
         tokens[token_data["token"]] = token_data
 
 
-def get_csrf_token_data(username: str, token: Optional[str] = None) -> Optional[dict]:
+def get_csrf_token_data(username: str, token: str | None = None) -> dict | None:
     """Retrieve CSRF token data for a user.
 
     Args:
@@ -434,7 +424,7 @@ def get_csrf_token_data(username: str, token: Optional[str] = None) -> Optional[
     return None
 
 
-def remove_csrf_token(username: str, token: Optional[str] = None) -> None:
+def remove_csrf_token(username: str, token: str | None = None) -> None:
     """Remove CSRF token for a user (e.g., on logout).
 
     Args:

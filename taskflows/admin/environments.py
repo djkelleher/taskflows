@@ -11,57 +11,54 @@ import re
 import shlex
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Union
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from taskflows.common import logger, secure_write_text, services_data_dir
-from taskflows.service import Venv
 from taskflows.docker import DockerContainer
-from taskflows.serialization import to_dict, from_dict, serialize, deserialize
+from taskflows.serialization import deserialize, from_dict, serialize, to_dict
+from taskflows.service import Venv
 
 # File path
 environments_file = services_data_dir / "environments.json"
 _environments_lock = threading.RLock()
-_ENVIRONMENT_NAME_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]$|^[A-Za-z0-9]$"
-)
+_ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]$|^[A-Za-z0-9]$")
 
 
 @contextmanager
 def _locked_environments(write: bool = False):
     lock_path = environments_file.with_suffix(environments_file.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with _environments_lock:
-        with open(lock_path, "a+") as lock_file:
-            try:
-                import fcntl
+    with _environments_lock, open(lock_path, "a+") as lock_file:
+        try:
+            import fcntl
 
-                lock_mode = fcntl.LOCK_EX if write else fcntl.LOCK_SH
-                fcntl.flock(lock_file.fileno(), lock_mode)
-            except ImportError:
-                fcntl = None
+            lock_mode = fcntl.LOCK_EX if write else fcntl.LOCK_SH
+            fcntl.flock(lock_file.fileno(), lock_mode)
+        except ImportError:
+            fcntl = None
 
-            try:
-                environments = _load_environments_unlocked()
-                yield environments
-                if write:
-                    save_environments(environments)
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        try:
+            environments = _load_environments_unlocked()
+            yield environments
+            if write:
+                save_environments(environments)
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class NamedEnvironment(BaseModel):
     """Named environment configuration storing a full Venv or DockerContainer."""
 
     name: str
-    description: Optional[str] = None
+    description: str | None = None
     type: Literal["venv", "docker"]
-    environment: Dict[str, Any]  # Serialized Venv or DockerContainer
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    environment: dict[str, Any]  # Serialized Venv or DockerContainer
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     def to_json(self, indent: int = 2) -> str:
         """Serialize this environment to JSON."""
@@ -82,7 +79,7 @@ class NamedEnvironment(BaseModel):
         return deserialize(data, cls, format="yaml")
 
 
-def _serialize_environment(env: Union[Venv, DockerContainer]) -> Dict[str, Any]:
+def _serialize_environment(env: Venv | DockerContainer) -> dict[str, Any]:
     """Serialize a Venv or DockerContainer to a dict, filtering None values."""
     data = to_dict(env, include_none=False)
     # Remove type as we track type separately in NamedEnvironment
@@ -90,9 +87,7 @@ def _serialize_environment(env: Union[Venv, DockerContainer]) -> Dict[str, Any]:
     return data
 
 
-def _deserialize_environment(
-    data: Dict[str, Any], env_type: str
-) -> Union[Venv, DockerContainer]:
+def _deserialize_environment(data: dict[str, Any], env_type: str) -> Venv | DockerContainer:
     """Reconstruct a Venv or DockerContainer from serialized data."""
     if env_type == "venv":
         return from_dict(data, Venv)
@@ -121,13 +116,13 @@ def _validate_environment_name(name: str) -> str:
     return name
 
 
-def load_environments() -> Dict[str, NamedEnvironment]:
+def load_environments() -> dict[str, NamedEnvironment]:
     """Load all named environments from file."""
     with _locked_environments(write=False) as environments:
         return dict(environments)
 
 
-def _load_environments_unlocked() -> Dict[str, NamedEnvironment]:
+def _load_environments_unlocked() -> dict[str, NamedEnvironment]:
     if not environments_file.exists():
         return {}
     try:
@@ -137,9 +132,7 @@ def _load_environments_unlocked() -> Dict[str, NamedEnvironment]:
             f"Environment registry {environments_file} is not valid JSON; refusing to overwrite it"
         ) from exc
     if not isinstance(env_data, dict):
-        raise RuntimeError(
-            f"Environment registry {environments_file} must contain a JSON object"
-        )
+        raise RuntimeError(f"Environment registry {environments_file} must contain a JSON object")
     environments = {}
     for name, data in env_data.items():
         _validate_environment_name(name)
@@ -159,27 +152,24 @@ def _validate_environment_definition(env: NamedEnvironment) -> None:
     if env.type == "venv":
         if "env_name" not in env.environment:
             raise ValueError("env_name is required for venv type")
-    elif env.type == "docker":
-        if "image" not in env.environment:
-            raise ValueError("image is required for docker type")
+    elif env.type == "docker" and "image" not in env.environment:
+        raise ValueError("image is required for docker type")
 
 
-def save_environments(environments: Dict[str, NamedEnvironment]) -> None:
+def save_environments(environments: dict[str, NamedEnvironment]) -> None:
     """Save all environments to file."""
     env_data = {name: env.model_dump(mode="json") for name, env in environments.items()}
     with _environments_lock:
-        secure_write_text(
-            environments_file, json.dumps(env_data, indent=2, default=str)
-        )
+        secure_write_text(environments_file, json.dumps(env_data, indent=2, default=str))
 
 
-def get_environment(name: str) -> Optional[NamedEnvironment]:
+def get_environment(name: str) -> NamedEnvironment | None:
     """Get a named environment by name."""
     environments = load_environments()
     return environments.get(name)
 
 
-def get_environment_object(name: str) -> Optional[Union[Venv, DockerContainer]]:
+def get_environment_object(name: str) -> Venv | DockerContainer | None:
     """Get the actual Venv or DockerContainer object for a named environment."""
     named_env = get_environment(name)
     if not named_env:
@@ -196,7 +186,7 @@ def create_environment(env: NamedEnvironment) -> NamedEnvironment:
         _validate_environment_definition(env)
 
         # Set timestamps
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         env.created_at = now
         env.updated_at = now
 
@@ -217,7 +207,7 @@ def update_environment(name: str, updated_env: NamedEnvironment) -> NamedEnviron
 
         # Preserve created_at, update updated_at
         updated_env.created_at = environments[name].created_at
-        updated_env.updated_at = datetime.now(timezone.utc)
+        updated_env.updated_at = datetime.now(UTC)
 
         # If name changed, remove old entry
         if name != updated_env.name:
@@ -240,7 +230,7 @@ def delete_environment(name: str) -> None:
     logger.info(f"Deleted environment '{name}'")
 
 
-def list_environments() -> List[NamedEnvironment]:
+def list_environments() -> list[NamedEnvironment]:
     """List all environments."""
     environments = load_environments()
     return list(environments.values())
@@ -260,7 +250,7 @@ def _unit_uses_environment(unit_content: str, env_name: str) -> bool:
     return False
 
 
-def find_services_using_environment(env_name: str) -> List[str]:
+def find_services_using_environment(env_name: str) -> list[str]:
     """Find all services that reference a given environment.
 
     Services created from named environments include a marker environment

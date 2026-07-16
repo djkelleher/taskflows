@@ -2,16 +2,18 @@ import asyncio
 import os
 import re
 import shlex
-import subprocess
 import stat
+import subprocess
 import threading
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from pprint import pformat
-from typing import Callable, Dict, List, Literal, Optional, Sequence, Set, Union
+from typing import Literal, Optional, Union
 
+import docker.errors
 from dbus_next import BusType
 from dbus_next.aio import MessageBus
 from dbus_next.errors import DBusError
@@ -32,7 +34,6 @@ from .constraints import (
     SystemLoadConstraint,
     systemd_directive_name,
 )
-import docker.errors
 from .docker import (
     DockerContainer,
     DockerImage,
@@ -44,7 +45,7 @@ from .exec import PickledFunction
 from .schedule import Schedule
 
 ServiceT = Union[str, "Service"]
-ServicesT = Union[ServiceT, Sequence[ServiceT]]
+ServicesT = ServiceT | Sequence[ServiceT]
 
 
 class ServiceRegistry:
@@ -159,15 +160,13 @@ class ServiceRegistry:
             return bool(self._services)
 
     # Serialization methods
-    def to_dict(self, include_none: bool = False) -> Dict:
+    def to_dict(self, include_none: bool = False) -> dict:
         """Convert registry to a dictionary representation."""
         from taskflows.serialization import to_dict as serialize_to_dict
 
         with self._lock:
             return {
-                "services": [
-                    serialize_to_dict(s, include_none) for s in self._services.values()
-                ]
+                "services": [serialize_to_dict(s, include_none) for s in self._services.values()]
             }
 
     def to_json(self, indent: int = 2, include_none: bool = False) -> str:
@@ -188,14 +187,12 @@ class ServiceRegistry:
         # Remove type field from services since we know they're services
         for s in data["services"]:
             s.pop("type", None)
-        return yaml.dump(
-            data, default_flow_style=False, allow_unicode=True, sort_keys=False
-        )
+        return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
     def to_file(
         self,
-        path: Union[str, Path],
-        format: Optional[Literal["json", "yaml"]] = None,
+        path: str | Path,
+        format: Literal["json", "yaml"] | None = None,
         include_none: bool = False,
     ) -> None:
         """Save registry to a file."""
@@ -210,7 +207,7 @@ class ServiceRegistry:
         secure_write_text(path, content)
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "ServiceRegistry":
+    def from_dict(cls, data: dict) -> "ServiceRegistry":
         """Create registry from a dictionary representation."""
         from taskflows.serialization import from_dict as deserialize_from_dict
 
@@ -234,7 +231,7 @@ class ServiceRegistry:
 
     @classmethod
     def from_file(
-        cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None
+        cls, path: str | Path, format: Literal["json", "yaml"] | None = None
     ) -> "ServiceRegistry":
         """Load registry from a file."""
         path = Path(path)
@@ -263,14 +260,14 @@ class RestartPolicy:
         "no",
     ]
     # waiting time before each retry (seconds)
-    delay: Optional[int] = None
+    delay: int | None = None
     # hard ceiling on how many *failed* restarts are allowed within `window` before the task is left in `FAILED` state
-    max_attempts: Optional[int] = None
+    max_attempts: int | None = None
     # sliding time window used to decide whether an attempt counts as “failed”. If the task stays up for the full `window`, the counter resets.
-    window: Optional[int] = None
+    window: int | None = None
 
     @property
-    def unit_entries(self) -> Set[str]:
+    def unit_entries(self) -> set[str]:
         entries = set()
         # 0 allows unlimited attempts.
         window = self.window or 0
@@ -283,7 +280,7 @@ class RestartPolicy:
         return entries
 
     @property
-    def service_entries(self) -> Set[str]:
+    def service_entries(self) -> set[str]:
         entries = {f"Restart={self.condition}"}
         if self.delay:
             entries.add(f"RestartSec={self.delay}")
@@ -293,7 +290,7 @@ class RestartPolicy:
 @dataclass
 class Venv:
     env_name: str
-    custom_path: Optional[str | Path] = None
+    custom_path: str | Path | None = None
 
     @staticmethod
     def _run_command(exe: Path, env_name: str, command: str) -> str:
@@ -304,8 +301,7 @@ class Venv:
         live_output_part = f" {live_output_flag}" if live_output_flag else ""
 
         return (
-            f"{runner} run -n {quoted_env_name}{live_output_part} "
-            f"{executable_separator} {command}"
+            f"{runner} run -n {quoted_env_name}{live_output_part} {executable_separator} {command}"
         )
 
     @staticmethod
@@ -375,81 +371,79 @@ class Service:
     """A service to run a command on a specified schedule."""
 
     # name used to identify the service.
-    name: Optional[str] = None
+    name: str | None = None
     # command to execute.
-    start_command: Optional[str | Callable[[], None]] = None
+    start_command: str | Callable[[], None] | None = None
     # command to execute to stop the service command.
-    stop_command: Optional[str] = None
+    stop_command: str | None = None
     # environment where commands should be executed.
     environment: Venv | DockerContainer = None
     # when the service should be started.
-    start_schedule: Optional[Schedule | Sequence[Schedule]] = None
+    start_schedule: Schedule | Sequence[Schedule] | None = None
     # when the service should be stopped.
-    stop_schedule: Optional[Schedule | Sequence[Schedule]] = None
+    stop_schedule: Schedule | Sequence[Schedule] | None = None
     # when the service should be restarted.
-    restart_schedule: Optional[Schedule | Sequence[Schedule]] = None
+    restart_schedule: Schedule | Sequence[Schedule] | None = None
     # command to execute when the service is restarted.
-    restart_command: Optional[str] = None
+    restart_command: str | None = None
     # signal used to stop the service.
     kill_signal: str = "SIGTERM"
-    restart_policy: Optional[str | RestartPolicy] = "no"
-    startup_requirements: Sequence[Union[HardwareConstraint, SystemLoadConstraint]] = (
-        None
-    )
+    restart_policy: str | RestartPolicy | None = "no"
+    startup_requirements: Sequence[HardwareConstraint | SystemLoadConstraint] = None
     # Specifies a timeout (in seconds) that starts running when the queued job is actually started.
     # If limit is reached, the job will be cancelled, the unit however will not change state or even enter the "failed" mode.
-    timeout: Optional[int] = None
+    timeout: int | None = None
     # path to a file with environment variables for the service.
     # TODO LoadCredential, LoadCredentialEncrypted, SetCredentialEncrypted
     # TODO forward to docker container.
-    env_file: Optional[str] = None
+    env_file: str | None = None
     # environment variables for the service.
-    env: Optional[Dict[str, str]] = None
+    env: dict[str, str] | None = None
     # working directory for the service.
-    working_directory: Optional[str | Path] = None
+    working_directory: str | Path | None = None
     # enable the service to start automatically on boot.
     enabled: bool = False
     ## SERVICE RELATIONS ##
     # make sure this service is fully started before begining startup of these services.
-    start_before: Optional[ServicesT] = None
+    start_before: ServicesT | None = None
     # make sure these services are fully started before begining startup of this service.
-    start_after: Optional[ServicesT] = None
+    start_after: ServicesT | None = None
     # Units listed in this option will be started simultaneously at the same time as the configuring unit is.
     # If the listed units fail to start, this unit will still be started anyway. Multiple units may be specified.
-    wants: Optional[ServicesT] = None
+    wants: ServicesT | None = None
     # Configures dependencies similar to `Wants`, but as long as this unit is up,
     # all units listed in `Upholds` are started whenever found to be inactive or failed, and no job is queued for them.
     # While a Wants= dependency on another unit has a one-time effect when this units started,
     # a `Upholds` dependency on it has a continuous effect, constantly restarting the unit if necessary.
     # This is an alternative to the Restart= setting of service units, to ensure they are kept running whatever happens.
-    upholds: Optional[ServicesT] = None
+    upholds: ServicesT | None = None
     # Units listed in this option will be started simultaneously at the same time as the configuring unit is.
     # If one of the other units fails to activate, and an ordering dependency `After` on the failing unit is set, this unit will not be started.
     # This unit will be stopped (or restarted) if one of the other units is explicitly stopped (or restarted) via systemctl command (not just normal exit on process finished).
-    requires: Optional[ServicesT] = None
+    requires: ServicesT | None = None
     # Units listed in this option will be started simultaneously at the same time as the configuring unit is.
     # If the units listed here are not started already, they will not be started and the starting of this unit will fail immediately.
     # Note: this setting should usually be combined with `After`, to ensure this unit is not started before the other unit.
-    requisite: Optional[ServicesT] = None
+    requisite: ServicesT | None = None
     # Same as `Requires`, but in order for this unit will be stopped (or restarted), if a listed unit is stopped (or restarted), explicitly or not.
-    binds_to: Optional[ServicesT] = None
+    binds_to: ServicesT | None = None
     # one or more units that are activated when this unit enters the "failed" state.
     # A service unit using Restart= enters the failed state only after the start limits are reached.
-    on_failure: Optional[ServicesT] = None
+    on_failure: ServicesT | None = None
     # one or more units that are activated when this unit enters the "inactive" state.
-    on_success: Optional[ServicesT] = None
+    on_success: ServicesT | None = None
     # When systemd stops or restarts the units listed here, the action is propagated to this unit.
     # Note that this is a one-way dependency — changes to this unit do not affect the listed units.
-    part_of: Optional[ServicesT] = None
+    part_of: ServicesT | None = None
     # A space-separated list of one or more units to which stop requests from this unit shall be propagated to,
     # or units from which stop requests shall be propagated to this unit, respectively.
     # Issuing a stop request on a unit will automatically also enqueue stop requests on all units that are linked to it using these two settings.
-    propagate_stop_to: Optional[ServicesT] = None
-    propagate_stop_from: Optional[ServicesT] = None
+    propagate_stop_to: ServicesT | None = None
+    propagate_stop_from: ServicesT | None = None
     # other units where starting the former will stop the latter and vice versa.
-    conflicts: Optional[ServicesT] = None
+    conflicts: ServicesT | None = None
     # description of this service.
-    description: Optional[str] = None
+    description: str | None = None
     # cgroup configuration for resource limits
     cgroup_config: Optional["CgroupConfig"] = None
 
@@ -475,9 +469,7 @@ class Service:
             if not env_obj:
                 raise ValueError(f"Named environment '{env_name}' not found")
 
-            logger.info(
-                f"Loaded named environment '{env_name}' for service {self.name}"
-            )
+            logger.info(f"Loaded named environment '{env_name}' for service {self.name}")
             self.env["TASKFLOWS_NAMED_ENV"] = env_name
             self.environment = env_obj  # Already a Venv or DockerContainer
 
@@ -488,9 +480,7 @@ class Service:
 
             # Sync names between service and container
             if not container.name and not self.name:
-                raise ValueError(
-                    "Either service name or container name must be provided"
-                )
+                raise ValueError("Either service name or container name must be provided")
             elif not container.name:
                 container.name = self.name
             elif not self.name:
@@ -507,9 +497,7 @@ class Service:
         # SECURITY: Validate env_file path to prevent directory traversal
         if self.env_file:
             try:
-                self.env_file = str(
-                    validate_env_file_path(self.env_file, allow_nonexistent=True)
-                )
+                self.env_file = str(validate_env_file_path(self.env_file, allow_nonexistent=True))
             except Exception as e:
                 logger.error(f"Invalid env_file path: {e}")
                 raise
@@ -569,9 +557,7 @@ class Service:
                         self.restart_policy = migrated_policy
                     else:
                         # Service policy takes precedence over container policy
-                        self.restart_policy = normalize_restart_policy(
-                            self.restart_policy
-                        )
+                        self.restart_policy = normalize_restart_policy(self.restart_policy)
                         logger.warning(
                             f"Both service and container have restart policies. "
                             f"Using service policy: {self.restart_policy}, "
@@ -690,9 +676,7 @@ class Service:
         if self.propagate_stop_to:
             self.unit_entries.add(f"PropagatesStopTo={join(self.propagate_stop_to)}")
         if self.propagate_stop_from:
-            self.unit_entries.add(
-                f"StopPropagatedFrom={join(self.propagate_stop_from)}"
-            )
+            self.unit_entries.add(f"StopPropagatedFrom={join(self.propagate_stop_from)}")
         if self.startup_requirements:
             cons = (
                 self.startup_requirements
@@ -719,9 +703,7 @@ class Service:
                 if directive_name == "Environment":
                     self.service_entries.add(validate_systemd_line(value))
                 else:
-                    self.service_entries.add(
-                        validate_systemd_line(f"{directive_name}={value}")
-                    )
+                    self.service_entries.add(validate_systemd_line(f"{directive_name}={value}"))
 
         # Add Docker-specific service entries if using Docker environment
         if isinstance(self.environment, DockerContainer):
@@ -753,7 +735,7 @@ class Service:
             self.service_entries.add("StandardError=journal")
 
     @property
-    def timer_files(self) -> List[str]:
+    def timer_files(self) -> list[str]:
         """Paths to all systemd timer unit files for this service."""
         file_stem = self.base_file_stem
         files = []
@@ -766,7 +748,7 @@ class Service:
         return [os.path.join(systemd_dir, f) for f in files]
 
     @property
-    def service_files(self) -> List[str]:
+    def service_files(self) -> list[str]:
         """Paths to all systemd service unit files for this service."""
         file_stem = self.base_file_stem
         files = [f"{file_stem}.service"]
@@ -777,7 +759,7 @@ class Service:
         return [os.path.join(systemd_dir, f) for f in files]
 
     @property
-    def unit_files(self) -> List[str]:
+    def unit_files(self) -> list[str]:
         """Get all service and timer files for this service."""
         return self.service_files + self.timer_files
 
@@ -845,14 +827,10 @@ class Service:
                     # For persisted containers, only create if it doesn't already exist
                     # This preserves state and avoids unnecessary recreation
                     if not container.exists:
-                        logger.info(
-                            f"Creating persisted Docker container: {container.name}"
-                        )
+                        logger.info(f"Creating persisted Docker container: {container.name}")
                         container.create(cgroup_parent=self.slice)
                     else:
-                        logger.info(
-                            f"Persisted Docker container already exists: {container.name}"
-                        )
+                        logger.info(f"Persisted Docker container already exists: {container.name}")
                 elif isinstance(container.image, DockerImage):
                     container.image.build()
                 # For run services, no need to do anything here since
@@ -867,17 +845,13 @@ class Service:
             # Clean up pickle files if service creation fails after they were written
             logger.error(f"Service creation failed, cleaning up pickle files: {e}")
             for func in self._pkl_funcs:
-                pickle_file = services_data_dir.joinpath(
-                    f"{func.name}#_{func.attr}.pickle"
-                )
+                pickle_file = services_data_dir.joinpath(f"{func.name}#_{func.attr}.pickle")
                 try:
                     if pickle_file.exists():
                         pickle_file.unlink()
                         logger.debug(f"Removed pickle file: {pickle_file}")
                 except Exception as cleanup_err:
-                    logger.warning(
-                        f"Failed to clean up pickle file {pickle_file}: {cleanup_err}"
-                    )
+                    logger.warning(f"Failed to clean up pickle file {pickle_file}: {cleanup_err}")
             raise
 
     def logs(self):
@@ -963,24 +937,16 @@ class Service:
             self._write_systemd_file("timer", "\n".join(content), prefix=prefix)
 
     def _write_service_units(self):
-        srv_file = self._write_service_file(
-            unit=self.unit_entries, service=self.service_entries
-        )
+        srv_file = self._write_service_file(unit=self.unit_entries, service=self.service_entries)
         # TODO ExecCondition, ExecStartPre, ExecStartPost?
         if self.stop_schedule:
             service = [f"ExecStart=systemctl --user stop {os.path.basename(srv_file)}"]
             # Pass unit entries to stop service as well to maintain consistency
-            self._write_service_file(
-                unit=self.unit_entries, service=service, prefix="stop"
-            )
+            self._write_service_file(unit=self.unit_entries, service=service, prefix="stop")
         if self.restart_schedule:
-            service = [
-                f"ExecStart=systemctl --user restart {os.path.basename(srv_file)}"
-            ]
+            service = [f"ExecStart=systemctl --user restart {os.path.basename(srv_file)}"]
             # Pass unit entries to restart service as well to maintain consistency
-            self._write_service_file(
-                unit=self.unit_entries, service=service, prefix="restart"
-            )
+            self._write_service_file(unit=self.unit_entries, service=service, prefix="restart")
 
     @property
     def base_file_stem(self) -> str:
@@ -988,9 +954,9 @@ class Service:
 
     def _write_service_file(
         self,
-        unit: Optional[Union[List[str], Set[str]]] = None,
-        service: Optional[Union[List[str], Set[str]]] = None,
-        prefix: Optional[str] = None,
+        unit: list[str] | set[str] | None = None,
+        service: list[str] | set[str] | None = None,
+        prefix: str | None = None,
     ):
         from taskflows.security_validation import (
             validate_systemd_line,
@@ -1004,9 +970,7 @@ class Service:
             description = f"{prefix.capitalize()} service for {self.name}"
         else:
             description = self.description or f"Service for {self.name}"
-        content.append(
-            f"Description={validate_systemd_value(description, 'description')}"
-        )
+        content.append(f"Description={validate_systemd_value(description, 'description')}")
 
         # Add any additional unit entries
         if unit:
@@ -1028,7 +992,7 @@ class Service:
         self,
         unit_type: Literal["timer", "service"],
         content: str,
-        prefix: Optional[str] = None,
+        prefix: str | None = None,
     ) -> str:
         systemd_dir.mkdir(parents=True, exist_ok=True)
         file_stem = self.base_file_stem
@@ -1057,7 +1021,7 @@ class Service:
         meta = ", ".join(f"{k}={v}" for k, v in meta.items())
         return f"{self.__class__.__name__}({meta})"
 
-    def to_dict(self, include_none: bool = False) -> Dict:
+    def to_dict(self, include_none: bool = False) -> dict:
         """Serialize this service to a dictionary.
 
         Args:
@@ -1098,7 +1062,7 @@ class Service:
         return serialize(self, format="yaml", include_none=include_none)
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Service":
+    def from_dict(cls, data: dict) -> "Service":
         """Create a Service from a dictionary.
 
         Args:
@@ -1141,8 +1105,8 @@ class Service:
 
     def to_file(
         self,
-        path: Union[str, Path],
-        format: Optional[Literal["json", "yaml"]] = None,
+        path: str | Path,
+        format: Literal["json", "yaml"] | None = None,
         indent: int = 2,
         include_none: bool = False,
     ) -> None:
@@ -1156,13 +1120,11 @@ class Service:
         """
         from taskflows.serialization import serialize_to_file
 
-        serialize_to_file(
-            self, path, format=format, indent=indent, include_none=include_none
-        )
+        serialize_to_file(self, path, format=format, indent=indent, include_none=include_none)
 
     @classmethod
     def from_file(
-        cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None
+        cls, path: str | Path, format: Literal["json", "yaml"] | None = None
     ) -> "Service":
         """Create a Service from a file.
 
@@ -1237,7 +1199,7 @@ def service_logs(service_name: str, n_lines: int = 1000):
 # Uses asyncio for non-blocking D-Bus operations
 # Use a dict to store locks per event loop to avoid "bound to different event loop" errors
 _dbus_connection_locks: dict = {}
-_dbus_session_bus: Optional[MessageBus] = None
+_dbus_session_bus: MessageBus | None = None
 _dbus_manager = None
 _dbus_manager_introspection = None
 _dbus_last_error_time = 0
@@ -1546,22 +1508,20 @@ async def get_schedule_info(unit: str):
 
 
 async def get_unit_files(
-    unit_type: Optional[Literal["service", "timer"]] = None,
-    match: Optional[str] = None,
-    states: Optional[str | Sequence[str]] = None,
-) -> List[str]:
+    unit_type: Literal["service", "timer"] | None = None,
+    match: str | None = None,
+    states: str | Sequence[str] | None = None,
+) -> list[str]:
     """Get a list of paths of taskflows unit files."""
-    file_states = await get_unit_file_states(
-        unit_type=unit_type, match=match, states=states
-    )
+    file_states = await get_unit_file_states(unit_type=unit_type, match=match, states=states)
     return list(file_states.keys())
 
 
 async def get_unit_file_states(
-    unit_type: Optional[Literal["service", "timer"]] = None,
-    match: Optional[str] = None,
-    states: Optional[str | Sequence[str]] = None,
-) -> Dict[str, str]:
+    unit_type: Literal["service", "timer"] | None = None,
+    match: str | None = None,
+    states: str | Sequence[str] | None = None,
+) -> dict[str, str]:
     """Map taskflows unit file path to unit state."""
     states = states or []
     pattern = _make_unit_match_pattern(unit_type=unit_type, match=match)
@@ -1574,10 +1534,10 @@ async def get_unit_file_states(
 
 
 async def get_units(
-    unit_type: Optional[Literal["service", "timer"]] = None,
-    match: Optional[str] = None,
-    states: Optional[str | Sequence[str]] = None,
-) -> List[Dict[str, str]]:
+    unit_type: Literal["service", "timer"] | None = None,
+    match: str | None = None,
+    states: str | Sequence[str] | None = None,
+) -> list[dict[str, str]]:
     """Get metadata for taskflows units."""
     states = states or []
     pattern = _make_unit_match_pattern(unit_type=unit_type, match=match)
@@ -1601,7 +1561,7 @@ async def get_units(
 
 
 def _make_unit_match_pattern(
-    unit_type: Optional[Literal["service", "timer"]] = None, match: Optional[str] = None
+    unit_type: Literal["service", "timer"] | None = None, match: str | None = None
 ) -> str:
     pattern = match or "*"
     if unit_type and not pattern.endswith(f".{unit_type}"):
@@ -1743,9 +1703,7 @@ async def _remove_service(
             await mgr.call_clean_unit(srv_file.name, ["all"])
         except DBusError as err:
             logger.warning(f"Could not clean {srv_file}: ({type(err)}) {err}")
-        container_name = re.search(
-            r"docker (?:start|stop) ([\w-]+)", srv_file.read_text()
-        )
+        container_name = re.search(r"docker (?:start|stop) ([\w-]+)", srv_file.read_text())
         if container_name:
             container_names.add(container_name.group(1))
     if not preserve_container:
@@ -1758,7 +1716,5 @@ async def _remove_service(
     for file in files:
         logger.info(f"Deleting {file}")
         file.unlink(missing_ok=True)
-    logger.info(
-        f"Finished removing {len(service_files)} services and {len(timer_files)} timers"
-    )
+    logger.info(f"Finished removing {len(service_files)} services and {len(timer_files)} timers")
     await reload_unit_files()

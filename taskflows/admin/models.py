@@ -1,6 +1,6 @@
 """Type definitions for admin module."""
 
-from typing import Any, Dict, List, Literal, Optional, TypedDict
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel
 
@@ -34,22 +34,22 @@ class OperationResult(BaseModel):
 
     hostname: str
     success: bool
-    data: Dict[str, Any]
-    error: Optional[str] = None
+    data: dict[str, Any]
+    error: str | None = None
 
 
 class BatchOperationRequest(BaseModel):
     """Batch operation request."""
 
-    service_names: List[str]
+    service_names: list[str]
     operation: Literal["start", "stop", "restart", "enable", "disable"]
 
 
 class ServerTarget(BaseModel):
     """Server target specification."""
 
-    address: Optional[str] = None
-    alias: Optional[str] = None
+    address: str | None = None
+    alias: str | None = None
 
 
 class HealthCheckResponse(TypedDict):

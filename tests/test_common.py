@@ -1,5 +1,10 @@
-from taskflows.common import _SYSTEMD_FILE_PREFIX, logql_string, sort_service_names
-from taskflows.common import extract_service_name, load_service_files
+from taskflows.common import (
+    _SYSTEMD_FILE_PREFIX,
+    extract_service_name,
+    load_service_files,
+    logql_string,
+    sort_service_names,
+)
 
 
 def test_logql_string_escapes_quotes_and_backslashes():

@@ -3,6 +3,7 @@ from tempfile import NamedTemporaryFile
 from time import sleep
 
 import pytest
+
 from taskflows import DockerContainer, Service, Venv, Volume
 
 venv = Venv("trading")
@@ -88,13 +89,12 @@ def test_docker_container_exists_no_mutation():
     _ = container.exists
 
     # Name should either stay None or be consistently generated
-    if initial_name is None:
+    if initial_name is None and container.name is not None:
         # If name generation happens, it should be stable
-        if container.name is not None:
-            name_after_exists = container.name
-            # Additional exists calls should not change the name
-            _ = container.exists
-            assert container.name == name_after_exists
+        name_after_exists = container.name
+        # Additional exists calls should not change the name
+        _ = container.exists
+        assert container.name == name_after_exists
 
 
 def test_docker_run_cli_command_with_quoted_args():
@@ -113,11 +113,7 @@ def test_docker_run_cli_command_with_quoted_args():
     # The command should contain properly split arguments
     # "echo 'hello world'" should become ["echo", "hello world"]
     assert "echo" in cli_cmd
-    assert (
-        "'hello world'" in cli_cmd
-        or '"hello world"' in cli_cmd
-        or "hello world" in cli_cmd
-    )
+    assert "'hello world'" in cli_cmd or '"hello world"' in cli_cmd or "hello world" in cli_cmd
 
 
 def test_docker_run_cli_command_with_escaped_spaces():
@@ -167,7 +163,4 @@ def test_docker_callable_command_uses_signed_pickle_entrypoint():
 
     assert "_deserialize_and_call callable-service command" in srv.start_command
     assert "_run_function" not in srv.start_command
-    assert any(
-        pkl.name == "callable-service" and pkl.attr == "command"
-        for pkl in srv._pkl_funcs
-    )
+    assert any(pkl.name == "callable-service" and pkl.attr == "command" for pkl in srv._pkl_funcs)

@@ -2,7 +2,7 @@ import asyncio
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
@@ -23,8 +23,8 @@ from taskflows.tasks import (
 def test_build_loki_query_url_basic():
     """Test basic Loki URL generation."""
     task_name = "test_task"
-    start_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    end_time = datetime(2024, 1, 1, 13, 0, 0, tzinfo=timezone.utc)
+    start_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    end_time = datetime(2024, 1, 1, 13, 0, 0, tzinfo=UTC)
 
     url = build_loki_query_url(task_name, start_time, end_time)
 
@@ -37,8 +37,8 @@ def test_build_loki_query_url_basic():
 def test_build_loki_query_url_error_only():
     """Test Loki URL generation with error filter."""
     task_name = "test_task"
-    start_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    end_time = datetime(2024, 1, 1, 13, 0, 0, tzinfo=timezone.utc)
+    start_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    end_time = datetime(2024, 1, 1, 13, 0, 0, tzinfo=UTC)
 
     url = build_loki_query_url(task_name, start_time, end_time, error_only=True)
 
@@ -49,8 +49,8 @@ def test_build_loki_query_url_error_only():
 def test_build_loki_query_url_timestamps():
     """Test that timestamps are properly converted to milliseconds."""
     task_name = "test_task"
-    start_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    end_time = datetime(2024, 1, 1, 13, 0, 0, tzinfo=timezone.utc)
+    start_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    end_time = datetime(2024, 1, 1, 13, 0, 0, tzinfo=UTC)
 
     url = build_loki_query_url(task_name, start_time, end_time)
 
@@ -97,7 +97,7 @@ async def test_task_logger_on_task_start():
 
     assert hasattr(task_logger, "start_time")
     assert isinstance(task_logger.start_time, datetime)
-    assert task_logger.start_time.tzinfo == timezone.utc
+    assert task_logger.start_time.tzinfo == UTC
 
 
 @pytest.mark.asyncio
@@ -191,9 +191,7 @@ async def test_task_logger_error_alert_includes_loki_url(mock_send_alert):
 
     # Check that Loki URL is in the alert content
     call_args = mock_send_alert.call_args
-    components = call_args.kwargs.get(
-        "content", call_args.args[0] if call_args.args else []
-    )
+    components = call_args.kwargs.get("content", call_args.args[0] if call_args.args else [])
 
     # Should have at least 2 components: error message and Loki URL
     assert len(components) >= 2
@@ -230,9 +228,7 @@ async def test_task_logger_finish_alert_includes_loki_url(mock_send_alert):
 
     # Check that Loki URL is in the alert content
     call_args = mock_send_alert.call_args
-    components = call_args.kwargs.get(
-        "content", call_args.args[0] if call_args.args else []
-    )
+    components = call_args.kwargs.get("content", call_args.args[0] if call_args.args else [])
 
     # Check that one component contains the Loki URL
     loki_url_found = False

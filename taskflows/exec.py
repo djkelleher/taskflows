@@ -1,28 +1,26 @@
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import inspect
 import os
 import secrets
 import stat
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import click
 import cloudpickle
 
 from .common import logger, services_data_dir
 
-
 # SECURITY: Pickle deserialization protection
 # Pickle files can contain arbitrary code, so we implement integrity checks
 # and audit logging to prevent tampering and track usage.
 
 
-def _set_secure_permissions(
-    path: Path, mode: int = stat.S_IRUSR | stat.S_IWUSR
-) -> None:
+def _set_secure_permissions(path: Path, mode: int = stat.S_IRUSR | stat.S_IWUSR) -> None:
     """Set secure file permissions (default: 0600)."""
     os.chmod(path, mode)
 
@@ -46,9 +44,7 @@ def _get_hmac_secret() -> bytes:
         # Verify file permissions
         file_stat = secret_file.stat()
         if file_stat.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-            logger.error(
-                f"SECURITY: Secret file {secret_file} has insecure permissions!"
-            )
+            logger.error(f"SECURITY: Secret file {secret_file} has insecure permissions!")
             _set_secure_permissions(secret_file)
 
         secret = secret_file.read_bytes()
@@ -56,10 +52,8 @@ def _get_hmac_secret() -> bytes:
         if len(secret) >= 32:
             return secret
         logger.error("SECURITY: Secret file is invalid (too short), regenerating")
-        try:
+        with contextlib.suppress(FileNotFoundError):
             secret_file.unlink()
-        except FileNotFoundError:
-            pass
 
     # Generate new secret using atomic file creation to prevent race conditions
     logger.info("Generating new HMAC secret for pickle integrity verification")
@@ -82,7 +76,7 @@ def _get_hmac_secret() -> bytes:
         logger.info("Secret file created by another process, reading existing secret")
         secret = secret_file.read_bytes()
         if len(secret) < 32:
-            raise ValueError(f"Secret file is invalid: {secret_file}")
+            raise ValueError(f"Secret file is invalid: {secret_file}") from None
         return secret
 
 
@@ -134,9 +128,7 @@ def _check_pickle_file_security(pickle_path: Path) -> bool:
 
     # Check that file is owned by current user
     if file_stat.st_uid != os.getuid():
-        logger.error(
-            f"SECURITY: Pickle file is not owned by current user: {pickle_path}"
-        )
+        logger.error(f"SECURITY: Pickle file is not owned by current user: {pickle_path}")
         return False
 
     return True
@@ -152,9 +144,7 @@ def _write_signed_pickle(pickle_path: Path, pickle_data: bytes) -> None:
     _set_secure_permissions(pickle_path.parent, stat.S_IRWXU)
 
     tmp_path = pickle_path.with_name(f".{pickle_path.name}.{secrets.token_hex(8)}")
-    fd = os.open(
-        tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, stat.S_IRUSR | stat.S_IWUSR
-    )
+    fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, stat.S_IRUSR | stat.S_IWUSR)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(signature)
@@ -163,10 +153,8 @@ def _write_signed_pickle(pickle_path: Path, pickle_data: bytes) -> None:
         os.chmod(pickle_path, stat.S_IRUSR | stat.S_IWUSR)
     finally:
         if tmp_path.exists():
-            try:
+            with contextlib.suppress(OSError):
                 tmp_path.unlink()
-            except OSError:
-                pass
 
     logger.info(f"AUDIT: Wrote signed pickle file: {pickle_path}")
 
@@ -192,7 +180,7 @@ def _migrate_unsigned_pickle(pickle_path: Path) -> None:
         logger.info("MIGRATION: Successfully validated unsigned pickle")
     except Exception as e:
         logger.error(f"MIGRATION: Failed to load unsigned pickle: {e}")
-        raise ValueError(f"Cannot migrate invalid pickle file: {pickle_path}")
+        raise ValueError(f"Cannot migrate invalid pickle file: {pickle_path}") from e
 
     _write_signed_pickle(pickle_path, pickle_data)
     logger.info("MIGRATION: Successfully migrated pickle file to signed format")

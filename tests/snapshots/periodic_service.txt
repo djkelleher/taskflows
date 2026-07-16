@@ -1,0 +1,40 @@
+=== stop-taskflows-snap-periodic.service ===
+[Unit]
+Description=Stop service for snap-periodic
+[Service]
+ExecStart=systemctl --user stop taskflows-snap-periodic.service
+[Install]
+WantedBy=default.target
+
+=== stop-taskflows-snap-periodic.timer ===
+[Unit]
+Description=stop timer for snap-periodic
+[Timer]
+AccuracySec=1ms
+OnCalendar=Sun 03:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+
+=== taskflows-snap-periodic.service ===
+[Unit]
+Description=Service for snap-periodic
+[Service]
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/bin/echo periodic
+KillSignal=SIGTERM
+StandardError=journal
+StandardOutput=journal
+TimeoutStopSec=120s
+[Install]
+WantedBy=default.target
+
+=== taskflows-snap-periodic.timer ===
+[Unit]
+Description=timer for snap-periodic
+[Timer]
+AccuracySec=1ms
+OnBootSec=1
+OnUnitInactiveSec=3600s
+[Install]
+WantedBy=timers.target

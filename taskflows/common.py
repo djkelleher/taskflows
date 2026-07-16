@@ -6,11 +6,12 @@ from collections import defaultdict
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any
 
-from .loggers import get_logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from textdistance import lcsseq
+
+from .loggers import get_logger
 
 # Set default logging configuration if not already set
 # This ensures logs go to both terminal and file by default
@@ -43,7 +44,7 @@ class Config(BaseSettings):
     display_timezone: str = "UTC"
     fluent_bit: str = "localhost:24224"
     grafana: str = "localhost:3000"
-    grafana_api_key: Optional[str] = None
+    grafana_api_key: str | None = None
     loki_url: str = "http://localhost:3100"
 
     model_config = SettingsConfigDict(env_prefix="taskflows_")
@@ -121,7 +122,7 @@ def logql_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def sort_service_names(services: List[str]) -> List[str]:
+def sort_service_names(services: list[str]) -> list[str]:
     """
     Sort service names to display in a list.
 
@@ -146,8 +147,8 @@ def sort_service_names(services: List[str]) -> List[str]:
     stop_prefix = f"stop-{_SYSTEMD_FILE_PREFIX}"
 
     # Separate services into two categories: those that start with the stop prefix and those that do not
-    stop_services: List[str] = []
-    non_stop_services_raw: List[str] = []
+    stop_services: list[str] = []
+    non_stop_services_raw: list[str] = []
     for srv in services:
         if srv.startswith(stop_prefix):
             stop_services.append(srv)
@@ -156,7 +157,7 @@ def sort_service_names(services: List[str]) -> List[str]:
     remaining_stop_services = stop_services.copy()
 
     # Normalize non-stop service names by replacing hyphens and underscores with spaces for similarity comparison
-    non_stop_services: List[tuple[str, str]] = [
+    non_stop_services: list[tuple[str, str]] = [
         (s, s.replace("-", " ").replace("_", " ")) for s in non_stop_services_raw
     ]
 
@@ -192,7 +193,7 @@ def sort_service_names(services: List[str]) -> List[str]:
     return ordered
 
 
-def load_service_files(files: List[Path]) -> dict:
+def load_service_files(files: list[Path]) -> dict:
     """Load service files from paths.
 
     Args:

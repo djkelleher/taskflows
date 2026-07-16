@@ -15,9 +15,7 @@ def test_upsert_server_validates_hostname(isolated_servers_file):
 
 
 @pytest.mark.parametrize("hostname", [" host-a", "host-a ", "\thost-a"])
-def test_upsert_server_rejects_hostname_boundary_whitespace(
-    isolated_servers_file, hostname
-):
+def test_upsert_server_rejects_hostname_boundary_whitespace(isolated_servers_file, hostname):
     with pytest.raises(ValueError, match="whitespace"):
         db.upsert_server(hostname, "203.0.113.10")
 

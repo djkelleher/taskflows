@@ -1,12 +1,25 @@
 [project]
 name = "taskflows"
 version = "0.19.1"
-description = ""
+description = "Tasks and systemd services with scheduling, resource constraints, alerts, and observability"
 authors = [
     {name = "Dan Kelleher",email = "kelleherjdan@gmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.12,<4.0"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.11,<4.0"
 dependencies = [
     "msgflows>=0.2.0,<1.0.0",
     "dynamic-imports>=1.1.1,<2.0.0",
@@ -75,6 +88,65 @@ dev = [
     "moto>=5.1.19,<6.0.0",
 ]
 
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",   # line length is handled by the formatter
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's parameter-declaration idiom uses calls in argument defaults
+extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query", "fastapi.Header", "fastapi.Body"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_calls = false
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+strict_optional = true
+show_error_codes = true
+show_column_numbers = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = [
+    "taskflows.exceptions",
+    "taskflows.constants",
+    "taskflows.security_validation",
+    "taskflows.admin.models",
+]
+disallow_untyped_defs = true
+disallow_untyped_calls = true
+
+[[tool.mypy.overrides]]
+module = ["taskflows.admin.utils", "taskflows.metrics"]
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "cloudpickle.*",
+    "dbus_next.*",
+    "docker.*",
+    "dynamic_imports.*",
+    "grafanalib.*",
+    "msgflows.*",
+    "textdistance.*",
+    "xxhash.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

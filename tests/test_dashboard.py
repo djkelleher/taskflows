@@ -1,4 +1,10 @@
-from taskflows.dashboard import Dashboard, LogsCountPlot, LogsPanelConfig, LogsTextSearch, _logql_string
+from taskflows.dashboard import (
+    Dashboard,
+    LogsCountPlot,
+    LogsPanelConfig,
+    LogsTextSearch,
+    _logql_string,
+)
 from taskflows.serialization import load_dashboards_from_yaml
 from taskflows.service import Service
 

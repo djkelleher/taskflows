@@ -1,0 +1,12 @@
+=== taskflows-snap-minimal.service ===
+[Unit]
+Description=Service for snap-minimal
+[Service]
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/bin/echo hello
+KillSignal=SIGTERM
+StandardError=journal
+StandardOutput=journal
+TimeoutStopSec=120s
+[Install]
+WantedBy=default.target

@@ -1,17 +1,17 @@
 import json
 import uuid
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import Literal
 from urllib.parse import urljoin
 
 import requests
 from grafanalib._gen import DashboardEncoder
-from grafanalib.core import Annotations
+from grafanalib.core import Annotations, Graph, GridPos, Logs, Templating, Time, TimePicker
 from grafanalib.core import Dashboard as GLDashboard
-from grafanalib.core import Graph, GridPos, Logs, Templating, Time, TimePicker
 from pydantic import BaseModel
 
-from .common import config, logger, logql_string as _logql_string, sort_service_names
+from .common import config, logger, sort_service_names
+from .common import logql_string as _logql_string
 from .service import Service
 
 
@@ -27,11 +27,11 @@ class LogsPanelConfig(BaseModel):
 
     service: Service
     height: Literal["sm", "md", "lg", "xl"] = "md"
-    width_fr: Optional[float] = (
+    width_fr: float | None = (
         None  # Fraction of the width (e.g., 0.5 for half-width, 1.0 for full-width)
     )
-    time_from: Optional[str] = None  # e.g., "now-1h", "now-7d", "now-30m"
-    time_shift: Optional[str] = None  # e.g., "1d" to compare with yesterday
+    time_from: str | None = None  # e.g., "now-1h", "now-7d", "now-30m"
+    time_shift: str | None = None  # e.g., "1d" to compare with yesterday
 
     @property
     def height_no(self) -> int:
@@ -40,7 +40,7 @@ class LogsPanelConfig(BaseModel):
 
 class LogsTextSearch(LogsPanelConfig):
     text: str
-    title: Optional[str] = None
+    title: str | None = None
 
     def model_post_init(self, __context):
         if self.title is None:
@@ -50,7 +50,7 @@ class LogsTextSearch(LogsPanelConfig):
 class LogsCountPlot(LogsPanelConfig):
     text: str
     period: str = "5m"  # e.g., "1m", "5m", etc.
-    title: Optional[str] = None
+    title: str | None = None
 
     def model_post_init(self, __context):
         if self.title is None:
@@ -58,9 +58,7 @@ class LogsCountPlot(LogsPanelConfig):
 
 
 class Dashboard:
-    def __init__(
-        self, title: str, panels_grid: List[LogsPanelConfig | List[LogsPanelConfig]]
-    ):
+    def __init__(self, title: str, panels_grid: list[LogsPanelConfig | list[LogsPanelConfig]]):
         """Create a dashboard definition.
 
         Dashboards can be defined directly in Python or loaded from YAML with
@@ -124,8 +122,8 @@ class Dashboard:
 
     def to_file(
         self,
-        path: Union[str, Path],
-        format: Optional[Literal["json", "yaml"]] = None,
+        path: str | Path,
+        format: Literal["json", "yaml"] | None = None,
         include_none: bool = False,
     ) -> None:
         """Serialize this dashboard to a file."""
@@ -135,7 +133,7 @@ class Dashboard:
 
     @classmethod
     def from_file(
-        cls, path: Union[str, Path], format: Optional[Literal["json", "yaml"]] = None
+        cls, path: str | Path, format: Literal["json", "yaml"] | None = None
     ) -> "Dashboard":
         """Create a dashboard from a JSON or YAML file."""
         from .serialization import deserialize_from_file
@@ -143,9 +141,7 @@ class Dashboard:
         return deserialize_from_file(path, cls, format=format)
 
     @classmethod
-    def from_service_registries(
-        cls, service_registries, title: str, n_columns: int = 2
-    ):
+    def from_service_registries(cls, service_registries, title: str, n_columns: int = 2):
         if not isinstance(service_registries, (list, tuple)):
             service_registries = [service_registries]
         srv_names = []
@@ -203,9 +199,7 @@ class Dashboard:
 
         resp = requests.post(
             urljoin(_grafana_base_url(), "api/dashboards/db"),
-            data=json.dumps(dashboard_data, cls=DashboardEncoder, indent=2).encode(
-                "utf-8"
-            ),
+            data=json.dumps(dashboard_data, cls=DashboardEncoder, indent=2).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
@@ -215,9 +209,7 @@ class Dashboard:
         if resp.status_code == 200:
             logger.info(f"{self.title} dashboard created/updated successfully")
         else:
-            logger.error(
-                f"Error creating/updating dashboard: {resp.status_code} - {resp.text}"
-            )
+            logger.error(f"Error creating/updating dashboard: {resp.status_code} - {resp.text}")
 
     @property
     def _api_key(self):
@@ -269,9 +261,7 @@ class Dashboard:
             max_height = 0
 
             for panel in panels_row:
-                width_fr = (
-                    default_width_fr if panel.width_fr is None else panel.width_fr
-                )
+                width_fr = default_width_fr if panel.width_fr is None else panel.width_fr
 
                 # Build the base query for simplified log setup
                 expr = f"{{service_name={_logql_string(panel.service.name)}}}"

@@ -1,0 +1,27 @@
+{
+  "command": [
+    "python",
+    "-c",
+    "print(1)"
+  ],
+  "environment": {
+    "FOO": "bar"
+  },
+  "image": "python:3.12-slim",
+  "init": true,
+  "log_config": {
+    "config": {
+      "fluentd-address": "localhost:24224",
+      "fluentd-async": "true",
+      "fluentd-buffer-limit": "1048576",
+      "tag": "docker.{{.Name}}"
+    },
+    "type": "fluentd"
+  },
+  "name": "snap-container",
+  "network_mode": "host",
+  "restart_policy": {
+    "Name": "no"
+  },
+  "shm_size": "256m"
+}

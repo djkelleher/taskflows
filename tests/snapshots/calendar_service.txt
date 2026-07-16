@@ -1,0 +1,31 @@
+=== taskflows-snap-calendar.service ===
+[Unit]
+Description=A scheduled service
+Description=A scheduled service
+StartLimitBurst=0
+StartLimitIntervalSec=0
+[Service]
+Environment="BAZ=qux"
+Environment="FOO=bar"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/bin/echo scheduled
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5
+RuntimeMaxSec=300
+StandardError=journal
+StandardOutput=journal
+TimeoutStopSec=120s
+WorkingDirectory=/srv/app
+[Install]
+WantedBy=default.target
+
+=== taskflows-snap-calendar.timer ===
+[Unit]
+Description=timer for snap-calendar
+[Timer]
+AccuracySec=1ms
+OnCalendar=Mon-Fri 09:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target

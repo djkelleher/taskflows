@@ -6,14 +6,11 @@ Note: This module is separate from admin/security.py which handles HMAC/JWT auth
 import re
 import tempfile
 from pathlib import Path
-from typing import Union
 
 from taskflows.exceptions import SecurityError, ValidationError
 
 
-def validate_env_file_path(
-    path: Union[str, Path], allow_nonexistent: bool = False
-) -> Path:
+def validate_env_file_path(path: str | Path, allow_nonexistent: bool = False) -> Path:
     """Validate env_file path is safe to read.
 
     Prevents:
@@ -87,19 +84,13 @@ def validate_service_name(name: str) -> str:
     """
     # Check for None or empty
     if name is None:
-        raise ValidationError(
-            "Service name cannot be None. Please provide a name for the service."
-        )
+        raise ValidationError("Service name cannot be None. Please provide a name for the service.")
     if not isinstance(name, str):
-        raise ValidationError(
-            f"Service name must be a string, got {type(name).__name__}"
-        )
+        raise ValidationError(f"Service name must be a string, got {type(name).__name__}")
     if not name:
         raise ValidationError("Invalid service name: cannot be empty")
     if name != name.strip():
-        raise ValidationError(
-            "Invalid service name: cannot start or end with whitespace"
-        )
+        raise ValidationError("Invalid service name: cannot start or end with whitespace")
 
     # Allow only safe characters
     if not re.match(r"^[a-zA-Z0-9._-]+$", name):

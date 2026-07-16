@@ -31,7 +31,7 @@ def test_exception_logging():
 
     try:
         # Simulate an error
-        1 / 0
+        _ = 1 / 0
     except ZeroDivisionError:
         logger.error("division_by_zero", operation="test_calculation", exc_info=True)
 
@@ -58,9 +58,7 @@ def test_request_context():
         time.sleep(0.1)
         processing_time = random.uniform(10, 100)
 
-        logger.info(
-            "request_processed", status_code=200, response_time_ms=processing_time
-        )
+        logger.info("request_processed", status_code=200, response_time_ms=processing_time)
 
         clear_request_context()
 

@@ -3,7 +3,6 @@
 import ipaddress
 import socket
 from functools import cache
-from typing import Optional
 
 import requests
 
@@ -26,7 +25,7 @@ def with_hostname(data: dict) -> ResponseData:
 
 
 @cache
-def get_public_ipv4() -> Optional[str]:
+def get_public_ipv4() -> str | None:
     """Detect and cache the machine's public IPv4 address.
 
     Returns:

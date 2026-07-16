@@ -1,0 +1,17 @@
+=== taskflows-snap-relations.service ===
+[Unit]
+After=other-svc
+Conflicts=rival-svc
+Description=Service for snap-relations
+OnFailure=cleanup-svc
+OnSuccess=next-svc
+PartOf=parent-svc
+[Service]
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/bin/echo related
+KillSignal=SIGTERM
+StandardError=journal
+StandardOutput=journal
+TimeoutStopSec=120s
+[Install]
+WantedBy=default.target

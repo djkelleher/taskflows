@@ -96,12 +96,8 @@ class TestDiscoverCommand:
         result = runner.invoke(discover, ["--count", str(temp_yaml_dir / "configs")])
 
         assert result.exit_code == 0
-        assert (
-            "(3 services)" in result.output
-        )  # production/services.yaml has 3 services
-        assert (
-            "(2 services)" in result.output
-        )  # staging/web-services.yml has 2 services
+        assert "(3 services)" in result.output  # production/services.yaml has 3 services
+        assert "(2 services)" in result.output  # staging/web-services.yml has 2 services
 
     def test_discover_count_flag_short_form(self, temp_yaml_dir):
         """Test that -c flag works the same as --count."""
@@ -201,13 +197,9 @@ taskflows_services:
 
         assert result.exit_code == 0
         lines = [
-            line
-            for line in result.output.split("\n")
-            if line and not line.startswith("Found")
+            line for line in result.output.split("\n") if line and not line.startswith("Found")
         ]
         # Check that production comes before staging (alphabetically)
-        production_idx = next(
-            (i for i, line in enumerate(lines) if "production" in line), -1
-        )
+        production_idx = next((i for i, line in enumerate(lines) if "production" in line), -1)
         staging_idx = next((i for i, line in enumerate(lines) if "staging" in line), -1)
         assert production_idx < staging_idx

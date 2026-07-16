@@ -1,10 +1,9 @@
 import re
 from dataclasses import dataclass
 from numbers import Real
-from typing import Dict, List, Literal, Optional, Set
+from typing import Literal
 
 from pydantic import BaseModel, Field
-
 
 _NUMBERED_DIRECTIVE_RE = re.compile(r"^(?P<name>.+)_\d+$")
 
@@ -23,7 +22,7 @@ class HardwareConstraint(BaseModel):
     silent: bool = False
 
     @property
-    def unit_entries(self) -> Set[str]:
+    def unit_entries(self) -> set[str]:
         action = "Constraint" if self.silent else "Assert"
         return {f"{action}{self.__class__.__name__}={self.constraint}{self.amount}"}
 
@@ -52,11 +51,9 @@ class SystemLoadConstraint(BaseModel):
     silent: bool = False
 
     @property
-    def unit_entries(self) -> Set[str]:
+    def unit_entries(self) -> set[str]:
         action = "Constraint" if self.silent else "Assert"
-        return {
-            f"{action}{self.__class__.__name__}={self.max_percent}%/{self.timespan}"
-        }
+        return {f"{action}{self.__class__.__name__}={self.max_percent}%/{self.timespan}"}
 
 
 class MemoryPressure(SystemLoadConstraint): ...
@@ -73,58 +70,58 @@ class CgroupConfig:
     """Unified cgroup configuration for both Docker and systemd."""
 
     # CPU limits
-    cpu_quota: Optional[int] = None  # microseconds per period
-    cpu_period: Optional[int] = 100000  # default 100ms
-    cpu_shares: Optional[int] = None  # relative weight (Docker: 1024 = 1 CPU)
-    cpu_weight: Optional[int] = None  # systemd weight (1-10000, cgroup v2)
-    cpuset_cpus: Optional[str] = None  # CPU affinity (e.g., "0-3,5")
+    cpu_quota: int | None = None  # microseconds per period
+    cpu_period: int | None = 100000  # default 100ms
+    cpu_shares: int | None = None  # relative weight (Docker: 1024 = 1 CPU)
+    cpu_weight: int | None = None  # systemd weight (1-10000, cgroup v2)
+    cpuset_cpus: str | None = None  # CPU affinity (e.g., "0-3,5")
 
     # Memory limits
-    memory_limit: Optional[int] = None  # hard limit in bytes
-    memory_high: Optional[int] = None  # soft limit / high-water mark (systemd)
-    memory_reservation: Optional[int] = None  # soft limit (Docker)
-    memory_low: Optional[int] = None  # preferred memory (systemd)
-    memory_min: Optional[int] = None  # guaranteed memory (systemd)
-    memory_swap_limit: Optional[int] = None  # bytes (memory + swap)
-    memory_swap_max: Optional[int] = None  # swap allowance (systemd cgroup v2)
-    memory_swappiness: Optional[int] = None  # 0-100, swap tendency
+    memory_limit: int | None = None  # hard limit in bytes
+    memory_high: int | None = None  # soft limit / high-water mark (systemd)
+    memory_reservation: int | None = None  # soft limit (Docker)
+    memory_low: int | None = None  # preferred memory (systemd)
+    memory_min: int | None = None  # guaranteed memory (systemd)
+    memory_swap_limit: int | None = None  # bytes (memory + swap)
+    memory_swap_max: int | None = None  # swap allowance (systemd cgroup v2)
+    memory_swappiness: int | None = None  # 0-100, swap tendency
 
     # I/O limits
-    blkio_weight: Optional[int] = None  # Docker: 10-1000
-    io_weight: Optional[int] = None  # systemd: 1-10000 (cgroup v2)
-    device_read_bps: Optional[Dict[str, int]] = None  # device -> bytes/sec
-    device_write_bps: Optional[Dict[str, int]] = None  # device -> bytes/sec
-    device_read_iops: Optional[Dict[str, int]] = None  # device -> operations/sec
-    device_write_iops: Optional[Dict[str, int]] = None  # device -> operations/sec
+    blkio_weight: int | None = None  # Docker: 10-1000
+    io_weight: int | None = None  # systemd: 1-10000 (cgroup v2)
+    device_read_bps: dict[str, int] | None = None  # device -> bytes/sec
+    device_write_bps: dict[str, int] | None = None  # device -> bytes/sec
+    device_read_iops: dict[str, int] | None = None  # device -> operations/sec
+    device_write_iops: dict[str, int] | None = None  # device -> operations/sec
 
     # Process limits
-    pids_limit: Optional[int] = None  # max number of PIDs/tasks
-    nofile_limit: Optional[int] = None  # max number of open file descriptors
+    pids_limit: int | None = None  # max number of PIDs/tasks
+    nofile_limit: int | None = None  # max number of open file descriptors
 
     # Security and isolation
-    oom_score_adj: Optional[int] = None  # OOM killer preference (-1000 to 1000)
-    oom_policy: Optional[Literal["continue", "stop", "kill"]] = None
-    read_only_rootfs: Optional[bool] = None  # make root filesystem read-only
-    cap_add: Optional[List[str]] = None  # add Linux capabilities
-    cap_drop: Optional[List[str]] = None  # drop Linux capabilities
-    devices: Optional[List[str]] = None  # device access rules
-    device_cgroup_rules: Optional[List[str]] = None  # custom device cgroup rules
+    oom_score_adj: int | None = None  # OOM killer preference (-1000 to 1000)
+    oom_policy: Literal["continue", "stop", "kill"] | None = None
+    read_only_rootfs: bool | None = None  # make root filesystem read-only
+    cap_add: list[str] | None = None  # add Linux capabilities
+    cap_drop: list[str] | None = None  # drop Linux capabilities
+    devices: list[str] | None = None  # device access rules
+    device_cgroup_rules: list[str] | None = None  # custom device cgroup rules
 
     # systemd-oomd controls
-    managed_oom_swap: Optional[Literal["auto", "kill"]] = None
-    managed_oom_memory_pressure: Optional[Literal["auto", "kill"]] = None
-    managed_oom_memory_pressure_limit: Optional[int] = None
-    managed_oom_preference: Optional[Literal["none", "avoid", "omit"]] = None
+    managed_oom_swap: Literal["auto", "kill"] | None = None
+    managed_oom_memory_pressure: Literal["auto", "kill"] | None = None
+    managed_oom_memory_pressure_limit: int | None = None
+    managed_oom_preference: Literal["none", "avoid", "omit"] | None = None
 
     # Timeouts (resource-related)
-    timeout_start: Optional[int] = None  # start timeout in seconds
-    timeout_stop: Optional[int] = None  # stop timeout in seconds
+    timeout_start: int | None = None  # start timeout in seconds
+    timeout_stop: int | None = None  # stop timeout in seconds
 
     # Environment and execution
-    environment: Optional[Dict[str, str]] = None  # environment variables
-    user: Optional[str] = None  # run as user
-    group: Optional[str] = None  # run as group
-    working_dir: Optional[str] = None  # working directory
+    environment: dict[str, str] | None = None  # environment variables
+    user: str | None = None  # run as user
+    group: str | None = None  # run as group
+    working_dir: str | None = None  # working directory
 
     def __post_init__(self) -> None:
         self._normalize_literal("oom_policy")
@@ -193,7 +190,7 @@ class CgroupConfig:
 
     def _normalize_percent(self, name: str) -> None:
         value = getattr(self, name)
-        if value is None or isinstance(value, bool) or isinstance(value, int):
+        if value is None or isinstance(value, (bool, int)):
             return
         if isinstance(value, float):
             if not value.is_integer():
@@ -209,7 +206,7 @@ class CgroupConfig:
                 return
         raise ValueError(f"{name} must be a whole percent between 0 and 100")
 
-    def _validate_literal(self, name: str, allowed: Set[str]) -> None:
+    def _validate_literal(self, name: str, allowed: set[str]) -> None:
         value = getattr(self, name)
         if value is not None and value not in allowed:
             allowed_values = ", ".join(sorted(allowed))
@@ -224,7 +221,7 @@ class CgroupConfig:
                 if value <= 0:
                     raise ValueError(f"{name}[{key!r}] must be positive")
 
-    def to_docker_cli_args(self) -> List[str]:
+    def to_docker_cli_args(self) -> list[str]:
         """Convert to Docker CLI arguments."""
         args = []
 
@@ -325,7 +322,7 @@ class CgroupConfig:
 
         return args
 
-    def _calculate_effective_memory_limit(self) -> Optional[int]:
+    def _calculate_effective_memory_limit(self) -> int | None:
         """Calculate the most appropriate memory limit for Docker from systemd memory parameters."""
         # Priority: memory_limit > memory_max > memory_high > memory_min
         if self.memory_limit:
@@ -341,7 +338,7 @@ class CgroupConfig:
 
         return max(candidates) if candidates else None
 
-    def _calculate_effective_memory_reservation(self) -> Optional[int]:
+    def _calculate_effective_memory_reservation(self) -> int | None:
         """Calculate the most appropriate memory reservation for Docker from systemd parameters."""
         # Priority: memory_reservation > memory_high > memory_low
         if self.memory_reservation:
@@ -352,7 +349,7 @@ class CgroupConfig:
             return self.memory_low
         return None
 
-    def _calculate_effective_swap_limit(self) -> Optional[int]:
+    def _calculate_effective_swap_limit(self) -> int | None:
         """Calculate Docker memory_swap_limit from systemd parameters."""
         if self.memory_swap_limit:
             return self.memory_swap_limit
@@ -366,20 +363,20 @@ class CgroupConfig:
 
         return None
 
-    def _parse_device_bandwidth_limits(self) -> Dict[str, Dict[str, int]]:
+    def _parse_device_bandwidth_limits(self) -> dict[str, dict[str, int]]:
         """Parse systemd IOReadBandwidthMax/IOWriteBandwidthMax format."""
         # This would be used if we had systemd directives to parse
         # For now, return empty dict as we're generating, not parsing
         return {}
 
-    def _calculate_capability_lists(self) -> tuple[List[str], List[str]]:
+    def _calculate_capability_lists(self) -> tuple[list[str], list[str]]:
         """Calculate cap_add/cap_drop lists from current capabilities."""
         cap_add = list(self.cap_add) if self.cap_add else []
         cap_drop = list(self.cap_drop) if self.cap_drop else []
 
         return cap_add, cap_drop
 
-    def to_systemd_directives(self) -> Dict[str, str]:
+    def to_systemd_directives(self) -> dict[str, str]:
         """Convert to systemd service directives."""
         directives = {}
 
@@ -477,9 +474,7 @@ class CgroupConfig:
         if self.managed_oom_swap:
             directives["ManagedOOMSwap"] = self.managed_oom_swap
         if self.managed_oom_memory_pressure:
-            directives["ManagedOOMMemoryPressure"] = (
-                self.managed_oom_memory_pressure
-            )
+            directives["ManagedOOMMemoryPressure"] = self.managed_oom_memory_pressure
         if self.managed_oom_memory_pressure_limit is not None:
             directives["ManagedOOMMemoryPressureLimit"] = (
                 f"{self.managed_oom_memory_pressure_limit}%"
@@ -517,9 +512,7 @@ class CgroupConfig:
             # Add back specific capabilities if both add and drop are specified
             all_caps = set(directives.get("CapabilityBoundingSet", "").split())
             for cap in self.cap_add:
-                cap_name = (
-                    cap.upper() if cap.startswith("CAP_") else f"CAP_{cap.upper()}"
-                )
+                cap_name = cap.upper() if cap.startswith("CAP_") else f"CAP_{cap.upper()}"
                 all_caps.add(cap_name)
             directives["CapabilityBoundingSet"] = " ".join(sorted(all_caps))
 
@@ -541,9 +534,7 @@ class CgroupConfig:
             from taskflows.security_validation import format_systemd_environment
 
             for index, (key, value) in enumerate(self.environment.items()):
-                directives[f"Environment_{index}"] = format_systemd_environment(
-                    key, value
-                )
+                directives[f"Environment_{index}"] = format_systemd_environment(key, value)
         if self.user:
             directives["User"] = self.user
         if self.group:

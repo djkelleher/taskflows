@@ -20,7 +20,7 @@ def test_hmac_auth():
         print("❌ Security config not found. Run 'tf api security setup' first.")
         return
 
-    with open(security_config_file, "r") as f:
+    with open(security_config_file) as f:
         security_config = json.load(f)
 
     if not security_config.get("enable_hmac") or not security_config.get("hmac_secret"):
@@ -36,9 +36,7 @@ def test_hmac_auth():
     print("\n📋 Test 1: GET /health")
     timestamp = str(int(time.time()))
     message = f"{timestamp}:"
-    signature = hmac.new(
-        hmac_secret.encode(), message.encode(), hashlib.sha256
-    ).hexdigest()
+    signature = hmac.new(hmac_secret.encode(), message.encode(), hashlib.sha256).hexdigest()
 
     headers = {"X-HMAC-Signature": signature, "X-Timestamp": timestamp}
 
@@ -56,9 +54,7 @@ def test_hmac_auth():
     timestamp = str(int(time.time()))
     body = json.dumps({"match": "test"}, separators=(",", ":"))
     message = f"{timestamp}:{body}"
-    signature = hmac.new(
-        hmac_secret.encode(), message.encode(), hashlib.sha256
-    ).hexdigest()
+    signature = hmac.new(hmac_secret.encode(), message.encode(), hashlib.sha256).hexdigest()
 
     headers = {
         "X-HMAC-Signature": signature,
@@ -90,9 +86,7 @@ def test_hmac_auth():
     print("\n📋 Test 4: Request with expired timestamp")
     old_timestamp = str(int(time.time()) - 600)  # 10 minutes old
     message = f"{old_timestamp}:"
-    signature = hmac.new(
-        hmac_secret.encode(), message.encode(), hashlib.sha256
-    ).hexdigest()
+    signature = hmac.new(hmac_secret.encode(), message.encode(), hashlib.sha256).hexdigest()
 
     headers = {"X-HMAC-Signature": signature, "X-Timestamp": old_timestamp}
 

@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 
 import pytest
+
 from taskflows.loggers.structured import (
     clear_request_context,
     configure_loki_logging,
@@ -50,9 +51,7 @@ class TestContextPropagation:
             request_id = f"req-thread-{thread_id}"
             trace_id = f"trace-thread-{thread_id}"
 
-            set_request_context(
-                request_id=request_id, trace_id=trace_id, thread_id=thread_id
-            )
+            set_request_context(request_id=request_id, trace_id=trace_id, thread_id=thread_id)
 
             # Verify context is set correctly
             assert request_id_var.get() == request_id
@@ -96,9 +95,7 @@ class TestContextPropagation:
         request_id = "req-parent-123"
         trace_id = "trace-parent-456"
 
-        set_request_context(
-            request_id=request_id, trace_id=trace_id, user_id="user-789"
-        )
+        set_request_context(request_id=request_id, trace_id=trace_id, user_id="user-789")
 
         # Test parent logger first
         parent_logger = get_struct_logger("parent")
@@ -113,9 +110,7 @@ class TestContextPropagation:
 
         # Test child logger with fresh capture
         child_logger = get_struct_logger("parent.child")
-        child_log_capture, child_handler, child_test_logger = setup_log_capture(
-            "parent.child"
-        )
+        child_log_capture, child_handler, child_test_logger = setup_log_capture("parent.child")
 
         child_logger.info("child_message")
 
@@ -136,22 +131,12 @@ class TestContextPropagation:
             child_log.get("request_id") == request_id
             or child_context.get("request_id") == request_id
         )
+        assert parent_log.get("trace_id") == trace_id or parent_context.get("trace_id") == trace_id
+        assert child_log.get("trace_id") == trace_id or child_context.get("trace_id") == trace_id
         assert (
-            parent_log.get("trace_id") == trace_id
-            or parent_context.get("trace_id") == trace_id
+            parent_log.get("user_id") == "user-789" or parent_context.get("user_id") == "user-789"
         )
-        assert (
-            child_log.get("trace_id") == trace_id
-            or child_context.get("trace_id") == trace_id
-        )
-        assert (
-            parent_log.get("user_id") == "user-789"
-            or parent_context.get("user_id") == "user-789"
-        )
-        assert (
-            child_log.get("user_id") == "user-789"
-            or child_context.get("user_id") == "user-789"
-        )
+        assert child_log.get("user_id") == "user-789" or child_context.get("user_id") == "user-789"
 
     @pytest.mark.asyncio
     async def test_async_context_propagation(self):
@@ -180,8 +165,7 @@ class TestContextPropagation:
             results.append(
                 {
                     "task_id": task_id,
-                    "request_id": log_data.get("request_id")
-                    or context.get("request_id"),
+                    "request_id": log_data.get("request_id") or context.get("request_id"),
                     "logged_task_id": log_data.get("task_id") or context.get("task_id"),
                 }
             )
@@ -240,27 +224,15 @@ class TestContextPropagation:
             or with_context_ctx.get("custom_field") == "custom_value"
         )
         assert (
-            with_context.get("another_field") == 123
-            or with_context_ctx.get("another_field") == 123
+            with_context.get("another_field") == 123 or with_context_ctx.get("another_field") == 123
         )
 
         # Second log should not have context
         without_context_ctx = without_context.get("context", {})
-        assert (
-            "request_id" not in without_context
-            and "request_id" not in without_context_ctx
-        )
-        assert (
-            "trace_id" not in without_context and "trace_id" not in without_context_ctx
-        )
-        assert (
-            "custom_field" not in without_context
-            and "custom_field" not in without_context_ctx
-        )
-        assert (
-            "another_field" not in without_context
-            and "another_field" not in without_context_ctx
-        )
+        assert "request_id" not in without_context and "request_id" not in without_context_ctx
+        assert "trace_id" not in without_context and "trace_id" not in without_context_ctx
+        assert "custom_field" not in without_context and "custom_field" not in without_context_ctx
+        assert "another_field" not in without_context and "another_field" not in without_context_ctx
 
         test_logger.removeHandler(handler)
 
@@ -293,28 +265,18 @@ class TestContextPropagation:
         log3_ctx = log3.get("context", {})
 
         # First log
-        assert (
-            log1.get("request_id") == "req-1" or log1_ctx.get("request_id") == "req-1"
-        )
+        assert log1.get("request_id") == "req-1" or log1_ctx.get("request_id") == "req-1"
         assert log1.get("step") == "init" or log1_ctx.get("step") == "init"
         assert "trace_id" not in log1 and "trace_id" not in log1_ctx
 
         # Second log (context accumulates)
-        assert (
-            log2.get("request_id") == "req-1" or log2_ctx.get("request_id") == "req-1"
-        )
-        assert (
-            log2.get("trace_id") == "trace-1" or log2_ctx.get("trace_id") == "trace-1"
-        )
+        assert log2.get("request_id") == "req-1" or log2_ctx.get("request_id") == "req-1"
+        assert log2.get("trace_id") == "trace-1" or log2_ctx.get("trace_id") == "trace-1"
         assert log2.get("step") == "processing" or log2_ctx.get("step") == "processing"
 
         # Third log
-        assert (
-            log3.get("request_id") == "req-1" or log3_ctx.get("request_id") == "req-1"
-        )
-        assert (
-            log3.get("trace_id") == "trace-1" or log3_ctx.get("trace_id") == "trace-1"
-        )
+        assert log3.get("request_id") == "req-1" or log3_ctx.get("request_id") == "req-1"
+        assert log3.get("trace_id") == "trace-1" or log3_ctx.get("trace_id") == "trace-1"
         assert log3.get("step") == "completed" or log3_ctx.get("step") == "completed"
         assert log3.get("result") == "success" or log3_ctx.get("result") == "success"
 
@@ -339,10 +301,7 @@ class TestContextPropagation:
 
         # Should have all three types of context (might be nested)
         context = log_data.get("context", {})
-        assert (
-            log_data.get("request_id") == "req-bound"
-            or context.get("request_id") == "req-bound"
-        )
+        assert log_data.get("request_id") == "req-bound" or context.get("request_id") == "req-bound"
         assert (
             log_data.get("global_field") == "global_value"
             or context.get("global_field") == "global_value"
@@ -351,10 +310,7 @@ class TestContextPropagation:
             log_data.get("bound_field") == "bound_value"
             or context.get("bound_field") == "bound_value"
         )
-        assert (
-            log_data.get("service") == "test-service"
-            or context.get("service") == "test-service"
-        )
+        assert log_data.get("service") == "test-service" or context.get("service") == "test-service"
         assert (
             log_data.get("inline_field") == "inline_value"
             or context.get("inline_field") == "inline_value"
@@ -381,9 +337,7 @@ class TestRequestIdGeneration:
         """Test request ID format is consistent"""
         import re
 
-        uuid_pattern = re.compile(
-            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-        )
+        uuid_pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
         for _ in range(10):
             request_id = generate_request_id()

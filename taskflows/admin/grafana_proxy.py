@@ -5,10 +5,11 @@ token for authentication. Grafana is bound to 127.0.0.1 only, so external
 access must go through this proxy.
 """
 
+from urllib.parse import urljoin
+
 import aiohttp
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
-from urllib.parse import urljoin
 
 from taskflows.common import Config, logger
 
@@ -69,9 +70,7 @@ async def grafana_proxy(path: str, request: Request):
                 "x-frame-options",
             }
             response_headers = {
-                key: value
-                for key, value in resp.headers.items()
-                if key.lower() not in skip
+                key: value for key, value in resp.headers.items() if key.lower() not in skip
             }
 
             return Response(

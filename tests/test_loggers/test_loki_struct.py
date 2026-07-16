@@ -91,14 +91,8 @@ def test_bound_logger_context():
 
     # Fields should be in context or top level
     context = log_data.get("context", {})
-    assert (
-        log_data.get("request_id") == "req-123"
-        or context.get("request_id") == "req-123"
-    )
-    assert (
-        log_data.get("session_id") == "sess-456"
-        or context.get("session_id") == "sess-456"
-    )
+    assert log_data.get("request_id") == "req-123" or context.get("request_id") == "req-123"
+    assert log_data.get("session_id") == "sess-456" or context.get("session_id") == "sess-456"
 
     test_logger.removeHandler(handler)
 
@@ -147,9 +141,7 @@ def test_get_struct_logger_with_context():
     """Test get_struct_logger with context parameters"""
     configure_loki_logging(app_name="test-app")
 
-    logger = get_struct_logger(
-        "test", service="api", version="2.0.0", region="us-east-1"
-    )
+    logger = get_struct_logger("test", service="api", version="2.0.0", region="us-east-1")
 
     import io
     import logging

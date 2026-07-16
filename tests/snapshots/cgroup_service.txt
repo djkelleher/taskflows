@@ -1,0 +1,22 @@
+=== taskflows-snap-cgroup.service ===
+[Unit]
+Description=Service for snap-cgroup
+[Service]
+AllowedCPUs=0-3
+CPUWeight=200
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/bin/echo constrained
+IOAccounting=yes
+IOWeight=100
+KillSignal=SIGTERM
+MemoryAccounting=yes
+MemoryHigh=805306368
+MemoryMax=1073741824
+OOMScoreAdjust=500
+StandardError=journal
+StandardOutput=journal
+TasksAccounting=yes
+TasksMax=512
+TimeoutStopSec=120s
+[Install]
+WantedBy=default.target

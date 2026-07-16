@@ -5,8 +5,9 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
-from taskflows.loggers.basic import any_case_env_var, get_logger
 from loguru import logger
+
+from taskflows.loggers.basic import any_case_env_var, get_logger
 
 
 def _reset_basic_logger_state(basic, original_configured):
@@ -273,9 +274,7 @@ def test_loggers_env_vars():
                     "loggers_MAX_ROTATIONS": "3",
                 },
             ):
-                test_logger = get_logger(
-                    name=name, file_max_bytes=None, max_rotations=None
-                )
+                test_logger = get_logger(name=name, file_max_bytes=None, max_rotations=None)
 
                 # Test that file was created
                 test_logger.warning("test message")

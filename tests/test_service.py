@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from shutil import rmtree
 from time import sleep, time
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from taskflows import constraints
 from taskflows.common import _SYSTEMD_FILE_PREFIX
 from taskflows.constraints import CgroupConfig
@@ -131,7 +132,7 @@ def test_service_includes_memory_swap_max_directive():
 
 
 def test_calendar_from_datetime_uses_four_digit_year():
-    run_time = datetime(2026, 5, 5, 16, 50, 8, tzinfo=timezone.utc)
+    run_time = datetime(2026, 5, 5, 16, 50, 8, tzinfo=UTC)
 
     calendar = Calendar.from_datetime(run_time)
 
@@ -174,11 +175,11 @@ def test_service_logs_sets_journalctl_timeout(monkeypatch):
     monkeypatch.setenv("TASKFLOWS_JOURNALCTL_TIMEOUT_SECONDS", "7")
     completed = MagicMock(stdout="logs", stderr="")
 
-    with patch(
-        "taskflows.service.get_docker_client", side_effect=RuntimeError("no docker")
+    with (
+        patch("taskflows.service.get_docker_client", side_effect=RuntimeError("no docker")),
+        patch("taskflows.service.subprocess.run", return_value=completed) as run,
     ):
-        with patch("taskflows.service.subprocess.run", return_value=completed) as run:
-            assert service_logs("test-service") == "logs"
+        assert service_logs("test-service") == "logs"
 
     assert run.call_args.kwargs["timeout"] == 7
 
@@ -202,9 +203,7 @@ def test_venv_command_quotes_runner_and_environment_name(tmp_path):
     runner = tmp_path / "conda runner"
     runner.touch()
 
-    command = Venv(env_name="prod env", custom_path=runner).create_env_command(
-        "python -V"
-    )
+    command = Venv(env_name="prod env", custom_path=runner).create_env_command("python -V")
 
     assert command == f"'{runner}' run -n 'prod env' --no-capture-output -- python -V"
 
@@ -212,15 +211,13 @@ def test_venv_command_quotes_runner_and_environment_name(tmp_path):
 def test_venv_command_uses_attach_when_runner_supports_it(tmp_path):
     runner = tmp_path / "mamba"
     runner.touch()
-    help_output = "--attach STREAM\n-a \"\" for disabling stream redirection"
+    help_output = '--attach STREAM\n-a "" for disabling stream redirection'
 
     with patch(
         "taskflows.service.subprocess.run",
         return_value=MagicMock(stdout=help_output, stderr=""),
     ):
-        command = Venv(env_name="prod env", custom_path=runner).create_env_command(
-            "python -V"
-        )
+        command = Venv(env_name="prod env", custom_path=runner).create_env_command("python -V")
 
     assert command == f"{runner} run -n 'prod env' -a '' -- python -V"
 
@@ -233,9 +230,7 @@ def test_venv_command_uses_no_capture_when_runner_supports_it(tmp_path):
         "taskflows.service.subprocess.run",
         return_value=MagicMock(stdout="--no-capture-output", stderr=""),
     ):
-        command = Venv(env_name="prod env", custom_path=runner).create_env_command(
-            "python -V"
-        )
+        command = Venv(env_name="prod env", custom_path=runner).create_env_command("python -V")
 
     assert command == f"{runner} run -n 'prod env' --no-capture-output -- python -V"
 
@@ -248,9 +243,7 @@ def test_venv_command_omits_live_output_flag_for_mamba_when_probe_fails(tmp_path
         "taskflows.service.subprocess.run",
         side_effect=OSError("not executable"),
     ):
-        command = Venv(env_name="prod env", custom_path=runner).create_env_command(
-            "python -V"
-        )
+        command = Venv(env_name="prod env", custom_path=runner).create_env_command("python -V")
 
     assert command == f"{runner} run -n 'prod env' -- python -V"
 
@@ -261,9 +254,7 @@ async def test_service_management(log_dir):
     # create a minimal service.
     test_name = create_test_name()
     log_file = (log_dir / f"{test_name}.log").resolve()
-    srv = Service(
-        name=test_name, start_command=f"bash -c 'echo {test_name} >> {log_file}'"
-    )
+    srv = Service(name=test_name, start_command=f"bash -c 'echo {test_name} >> {log_file}'")
     await srv.create()
     service_file = systemd_dir / f"{_SYSTEMD_FILE_PREFIX}{test_name}.service"
     assert service_file.is_file()
@@ -281,7 +272,7 @@ async def test_service_management(log_dir):
 async def test_schedule(log_dir):
     test_name = create_test_name()
     log_file = (log_dir / f"{test_name}.log").resolve()
-    run_time = datetime.now(timezone.utc) + timedelta(seconds=1)
+    run_time = datetime.now(UTC) + timedelta(seconds=1)
     srv = Service(
         name=test_name,
         start_command=f"bash -c 'echo {test_name} >> {log_file}'",
@@ -292,7 +283,7 @@ async def test_schedule(log_dir):
     assert timer_file.is_file()
     assert len(timer_file.read_text())
     assert not log_file.is_file()
-    sleep((run_time - datetime.now(timezone.utc)).total_seconds() + 0.5)
+    sleep((run_time - datetime.now(UTC)).total_seconds() + 0.5)
     assert log_file.is_file()
     assert log_file.read_text().strip() == test_name
     await srv.remove()
@@ -308,9 +299,7 @@ async def test_service_enable_without_arguments(log_dir):
     srv = Service(
         name=test_name,
         start_command=f"bash -c 'echo {test_name} >> {log_file}'",
-        start_schedule=Calendar.from_datetime(
-            datetime.now(timezone.utc) + timedelta(seconds=10)
-        ),
+        start_schedule=Calendar.from_datetime(datetime.now(UTC) + timedelta(seconds=10)),
     )
     await srv.create()
 
@@ -336,9 +325,7 @@ async def test_service_enable_timers_only(log_dir):
     srv = Service(
         name=test_name,
         start_command=f"bash -c 'echo {test_name} >> {log_file}'",
-        start_schedule=Calendar.from_datetime(
-            datetime.now(timezone.utc) + timedelta(seconds=10)
-        ),
+        start_schedule=Calendar.from_datetime(datetime.now(UTC) + timedelta(seconds=10)),
     )
     await srv.create()
 
@@ -432,9 +419,7 @@ def test_cgroup_environment_directives_are_escaped():
         cgroup_config=cgroup,
     )
 
-    assert (
-        'Environment="SAFE_VALUE=quoted \\"value\\" with spaces"' in srv.service_entries
-    )
+    assert 'Environment="SAFE_VALUE=quoted \\"value\\" with spaces"' in srv.service_entries
 
 
 def test_cgroup_repeated_device_allow_entries_are_preserved():

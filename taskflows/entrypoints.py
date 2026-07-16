@@ -4,9 +4,10 @@ import re
 import signal
 import sys
 import traceback
+from collections.abc import Callable, Sequence
 from functools import cache, wraps
 from pprint import pformat
-from typing import Any, Callable, Dict, Sequence
+from typing import Any
 
 import click
 from click import Group
@@ -18,7 +19,7 @@ _INT_RE = re.compile(r"^[+-]?\d+$")
 _FLOAT_RE = re.compile(r"^[+-]?(?:\d+\.\d*|\.\d+)$")
 
 
-def parse_str_kwargs(kwargs: Sequence[str]) -> Dict[str, int | float | str]:
+def parse_str_kwargs(kwargs: Sequence[str]) -> dict[str, int | float | str]:
     """Parses string in the form 'key=value'"""
     kwargs_dict = {}
     for pair in kwargs:
@@ -92,7 +93,7 @@ class ShutdownHandler:
             self._create_shutdown_task(exit_code)
         return await self._shutdown_task
 
-    def _loop_exception_handle(self, loop: Any, context: Dict[str, Any]):
+    def _loop_exception_handle(self, loop: Any, context: dict[str, Any]):
         """
         Exception handler for the event loop.
 
@@ -111,9 +112,7 @@ class ShutdownHandler:
         if exception:
             # Log the exception traceback
             tb = "".join(
-                traceback.format_exception(
-                    type(exception), exception, exception.__traceback__
-                )
+                traceback.format_exception(type(exception), exception, exception.__traceback__)
             )
             logger.error(f"Exception traceback:\n{tb}")
         else:

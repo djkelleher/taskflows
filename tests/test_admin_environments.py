@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -8,15 +8,13 @@ from taskflows.admin import environments as envs
 def _named_env(name: str, env_type: str = "venv", environment: dict | None = None):
     if environment is None:
         environment = (
-            {"env_name": f"{name}-env"}
-            if env_type == "venv"
-            else {"image": "python:3.12"}
+            {"env_name": f"{name}-env"} if env_type == "venv" else {"image": "python:3.12"}
         )
     return envs.NamedEnvironment(
         name=name,
         type=env_type,
         environment=environment,
-        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
 
@@ -53,8 +51,7 @@ def test_environment_registry_rejects_key_payload_name_mismatch(
     isolated_environments_file,
 ):
     isolated_environments_file.write_text(
-        '{"stored": {"name": "payload", "type": "venv", '
-        '"environment": {"env_name": "venv"}}}'
+        '{"stored": {"name": "payload", "type": "venv", "environment": {"env_name": "venv"}}}'
     )
 
     with pytest.raises(RuntimeError, match="does not match payload name"):

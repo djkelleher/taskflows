@@ -1,9 +1,9 @@
+import ipaddress
 import json
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
-import ipaddress
-from typing import Any, Dict, List
+from datetime import UTC, datetime
+from typing import Any
 
 from .common import logger, secure_write_text, services_data_dir
 
@@ -16,28 +16,25 @@ _servers_lock = threading.RLock()
 def _locked_servers(write: bool = False):
     lock_file_path = _servers_file.with_suffix(_servers_file.suffix + ".lock")
     lock_file_path.parent.mkdir(parents=True, exist_ok=True)
-    with _servers_lock:
-        with open(lock_file_path, "a+") as lock_file:
-            try:
-                import fcntl
+    with _servers_lock, open(lock_file_path, "a+") as lock_file:
+        try:
+            import fcntl
 
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            except ImportError:
-                fcntl = None
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            fcntl = None
 
-            try:
-                servers = _load_servers_unlocked()
-                yield servers
-                if write:
-                    secure_write_text(
-                        _servers_file, json.dumps(servers, indent=2, default=str)
-                    )
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        try:
+            servers = _load_servers_unlocked()
+            yield servers
+            if write:
+                secure_write_text(_servers_file, json.dumps(servers, indent=2, default=str))
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _load_servers_unlocked() -> Dict[str, Any]:
+def _load_servers_unlocked() -> dict[str, Any]:
     if not _servers_file.exists():
         return {}
     try:
@@ -47,15 +44,13 @@ def _load_servers_unlocked() -> Dict[str, Any]:
             f"Server registry {_servers_file} is not valid JSON; refusing to overwrite it"
         ) from e
     if not isinstance(data, dict):
-        raise RuntimeError(
-            f"Server registry {_servers_file} must contain a JSON object"
-        )
+        raise RuntimeError(f"Server registry {_servers_file} must contain a JSON object")
     for hostname, record in data.items():
         _validate_server_record(hostname, record)
     return data
 
 
-def _load_servers() -> Dict[str, Any]:
+def _load_servers() -> dict[str, Any]:
     """Load servers from JSON file."""
     with _locked_servers(write=False) as servers:
         return dict(servers)
@@ -65,9 +60,7 @@ def _validate_server_hostname(hostname: str) -> str:
     if hostname is None:
         raise ValueError("Server hostname cannot be None")
     if not isinstance(hostname, str):
-        raise TypeError(
-            f"Server hostname must be a string, got {type(hostname).__name__}"
-        )
+        raise TypeError(f"Server hostname must be a string, got {type(hostname).__name__}")
     if not hostname.strip():
         raise ValueError("Server hostname cannot be empty")
     if hostname != hostname.strip():
@@ -79,15 +72,11 @@ def _validate_public_ipv4(public_ipv4: str) -> str:
     if public_ipv4 is None:
         raise ValueError("Server public_ipv4 cannot be None")
     if not isinstance(public_ipv4, str):
-        raise TypeError(
-            f"Server public_ipv4 must be a string, got {type(public_ipv4).__name__}"
-        )
+        raise TypeError(f"Server public_ipv4 must be a string, got {type(public_ipv4).__name__}")
     try:
         parsed_ip = ipaddress.ip_address(public_ipv4)
     except ValueError as exc:
-        raise ValueError(
-            f"Server public_ipv4 is not a valid IP address: {public_ipv4!r}"
-        ) from exc
+        raise ValueError(f"Server public_ipv4 is not a valid IP address: {public_ipv4!r}") from exc
     if parsed_ip.version != 4:
         raise ValueError(f"Server public_ipv4 must be IPv4, got {public_ipv4!r}")
     return public_ipv4
@@ -104,7 +93,7 @@ def _validate_server_record(hostname: str, record: Any) -> None:
     _validate_public_ipv4(record["public_ipv4"])
 
 
-def get_servers() -> List[Dict[str, Any]]:
+def get_servers() -> list[dict[str, Any]]:
     """Get list of all registered servers."""
     servers = _load_servers()
     return [
@@ -124,7 +113,7 @@ def upsert_server(hostname: str, public_ipv4: str) -> None:
     with _locked_servers(write=True) as servers:
         servers[hostname] = {
             "public_ipv4": public_ipv4,
-            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "last_updated": datetime.now(UTC).isoformat(),
         }
     logger.info(f"Updated server info: hostname={hostname}, public_ipv4={public_ipv4}")
 

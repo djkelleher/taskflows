@@ -3,23 +3,24 @@ import json
 import re
 import socket
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Dict, Literal, Optional, Sequence
+from typing import Literal
 from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
+from dynamic_imports import find_instances
 from msgflows.components import Component, Map, Table, Text
 from msgflows.utils import as_code_block
 
-from dynamic_imports import find_instances
 from taskflows.common import (
     config,
     load_service_files,
-    logql_string,
     logger,
+    logql_string,
     redact_sensitive,
     sort_service_names,
 )
@@ -38,15 +39,13 @@ from taskflows.service import (
     extract_service_name,
     get_schedule_info,
     get_unit_file_states,
-)
-from taskflows.service import get_unit_files as _get_unit_files
-from taskflows.service import (
     get_units,
     is_start_service,
     reload_unit_files,
     service_logs,
     systemd_manager,
 )
+from taskflows.service import get_unit_files as _get_unit_files
 
 from .security import create_hmac_headers, load_security_config, security_config
 from .utils import get_public_ipv4, with_hostname
@@ -57,8 +56,8 @@ _API_TRACEBACK_MAX_LINES = 40
 
 def _deduplicate_services(services: Sequence[Service]) -> list[Service]:
     """Return one service per name, preserving last definition semantics."""
-    services_by_name: dict[Optional[str], Service] = {}
-    ordered_names: list[Optional[str]] = []
+    services_by_name: dict[str | None, Service] = {}
+    ordered_names: list[str | None] = []
 
     for service in services:
         if service.name not in services_by_name:
@@ -67,17 +66,15 @@ def _deduplicate_services(services: Sequence[Service]) -> list[Service]:
 
     duplicate_count = len(services) - len(ordered_names)
     if duplicate_count:
-        logger.info(
-            f"Skipped {duplicate_count} duplicate service definitions during create"
-        )
+        logger.info(f"Skipped {duplicate_count} duplicate service definitions during create")
 
     return [services_by_name[name] for name in ordered_names]
 
 
 async def get_unit_files(
-    unit_type: Optional[Literal["service", "timer"]] = None,
-    match: Optional[str] = None,
-    states: Optional[str | Sequence[str]] = None,
+    unit_type: Literal["service", "timer"] | None = None,
+    match: str | None = None,
+    states: str | Sequence[str] | None = None,
 ) -> list:
     """Get unit files excluding protected services.
 
@@ -100,7 +97,7 @@ async def get_unit_files(
     return kept
 
 
-def health_check(host: Optional[str] = None) -> Text:
+def health_check(host: str | None = None) -> Text:
     """Call the /health endpoint and return a StatusIndicator component.
 
     Args:
@@ -132,16 +129,13 @@ async def list_servers() -> Table:
     # Call local free function - now uses JSON file
     servers = get_servers()
     # Convert to expected format with 'address' field
-    return [
-        {"address": f"{s['public_ipv4']}:7777", "hostname": s["hostname"]}
-        for s in servers
-    ]
+    return [{"address": f"{s['public_ipv4']}:7777", "hostname": s["hostname"]} for s in servers]
 
 
 async def task_history(
-    host: Optional[str] = None,
+    host: str | None = None,
     limit: int = 3,
-    match: Optional[str] = None,
+    match: str | None = None,
     as_json: bool = False,
 ) -> Table:
     """DEPRECATED: Task history is now available via Loki log queries.
@@ -183,7 +177,7 @@ async def task_history(
 
 
 async def list_services(
-    host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False
+    host: str | None = None, match: str | None = None, as_json: bool = False
 ) -> Table:
     """Call the /list endpoint and return a Table component.
 
@@ -230,8 +224,8 @@ async def list_services(
 
 
 async def status(
-    host: Optional[str] = None,
-    match: Optional[str] = None,
+    host: str | None = None,
+    match: str | None = None,
     running: bool = False,
     all: bool = False,
     as_json: bool = False,
@@ -342,11 +336,7 @@ async def status(
                 unit_data["Service"] = extract_service_name(unit_name)
 
             # Filter out not-found units
-            units_meta = {
-                k: v
-                for k, v in units_meta.items()
-                if v.get("load_state") != "not-found"
-            }
+            units_meta = {k: v for k, v in units_meta.items() if v.get("load_state") != "not-found"}
 
             # Process rows
             srv_data = {row["Service"]: row for row in units_meta.values()}
@@ -364,27 +354,20 @@ async def status(
                     continue
 
                 # Format timers
-                timers = [
-                    f"{t['base']}({t['spec']})" for t in row.get("Timers Calendar", [])
-                ] + [
-                    f"{t['base']}({t['offset']})"
-                    for t in row.get("Timers Monotonic", [])
+                timers = [f"{t['base']}({t['spec']})" for t in row.get("Timers Calendar", [])] + [
+                    f"{t['base']}({t['offset']})" for t in row.get("Timers Monotonic", [])
                 ]
                 row["Timers"] = "\n".join(timers) or "-"
 
                 # Calculate uptime
-                if row.get("active_state") == "active" and (
-                    last_start := row.get("Last Start")
-                ):
+                if row.get("active_state") == "active" and (last_start := row.get("Last Start")):
                     row["Uptime"] = str(datetime.now() - last_start).split(".")[0]
 
                 # Format datetime columns
                 tz = ZoneInfo(config.display_timezone)
                 for dt_col in ("Last Start", "Last Finish", "Next Start"):
                     if isinstance(row.get(dt_col), datetime):
-                        row[dt_col] = (
-                            row[dt_col].astimezone(tz).strftime("%Y-%m-%d %I:%M:%S %p")
-                        )
+                        row[dt_col] = row[dt_col].astimezone(tz).strftime("%Y-%m-%d %I:%M:%S %p")
 
                 # Build output row with emoji prefixes
                 output_row = {}
@@ -429,9 +412,9 @@ async def status(
 
 
 async def logs(
-    host: Optional[str] = None,
-    service_name: Optional[str] = None,
-    n_lines: Optional[int] = None,
+    host: str | None = None,
+    service_name: str | None = None,
+    n_lines: int | None = None,
     as_json: bool = False,
 ) -> Text:
     """Call the /logs/{service_name} endpoint and return a CodeBlock component.
@@ -454,11 +437,7 @@ async def logs(
         # Call local free function
         logger.info(f"logs called for service_name={service_name}, n_lines={n_lines}")
         data = with_hostname(
-            {
-                "logs": await asyncio.to_thread(
-                    service_logs, service_name, n_lines or 1000
-                )
-            }
+            {"logs": await asyncio.to_thread(service_logs, service_name, n_lines or 1000)}
         )
     else:
         # Call via API
@@ -482,9 +461,7 @@ async def logs(
     return Text(as_code_block(logs_content))
 
 
-async def show(
-    host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False
-) -> Table:
+async def show(host: str | None = None, match: str | None = None, as_json: bool = False) -> Table:
     """Call the /show/{match} endpoint and return a Table component.
 
     Args:
@@ -498,9 +475,7 @@ async def show(
     if not match:
         if as_json:
             return {"error": "match parameter is required"}
-        return Table(
-            [{"Error": "match parameter is required"}], title="Service Files - Error"
-        )
+        return Table([{"Error": "match parameter is required"}], title="Service Files - Error")
 
     if host is None:
         # Call local free function
@@ -516,9 +491,7 @@ async def show(
         return data
 
     if "error" in data:
-        return Table(
-            [{"Error": data["error"]}], title=f"Service Files for '{match}' - Error"
-        )
+        return Table([{"Error": data["error"]}], title=f"Service Files for '{match}' - Error")
 
     files_data = data.get("files", {})
     if not files_data:
@@ -541,12 +514,12 @@ async def show(
 
 
 async def create(
-    host: Optional[str] = None,
-    match: Optional[str] = None,
-    search_in: Optional[str] = None,
-    yaml_file: Optional[str] = None,
-    include: Optional[str] = None,
-    exclude: Optional[str] = None,
+    host: str | None = None,
+    match: str | None = None,
+    search_in: str | None = None,
+    yaml_file: str | None = None,
+    include: str | None = None,
+    exclude: str | None = None,
     as_json: bool = False,
 ) -> Table:
     """Call the /create endpoint and return a Table component.
@@ -618,17 +591,11 @@ async def create(
         logger.info(f"Total services: {len(services)}")
         if include:
             services = [s for s in services if fnmatchcase(name=s.name, pat=include)]
-            dashboards = [
-                d for d in dashboards if fnmatchcase(name=d.title, pat=include)
-            ]
+            dashboards = [d for d in dashboards if fnmatchcase(name=d.title, pat=include)]
 
         if exclude:
-            services = [
-                s for s in services if not fnmatchcase(name=s.name, pat=exclude)
-            ]
-            dashboards = [
-                d for d in dashboards if not fnmatchcase(name=d.title, pat=exclude)
-            ]
+            services = [s for s in services if not fnmatchcase(name=s.name, pat=exclude)]
+            dashboards = [d for d in dashboards if not fnmatchcase(name=d.title, pat=exclude)]
 
         services = _deduplicate_services(services)
 
@@ -638,9 +605,7 @@ async def create(
             dashboard.create()
         await reload_unit_files()
 
-        logger.info(
-            f"create created {len(services)} services, {len(dashboards)} dashboards"
-        )
+        logger.info(f"create created {len(services)} services, {len(dashboards)} dashboards")
         result = with_hostname(
             {
                 "services": [s.name for s in services],
@@ -678,8 +643,8 @@ async def create(
 
 
 async def start(
-    host: Optional[str] = None,
-    match: Optional[str] = None,
+    host: str | None = None,
+    match: str | None = None,
     timers: bool = False,
     services: bool = False,
     as_json: bool = False,
@@ -702,9 +667,7 @@ async def start(
 
     if host is None:
         # Call local free function
-        logger.info(
-            f"start called with match={match}, timers={timers}, services={services}"
-        )
+        logger.info(f"start called with match={match}, timers={timers}, services={services}")
         if (services and timers) or (not services and not timers):
             unit_type = None
         elif services:
@@ -734,8 +697,8 @@ async def start(
 
 
 async def stop(
-    host: Optional[str] = None,
-    match: Optional[str] = None,
+    host: str | None = None,
+    match: str | None = None,
     timers: bool = False,
     services: bool = False,
     as_json: bool = False,
@@ -758,9 +721,7 @@ async def stop(
 
     if host is None:
         # Call local free function
-        logger.info(
-            f"stop called with match={match}, timers={timers}, services={services}"
-        )
+        logger.info(f"stop called with match={match}, timers={timers}, services={services}")
         if (services and timers) or (not services and not timers):
             unit_type = None
         elif services:
@@ -788,7 +749,7 @@ async def stop(
 
 
 async def restart(
-    host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False
+    host: str | None = None, match: str | None = None, as_json: bool = False
 ) -> Table:
     """Call the /restart endpoint and return a Table component.
 
@@ -802,9 +763,7 @@ async def restart(
     if not match:
         if as_json:
             return {"error": "match parameter is required"}
-        return Table(
-            [{"Error": "match parameter is required"}], title="Restart - Error"
-        )
+        return Table([{"Error": "match parameter is required"}], title="Restart - Error")
 
     if host is None:
         # Call local free function
@@ -829,9 +788,7 @@ async def restart(
     return Table(rows, title=f"Restarted Items ({len(rows)})")
 
 
-async def remove(
-    host: Optional[str] = None, match: Optional[str] = None, as_json: bool = False
-) -> Table:
+async def remove(host: str | None = None, match: str | None = None, as_json: bool = False) -> Table:
     """Call the /remove endpoint and return a Table component.
 
     Args:
@@ -875,8 +832,8 @@ async def remove(
 
 
 async def disable(
-    host: Optional[str] = None,
-    match: Optional[str] = None,
+    host: str | None = None,
+    match: str | None = None,
     timers: bool = False,
     services: bool = False,
     as_json: bool = False,
@@ -895,15 +852,11 @@ async def disable(
     if not match:
         if as_json:
             return {"error": "match parameter is required"}
-        return Table(
-            [{"Error": "match parameter is required"}], title="Disable - Error"
-        )
+        return Table([{"Error": "match parameter is required"}], title="Disable - Error")
 
     if host is None:
         # Call local free function
-        logger.info(
-            f"disable called with match={match}, timers={timers}, services={services}"
-        )
+        logger.info(f"disable called with match={match}, timers={timers}, services={services}")
         if (services and timers) or (not services and not timers):
             unit_type = None
         elif services:
@@ -931,8 +884,8 @@ async def disable(
 
 
 async def enable(
-    host: Optional[str] = None,
-    match: Optional[str] = None,
+    host: str | None = None,
+    match: str | None = None,
     timers: bool = False,
     services: bool = False,
     as_json: bool = False,
@@ -955,9 +908,7 @@ async def enable(
 
     if host is None:
         # Call local free function
-        logger.info(
-            f"enable called with match={match}, timers={timers}, services={services}"
-        )
+        logger.info(f"enable called with match={match}, timers={timers}, services={services}")
         if (services and timers) or (not services and not timers):
             unit_type = None
         elif services:
@@ -984,9 +935,7 @@ async def enable(
     return Table(rows, title=f"Enabled Items ({len(rows)})")
 
 
-async def upsert_server(
-    hostname: Optional[str] = None, public_ipv4: Optional[str] = None
-) -> None:
+async def upsert_server(hostname: str | None = None, public_ipv4: str | None = None) -> None:
     """Upsert server information to JSON file.
 
     Args:
@@ -1002,9 +951,7 @@ async def upsert_server(
     db_upsert_server(hostname=hostname, public_ipv4=public_ipv4)
 
 
-async def execute_command_on_servers(
-    command: str, servers=None, **kwargs
-) -> Dict[str, Component]:
+async def execute_command_on_servers(command: str, servers=None, **kwargs) -> dict[str, Component]:
     """
     Execute a command on specified servers and return JSON responses.
 
@@ -1057,9 +1004,7 @@ async def execute_command_on_servers(
 
     elif command == "remove-server":
         return {
-            "localhost": Text(
-                "Server removal is not supported. Servers are managed automatically."
-            )
+            "localhost": Text("Server removal is not supported. Servers are managed automatically.")
         }
 
     # Map commands to client functions
@@ -1100,9 +1045,7 @@ async def execute_command_on_servers(
             # Extract title from first table
             if combined_title is None and table.title:
                 combined_title = (
-                    table.title.value
-                    if hasattr(table.title, "value")
-                    else str(table.title)
+                    table.title.value if hasattr(table.title, "value") else str(table.title)
                 )
 
             # Add Host column to each row
@@ -1146,14 +1089,12 @@ def call_api(
     parsed_endpoint = urlsplit(endpoint)
     endpoint_path = parsed_endpoint.path or "/"
     query_parts = [
-        part
-        for part in (parsed_endpoint.query, urlencode(params or {}, doseq=True))
-        if part
+        part for part in (parsed_endpoint.query, urlencode(params or {}, doseq=True)) if part
     ]
     query_string = "&".join(query_parts)
 
-    def build_headers(cfg) -> Dict[str, str]:
-        headers: Dict[str, str] = {}
+    def build_headers(cfg) -> dict[str, str]:
+        headers: dict[str, str] = {}
         if endpoint != "/health" and cfg.enable_hmac and cfg.hmac_secret:
             try:
                 headers.update(
@@ -1230,9 +1171,7 @@ def call_api(
                 he,
                 text,
             )
-            status_code = (
-                getattr(resp, "status_code", None) if "resp" in locals() else None
-            )
+            status_code = getattr(resp, "status_code", None) if "resp" in locals() else None
             return {
                 "error": str(he),
                 "status_code": status_code,

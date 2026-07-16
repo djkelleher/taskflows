@@ -1,0 +1,12 @@
+=== taskflows-snap-venv.service ===
+[Unit]
+Description=Service for snap-venv
+[Service]
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=<TMP>/conda run -n myenv --no-capture-output -- python -m myapp
+KillSignal=SIGTERM
+StandardError=journal
+StandardOutput=journal
+TimeoutStopSec=120s
+[Install]
+WantedBy=default.target

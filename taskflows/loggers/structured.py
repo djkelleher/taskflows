@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 from contextvars import ContextVar
-from typing import Any, Dict, Optional
+from typing import Any
 
 import structlog
 import xxhash
@@ -13,12 +13,12 @@ from structlog.contextvars import (
 )
 
 # Context variable for request tracking
-request_id_var: ContextVar[Optional[str]] = ContextVar("request_id", default=None)
-trace_id_var: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
+request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
+trace_id_var: ContextVar[str | None] = ContextVar("trace_id", default=None)
 
 
 # Configuration storage (avoids mutating os.environ)
-_loki_config: Dict[str, Any] = {
+_loki_config: dict[str, Any] = {
     "app_name": None,
     "environment": None,
     "hostname": None,
@@ -35,9 +35,7 @@ def add_loki_labels(logger, method_name, event_dict):
     event_dict["environment"] = (
         os.getenv("ENVIRONMENT") or _loki_config["environment"] or "production"
     )
-    event_dict["hostname"] = (
-        os.getenv("HOSTNAME") or _loki_config["hostname"] or "unknown"
-    )
+    event_dict["hostname"] = os.getenv("HOSTNAME") or _loki_config["hostname"] or "unknown"
 
     # Add request/trace IDs if available
     request_id = request_id_var.get()
@@ -87,9 +85,7 @@ def add_event_fingerprint(logger, method_name, event_dict):
         event_dict.get("lineno", ""),
     ]
     fingerprint_str = "|".join(str(f) for f in fingerprint_fields)
-    event_dict["event_fingerprint"] = xxhash.xxh64(
-        fingerprint_str.encode()
-    ).hexdigest()[:8]
+    event_dict["event_fingerprint"] = xxhash.xxh64(fingerprint_str.encode()).hexdigest()[:8]
     return event_dict
 
 
@@ -186,9 +182,9 @@ structlog.configure(
 
 
 def get_struct_logger(
-    name: Optional[str] = None,
-    request_id: Optional[str] = None,
-    trace_id: Optional[str] = None,
+    name: str | None = None,
+    request_id: str | None = None,
+    trace_id: str | None = None,
     **context: Any,
 ) -> structlog.BoundLogger:
     """Get a structured logger with optional context.
@@ -218,7 +214,7 @@ def get_struct_logger(
 
 
 def set_request_context(
-    request_id: Optional[str] = None, trace_id: Optional[str] = None, **kwargs
+    request_id: str | None = None, trace_id: str | None = None, **kwargs
 ) -> None:
     """Set request-scoped context that will be included in all logs.
 
@@ -253,8 +249,8 @@ def generate_request_id() -> str:
 
 def configure_loki_logging(
     app_name: str = "taskflows",
-    environment: Optional[str] = None,
-    extra_labels: Optional[Dict[str, str]] = None,
+    environment: str | None = None,
+    extra_labels: dict[str, str] | None = None,
     log_level: str = "INFO",
     enable_console_renderer: bool = False,
     max_string_length: int = 1000,
@@ -276,9 +272,7 @@ def configure_loki_logging(
     # Store configuration in module-level dict (avoids mutating os.environ)
     _loki_config["app_name"] = app_name
     _loki_config["environment"] = environment
-    _loki_config["hostname"] = (
-        os.getenv("HOSTNAME", "unknown") if include_hostname else None
-    )
+    _loki_config["hostname"] = os.getenv("HOSTNAME", "unknown") if include_hostname else None
     _loki_config["extra_labels"] = extra_labels or {}
 
     labels = extra_labels or {}
@@ -286,9 +280,7 @@ def configure_loki_logging(
     def add_custom_loki_labels(logger, method_name, event_dict):
         """Add static labels that Loki can use for indexing"""
         event_dict["app"] = app_name
-        event_dict["environment"] = environment or os.getenv(
-            "ENVIRONMENT", "production"
-        )
+        event_dict["environment"] = environment or os.getenv("ENVIRONMENT", "production")
 
         if include_hostname:
             event_dict["hostname"] = os.getenv("HOSTNAME", "unknown")
@@ -381,16 +373,12 @@ def configure_loki_logging(
     if enable_console_renderer:
         processors.append(structlog.dev.ConsoleRenderer())
     else:
-        processors.append(
-            structlog.processors.JSONRenderer(sort_keys=False, ensure_ascii=False)
-        )
+        processors.append(structlog.processors.JSONRenderer(sort_keys=False, ensure_ascii=False))
 
     structlog.configure(
         processors=processors,
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, log_level.upper())
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, log_level.upper())),
         cache_logger_on_first_use=True,
     )

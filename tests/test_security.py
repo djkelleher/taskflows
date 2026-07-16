@@ -4,16 +4,18 @@ Tests for path traversal prevention, service name validation,
 and command injection prevention.
 """
 
-import pytest
 from pathlib import Path
+
+import pytest
+
 from taskflows.admin import auth as admin_auth
 from taskflows.admin import security as admin_security
+from taskflows.exceptions import SecurityError, ValidationError
 from taskflows.security_validation import (
     validate_command,
     validate_env_file_path,
     validate_service_name,
 )
-from taskflows.exceptions import SecurityError, ValidationError
 
 
 class TestPathTraversalPrevention:
@@ -307,9 +309,7 @@ class TestAdminSecurityState:
             admin_auth.load_ui_config()
 
     def test_refresh_token_revocation_blocks_reuse(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            admin_auth, "refresh_tokens_file", tmp_path / "refresh_tokens.json"
-        )
+        monkeypatch.setattr(admin_auth, "refresh_tokens_file", tmp_path / "refresh_tokens.json")
 
         token = admin_auth.create_refresh_token("alice", "jwt-secret")
 

@@ -6,6 +6,7 @@ from shutil import rmtree
 from time import sleep, time
 
 import pytest
+
 from taskflows.common import _SYSTEMD_FILE_PREFIX
 from taskflows.service import Service, systemd_dir
 
@@ -152,9 +153,7 @@ async def test_full_lifecycle(output_dir):
     """Test complete service lifecycle: create -> start -> stop -> restart -> remove."""
     name = create_test_name()
     output_file = output_dir / f"{name}_lifecycle.txt"
-    srv = Service(
-        name=name, start_command=f"bash -c 'date >> {output_file} && sleep 30'"
-    )
+    srv = Service(name=name, start_command=f"bash -c 'date >> {output_file} && sleep 30'")
 
     try:
         # Create
@@ -175,17 +174,13 @@ async def test_full_lifecycle(output_dir):
         # Stop
         await srv.stop()
         sleep(0.5)
-        assert get_service_state(name) in ("inactive", "failed"), (
-            "Service should be stopped"
-        )
+        assert get_service_state(name) in ("inactive", "failed"), "Service should be stopped"
 
         # Restart (will start again since it's stopped)
         await srv.restart()
         sleep(1)
         new_content = output_file.read_text()
-        assert len(new_content) > len(initial_content), (
-            "Restart should append new output"
-        )
+        assert len(new_content) > len(initial_content), "Restart should append new output"
 
     finally:
         await srv.remove()

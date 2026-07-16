@@ -35,6 +35,14 @@ MANIFEST
 
 # Unit test / coverage reports
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+
+# Local data / agent tooling artifacts
+data/
+.codigote/
 
 # PyBuilder
 .pybuilder/

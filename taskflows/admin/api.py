@@ -4,11 +4,9 @@ import threading
 import time
 import traceback
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional
 
 import click
 import uvicorn
-
 from fastapi import (
     Body,
     FastAPI,
@@ -35,26 +33,27 @@ from taskflows.admin.core import (
     restart,
     show,
     start,
-    status as service_status,
     stop,
     task_history,
     upsert_server,
 )
-from taskflows.admin.utils import with_hostname
+from taskflows.admin.core import (
+    status as service_status,
+)
+from taskflows.admin.grafana_proxy import router as grafana_router
 from taskflows.admin.security import (
-    security_config,
-    validate_hmac_request,
     create_csrf_token_data,
-    store_csrf_token,
     get_csrf_token_data,
     remove_csrf_token,
+    security_config,
+    store_csrf_token,
     validate_csrf_token,
+    validate_hmac_request,
 )
+from taskflows.admin.utils import with_hostname
 from taskflows.common import Config, logger
 from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
 from taskflows.service import RestartPolicy, Service, Venv
-
-from taskflows.admin.grafana_proxy import router as grafana_router
 
 config = Config()
 
@@ -100,21 +99,17 @@ def _is_ui_enabled() -> bool:
 
 
 UI_ENABLED = _is_ui_enabled()
-MAX_CREATE_YAML_BYTES = int(
-    os.getenv("TASKFLOWS_MAX_CREATE_YAML_BYTES", str(2 * 1024 * 1024))
-)
+MAX_CREATE_YAML_BYTES = int(os.getenv("TASKFLOWS_MAX_CREATE_YAML_BYTES", str(2 * 1024 * 1024)))
 MAX_CREATE_MULTIPART_OVERHEAD_BYTES = int(
     os.getenv("TASKFLOWS_MAX_CREATE_MULTIPART_OVERHEAD_BYTES", str(64 * 1024))
 )
 CREATE_REQUEST_PATHS = {"/create", "/api/create"}
 LOGIN_RATE_LIMIT_ATTEMPTS = int(os.getenv("TASKFLOWS_LOGIN_RATE_LIMIT_ATTEMPTS", "5"))
-LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(
-    os.getenv("TASKFLOWS_LOGIN_RATE_LIMIT_WINDOW_SECONDS", "300")
-)
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("TASKFLOWS_LOGIN_RATE_LIMIT_WINDOW_SECONDS", "300"))
 LOGIN_RATE_LIMIT_LOCKOUT_SECONDS = int(
     os.getenv("TASKFLOWS_LOGIN_RATE_LIMIT_LOCKOUT_SECONDS", "300")
 )
-_login_attempts: Dict[str, List[float]] = {}
+_login_attempts: dict[str, list[float]] = {}
 _login_attempts_lock = threading.Lock()
 
 PUBLIC_PATHS = {"/health", "/docs", "/redoc", "/openapi.json"}
@@ -137,9 +132,7 @@ TOP_LEVEL_API_PATHS = {
 
 
 def _is_public_path(path: str) -> bool:
-    return path in PUBLIC_PATHS or any(
-        path.startswith(prefix) for prefix in PUBLIC_PREFIXES
-    )
+    return path in PUBLIC_PATHS or any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES)
 
 
 def _is_ui_route(path: str) -> bool:
@@ -152,9 +145,7 @@ def _is_ui_route(path: str) -> bool:
         return path in PUBLIC_AUTH_PATHS
     if _is_public_path(path):
         return True
-    return UI_ENABLED and not (
-        path in TOP_LEVEL_API_PATHS or path.startswith(("/logs/", "/show/"))
-    )
+    return UI_ENABLED and not (path in TOP_LEVEL_API_PATHS or path.startswith(("/logs/", "/show/")))
 
 
 def _requires_api_auth(path: str) -> bool:
@@ -168,10 +159,7 @@ def _validate_yaml_size(yaml_content: str) -> None:
     if size > MAX_CREATE_YAML_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=(
-                "Service definition is too large. "
-                f"Limit is {MAX_CREATE_YAML_BYTES} bytes."
-            ),
+            detail=(f"Service definition is too large. Limit is {MAX_CREATE_YAML_BYTES} bytes."),
         )
 
 
@@ -181,7 +169,7 @@ def _create_request_limit(path: str) -> int:
     return MAX_CREATE_YAML_BYTES
 
 
-def _validate_declared_create_request_size(request: Request) -> Optional[JSONResponse]:
+def _validate_declared_create_request_size(request: Request) -> JSONResponse | None:
     """Reject create requests before any middleware reads the body into memory."""
     if request.url.path not in CREATE_REQUEST_PATHS:
         return None
@@ -190,9 +178,7 @@ def _validate_declared_create_request_size(request: Request) -> Optional[JSONRes
     if not content_length:
         return JSONResponse(
             status_code=status.HTTP_411_LENGTH_REQUIRED,
-            content={
-                "detail": "Content-Length header is required for service-definition uploads"
-            },
+            content={"detail": "Content-Length header is required for service-definition uploads"},
         )
 
     try:
@@ -214,8 +200,7 @@ def _validate_declared_create_request_size(request: Request) -> Optional[JSONRes
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             content={
                 "detail": (
-                    "Service definition is too large. "
-                    f"Limit is {MAX_CREATE_YAML_BYTES} bytes."
+                    f"Service definition is too large. Limit is {MAX_CREATE_YAML_BYTES} bytes."
                 )
             },
         )
@@ -242,9 +227,7 @@ app.include_router(grafana_router)
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    logger.opt(exception=exc).error(
-        f"Unhandled exception {request.method} {request.url.path}"
-    )
+    logger.opt(exception=exc).error(f"Unhandled exception {request.method} {request.url.path}")
 
     debug_enabled = os.getenv("DEBUG", "").lower() in ("true", "1", "yes")
     payload = {"detail": "Internal server error", "path": request.url.path}
@@ -268,9 +251,7 @@ async def add_security_headers(request: Request, call_next):
     if security_config.enable_security_headers:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Strict-Transport-Security"] = (
-            "max-age=31536000; includeSubDomains"
-        )
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         if request.url.path.startswith("/grafana/"):
             # Allow embedding Grafana in iframes from same origin
             response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
@@ -298,9 +279,7 @@ async def hmac_validation(request: Request, call_next):
             if ui_config.jwt_secret:
                 username = verify_token(token, ui_config.jwt_secret, "access")
                 if username:
-                    logger.debug(
-                        f"JWT auth accepted for {request.url.path} (user: {username})"
-                    )
+                    logger.debug(f"JWT auth accepted for {request.url.path} (user: {username})")
                     request.state.user = username
                     return await call_next(request)
             # Invalid JWT
@@ -334,9 +313,7 @@ async def hmac_validation(request: Request, call_next):
     timestamp = request.headers.get(security_config.hmac_timestamp_header)
     nonce = request.headers.get(security_config.hmac_nonce_header)
     if not signature or not timestamp or not nonce:
-        logger.warning(
-            f"Missing HMAC headers for {request.url.path} from {request.client.host}"
-        )
+        logger.warning(f"Missing HMAC headers for {request.url.path} from {request.client.host}")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"detail": "HMAC signature, timestamp, and nonce required"},
@@ -461,13 +438,12 @@ async def csrf_validation(request: Request, call_next):
     # Get username from request state, or validate Bearer token directly because
     # middleware order can run CSRF before the auth middleware.
     username = getattr(request.state, "user", None)
-    if not username:
-        if auth_header.startswith("Bearer "):
-            ui_config = load_ui_config()
-            if ui_config.jwt_secret:
-                username = verify_token(auth_header[7:], ui_config.jwt_secret, "access")
-                if username:
-                    request.state.user = username
+    if not username and auth_header.startswith("Bearer "):
+        ui_config = load_ui_config()
+        if ui_config.jwt_secret:
+            username = verify_token(auth_header[7:], ui_config.jwt_secret, "access")
+            if username:
+                request.state.user = username
     if not username:
         logger.warning(f"CSRF check: No user in request state for {request.url.path}")
         return JSONResponse(
@@ -504,9 +480,7 @@ async def csrf_validation(request: Request, call_next):
     )
 
     if not is_valid:
-        logger.warning(
-            f"CSRF check failed for user {username} on {request.url.path}: {error_msg}"
-        )
+        logger.warning(f"CSRF check failed for user {username} on {request.url.path}: {error_msg}")
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"detail": error_msg or "Invalid CSRF token"},
@@ -542,21 +516,21 @@ async def list_servers_endpoint():
 @app.get("/history")
 async def task_history_endpoint(
     limit: int = Query(3),
-    match: Optional[str] = Query(None),
+    match: str | None = Query(None),
 ):
     return await task_history(limit=limit, match=match, as_json=True)
 
 
 @app.get("/list")
 async def list_services_endpoint(
-    match: Optional[str] = Query(None),
+    match: str | None = Query(None),
 ):
     return await list_services(match=match, as_json=True)
 
 
 @app.get("/status")
 async def status_endpoint(
-    match: Optional[str] = Query(None),
+    match: str | None = Query(None),
     running: bool = Query(False),
     all: bool = Query(False),
 ):
@@ -580,20 +554,17 @@ async def show_endpoint(
 
 @app.post("/create")
 async def create_endpoint(
-    search_in: Optional[str] = Body(None, embed=True),
-    yaml_content: Optional[str] = Body(None, embed=True),
-    include: Optional[str] = Body(None, embed=True),
-    exclude: Optional[str] = Body(None, embed=True),
+    search_in: str | None = Body(None, embed=True),
+    yaml_content: str | None = Body(None, embed=True),
+    include: str | None = Body(None, embed=True),
+    exclude: str | None = Body(None, embed=True),
 ):
     import tempfile
 
     if search_in:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Remote Python service discovery is disabled. "
-                "Submit yaml_content instead."
-            ),
+            detail=("Remote Python service discovery is disabled. Submit yaml_content instead."),
         )
     if yaml_content:
         _validate_yaml_size(yaml_content)
@@ -601,14 +572,10 @@ async def create_endpoint(
             f.write(yaml_content)
             temp_path = f.name
         try:
-            return await create(
-                yaml_file=temp_path, include=include, exclude=exclude, as_json=True
-            )
+            return await create(yaml_file=temp_path, include=include, exclude=exclude, as_json=True)
         finally:
             os.unlink(temp_path)
-    return await create(
-        search_in=search_in, include=include, exclude=exclude, as_json=True
-    )
+    return await create(search_in=search_in, include=include, exclude=exclude, as_json=True)
 
 
 @app.post("/start")
@@ -666,7 +633,7 @@ if UI_ENABLED:
     class BatchOperation(PydanticBaseModel):
         """Batch operation request model."""
 
-        service_names: List[str]
+        service_names: list[str]
         operation: str
 
     @app.post("/api/batch")
@@ -688,9 +655,7 @@ if UI_ENABLED:
             )
 
         try:
-            service_names = [
-                validate_service_name(name) for name in batch.service_names
-            ]
+            service_names = [validate_service_name(name) for name in batch.service_names]
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -712,9 +677,7 @@ if UI_ENABLED:
                 result = await op_func(match=service_name, as_json=True)
                 return service_name, {"status": "success", "result": result}
             except Exception as e:
-                logger.error(
-                    f"Batch operation {batch.operation} failed for {service_name}: {e}"
-                )
+                logger.error(f"Batch operation {batch.operation} failed for {service_name}: {e}")
                 return service_name, {"status": "error", "error": str(e)}
 
         all_results = await asyncio.gather(*[_run_one(n) for n in service_names])
@@ -747,14 +710,12 @@ if UI_ENABLED:
 
     @app.get("/api/services")
     async def get_services_api(
-        match: Optional[str] = Query(None),
+        match: str | None = Query(None),
         running: bool = Query(False),
         all: bool = Query(False),
     ):
         """Get services for UI dashboard."""
-        result = await service_status(
-            match=match, running=running, all=all, as_json=True
-        )
+        result = await service_status(match=match, running=running, all=all, as_json=True)
         # Transform to frontend expected format
         services = []
         for svc in result.get("status", []):
@@ -840,9 +801,9 @@ if UI_ENABLED:
     @app.post("/api/create")
     async def create_api(
         file: UploadFile = File(...),
-        host: Optional[str] = Form(None),
-        include: Optional[str] = Form(None),
-        exclude: Optional[str] = Form(None),
+        host: str | None = Form(None),
+        include: str | None = Form(None),
+        exclude: str | None = Form(None),
     ):
         """Create services from uploaded YAML file."""
         import tempfile
@@ -852,8 +813,7 @@ if UI_ENABLED:
             raise HTTPException(
                 status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                 detail=(
-                    "Service definition is too large. "
-                    f"Limit is {MAX_CREATE_YAML_BYTES} bytes."
+                    f"Service definition is too large. Limit is {MAX_CREATE_YAML_BYTES} bytes."
                 ),
             )
         yaml_content = content.decode("utf-8")
@@ -879,9 +839,7 @@ if UI_ENABLED:
             f.write(yaml_content)
             temp_path = f.name
         try:
-            return await create(
-                yaml_file=temp_path, include=include, exclude=exclude, as_json=True
-            )
+            return await create(yaml_file=temp_path, include=include, exclude=exclude, as_json=True)
         finally:
             os.unlink(temp_path)
 
@@ -889,20 +847,20 @@ if UI_ENABLED:
 # Authentication endpoints (only when UI is enabled)
 if UI_ENABLED:
     from taskflows.admin.auth import (
+        LoginRequest,
         authenticate_user,
         create_access_token,
         create_refresh_token,
         load_ui_config,
         revoke_refresh_token,
         verify_token,
-        LoginRequest,
     )
 
     def _login_rate_key(request: Request, username: str) -> str:
         client_host = request.client.host if request.client else "unknown"
         return f"{client_host}:{username.casefold()}"
 
-    def _login_retry_after_seconds(key: str) -> Optional[int]:
+    def _login_retry_after_seconds(key: str) -> int | None:
         now = time.time()
         with _login_attempts_lock:
             attempts = [
@@ -940,9 +898,7 @@ if UI_ENABLED:
         rate_key = _login_rate_key(request, credentials.username)
         retry_after = _login_retry_after_seconds(rate_key)
         if retry_after is not None:
-            logger.warning(
-                f"Rate-limited login attempt for user {credentials.username}"
-            )
+            logger.warning(f"Rate-limited login attempt for user {credentials.username}")
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many failed login attempts. Try again later.",
@@ -974,9 +930,7 @@ if UI_ENABLED:
         csrf_data = create_csrf_token_data(credentials.username, ui_config.jwt_secret)
         store_csrf_token(credentials.username, csrf_data)
 
-        logger.info(
-            f"User {credentials.username} logged in successfully with CSRF protection"
-        )
+        logger.info(f"User {credentials.username} logged in successfully with CSRF protection")
         return {
             "access_token": access_token,
             "refresh_token": refresh_token,
@@ -1021,7 +975,7 @@ if UI_ENABLED:
     @app.post("/auth/logout")
     async def logout(
         request: Request,
-        refresh_token: Optional[str] = Body(None, embed=True),
+        refresh_token: str | None = Body(None, embed=True),
     ):
         """Logout, remove CSRF token, and revoke the current refresh token."""
         username = getattr(request.state, "user", None)
@@ -1038,16 +992,16 @@ if UI_ENABLED:
 
     # Environments API endpoints
     from taskflows.admin.environments import (
+        NamedEnvironment,
         create_environment,
         delete_environment,
         find_services_using_environment,
         get_environment,
         list_environments,
         update_environment,
-        NamedEnvironment,
     )
 
-    @app.get("/api/environments", response_model=List[NamedEnvironment])
+    @app.get("/api/environments", response_model=list[NamedEnvironment])
     async def list_environments_endpoint():
         """List all named environments."""
         return list_environments()
@@ -1058,7 +1012,7 @@ if UI_ENABLED:
         try:
             return create_environment(env)
         except ValueError as e:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
     @app.get("/api/environments/{name}", response_model=NamedEnvironment)
     async def get_environment_endpoint(name: str):
@@ -1077,7 +1031,7 @@ if UI_ENABLED:
         try:
             return update_environment(name, env)
         except ValueError as e:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
     @app.delete("/api/environments/{name}")
     async def delete_environment_endpoint(name: str):
@@ -1094,12 +1048,13 @@ if UI_ENABLED:
             delete_environment(name)
             return {"message": f"Environment '{name}' deleted successfully"}
         except ValueError as e:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
 
     # Static file serving for React SPA
     from pathlib import Path
-    from fastapi.staticfiles import StaticFiles
+
     from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+    from fastapi.staticfiles import StaticFiles
 
     frontend_dist_dir = Path(__file__).parent.parent.parent / "frontend" / "dist"
 
@@ -1133,9 +1088,7 @@ if UI_ENABLED:
 @click.command("start")
 @click.option("--host", default="localhost", help="Host to bind the server to")
 @click.option("--port", default=7777, help="Port to bind the server to")
-@click.option(
-    "--reload/--no-reload", default=True, help="Enable auto-reload on code changes"
-)
+@click.option("--reload/--no-reload", default=True, help="Enable auto-reload on code changes")
 @click.option(
     "--enable-ui/--no-enable-ui",
     default=False,
@@ -1143,9 +1096,7 @@ if UI_ENABLED:
 )
 def _start_api_cmd(host: str, port: int, reload: bool, enable_ui: bool):
     """Start the Services API server. This installs as _start_srv_api command."""
-    click.echo(
-        click.style(f"Starting Services API api on {host}:{port}...", fg="green")
-    )
+    click.echo(click.style(f"Starting Services API api on {host}:{port}...", fg="green"))
     if reload:
         click.echo(click.style("Auto-reload enabled", fg="yellow"))
     if enable_ui:
@@ -1170,9 +1121,7 @@ def _start_api_cmd(host: str, port: int, reload: bool, enable_ui: bool):
                 args.append("--reload")
             os.execv(sys.executable, args)
     # Also log to file so we can see something even if import path is wrong
-    logger.info(
-        f"Launching uvicorn on {host}:{port} reload={reload} enable_ui={enable_ui}"
-    )
+    logger.info(f"Launching uvicorn on {host}:{port} reload={reload} enable_ui={enable_ui}")
     uvicorn.run("taskflows.admin.api:app", host=host, port=port, reload=reload)
 
 

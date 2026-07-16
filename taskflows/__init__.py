@@ -8,8 +8,8 @@ from .constraints import (
     MemoryPressure,
     SystemLoadConstraint,
 )
-from .docker import ContainerLimits, DockerContainer, DockerImage, Ulimit, Volume
 from .dashboard import Dashboard, LogsCountPlot, LogsPanelConfig, LogsTextSearch
+from .docker import ContainerLimits, DockerContainer, DockerImage, Ulimit, Volume
 from .entrypoints import async_entrypoint, get_shutdown_handler
 from .schedule import Calendar, Periodic
 from .service import RestartPolicy, Service, ServiceRegistry, Venv

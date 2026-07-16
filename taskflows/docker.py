@@ -1,10 +1,12 @@
 import atexit
 import os
 import shlex
-from contextlib import contextmanager
+from collections.abc import Callable, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
+from typing import Any, Literal
+
 import docker
 from docker.errors import ImageNotFound
 from docker.models.containers import Container
@@ -18,12 +20,11 @@ from .common import logger, redact_sensitive
 from .constraints import CgroupConfig
 from .exec import PickledFunction
 
-
 # Global registry of Docker clients with weak references for cleanup
-_docker_clients: Dict[str, docker.DockerClient] = {}
+_docker_clients: dict[str, docker.DockerClient] = {}
 
 
-def get_docker_client(user_host: Optional[str] = None) -> docker.DockerClient:
+def get_docker_client(user_host: str | None = None) -> docker.DockerClient:
     """Get or create a Docker client.
 
     FIXED: Removed @lru_cache to prevent connection leaks. Clients are now
@@ -46,10 +47,8 @@ def get_docker_client(user_host: Optional[str] = None) -> docker.DockerClient:
             return client
         except Exception:
             # Client is stale, remove it
-            try:
+            with suppress(Exception):
                 client.close()
-            except Exception:
-                pass
             del _docker_clients[base_url]
 
     # Create new client
@@ -60,7 +59,7 @@ def get_docker_client(user_host: Optional[str] = None) -> docker.DockerClient:
 
 
 @contextmanager
-def docker_client_context(user_host: Optional[str] = None):
+def docker_client_context(user_host: str | None = None):
     """Context manager for Docker client with guaranteed cleanup.
 
     Use this for one-off operations where you want guaranteed cleanup.
@@ -81,10 +80,8 @@ def docker_client_context(user_host: Optional[str] = None):
 def cleanup_docker_clients():
     """Close all Docker clients. Called on application exit."""
     for _base_url, client in list(_docker_clients.items()):
-        try:
+        with suppress(Exception):
             client.close()
-        except Exception:
-            pass
     _docker_clients.clear()
 
 
@@ -92,17 +89,13 @@ def cleanup_docker_clients():
 atexit.register(cleanup_docker_clients)
 
 
-def apply_container_action(
-    container_name: str, action: Literal["start", "restart", "stop"]
-):
+def apply_container_action(container_name: str, action: Literal["start", "restart", "stop"]):
     logger.info(f"{action}ing {container_name} container.")
     client = get_docker_client()
     try:
         container = client.containers.get(container_name)
     except docker.errors.NotFound:
-        logger.error(
-            f"Container {container_name} not found. Can not {action} container"
-        )
+        logger.error(f"Container {container_name} not found. Can not {action} container")
         return
     getattr(container, action)()
 
@@ -110,13 +103,13 @@ def apply_container_action(
 @dataclass
 class ContainerLimits:
     # Set memory limit for build.
-    memory: Optional[int] = None
+    memory: int | None = None
     # Total memory (memory + swap), -1 to disable swap
-    memswap: Optional[int] = None
+    memswap: int | None = None
     # CPU shares (relative weight)
-    cpushares: Optional[int] = None
+    cpushares: int | None = None
     # CPUs in which to allow execution, e.g., 0-3, 0,1
-    cpusetcpus: Optional[str] = None
+    cpusetcpus: str | None = None
 
     def __hash__(self):
         return hash((self.memory, self.memswap, self.cpushares, self.cpusetcpus))
@@ -135,45 +128,45 @@ class DockerImage:
     # Whether to return the status
     quiet: bool = False
     # Do not use the cache when set to True.
-    nocache: Optional[bool] = None
+    nocache: bool | None = None
     # Remove intermediate containers.
     rm: bool = True
     # HTTP timeout
-    timeout: Optional[int] = None
+    timeout: int | None = None
     # The encoding for a stream. Set to gzip for compressing.
-    encoding: Optional[str] = None
+    encoding: str | None = None
     # Downloads any updates to the FROM image in Dockerfiles
-    pull: Optional[bool] = None
+    pull: bool | None = None
     # Always remove intermediate containers, even after unsuccessful builds
-    forcerm: Optional[bool] = None
+    forcerm: bool | None = None
     # A dictionary of build arguments
-    buildargs: Optional[dict] = None
+    buildargs: dict | None = None
     # A dictionary of limits applied to each container created by the build process. Valid keys:
-    container_limits: Optional[ContainerLimits] = None
+    container_limits: ContainerLimits | None = None
     # Size of /dev/shm in bytes. The size must be greater than 0. If omitted the system uses 64MB.
-    shmsize: Optional[int] = None
+    shmsize: int | None = None
     # A dictionary of labels to set on the image
-    labels: Optional[Dict[str, str]] = None
+    labels: dict[str, str] | None = None
     # A list of images used for build cache resolution.
-    cache_from: Optional[list] = None
+    cache_from: list | None = None
     # Name of the build-stage to build in a multi-stage Dockerfile
-    target: Optional[str] = None
+    target: str | None = None
     # networking mode for the run commands during build
-    network_mode: Optional[str] = None
+    network_mode: str | None = None
     # Squash the resulting images layers into a single layer.
-    squash: Optional[bool] = None
+    squash: bool | None = None
     # Extra hosts to add to /etc/hosts in building
     # containers, as a mapping of hostname to IP address.
-    extra_hosts: Optional[dict] = None
+    extra_hosts: dict | None = None
     # Platform in the format.
-    platform: Optional[str] = None
+    platform: str | None = None
     # Isolation technology used during build. Default: None.
-    isolation: Optional[str] = None
+    isolation: str | None = None
     # If True, and if the docker client
     # configuration file (~/.docker/config.json by default)
     # contains a proxy configuration, the corresponding environment
     # variables will be set in the container being built.
-    use_config_proxy: Optional[bool] = None
+    use_config_proxy: bool | None = None
 
     def __post_init__(self):
         self.path = str(self.path)
@@ -214,8 +207,8 @@ class DockerImage:
 class Volume:
     """Docker volume."""
 
-    host_path: Union[Path, str]
-    container_path: Union[Path, str]
+    host_path: Path | str
+    container_path: Path | str
     read_only: bool = False
 
     def __post_init__(self):
@@ -231,8 +224,8 @@ class Ulimit:
     """System ulimit (system resource limit)."""
 
     name: str
-    soft: Optional[int] = None
-    hard: Optional[int] = None
+    soft: int | None = None
+    hard: int | None = None
 
     def __post_init__(self):
         if self.soft is None and self.hard is None:
@@ -251,159 +244,157 @@ class DockerContainer:
     in favor of centralized resource management.
     """
 
-    image: Union[str, DockerImage]
-    command: Optional[Union[str, Callable[[], None]]] = None
-    name: Optional[str] = None
+    image: str | DockerImage
+    command: str | Callable[[], None] | None = None
+    name: str | None = None
     # do we intend to create the container and start it with 'docker start'?
-    persisted: Optional[bool] = None
+    persisted: bool | None = None
     # Unified cgroup configuration (preferred method for resource constraints)
-    cgroup_config: Optional[CgroupConfig] = None
-    network_mode: Optional[
-        Literal["bridge", "host", "none", "overlay", "ipvlan", "macvlan"]
-    ] = None
+    cgroup_config: CgroupConfig | None = None
+    network_mode: Literal["bridge", "host", "none", "overlay", "ipvlan", "macvlan"] | None = None
     # Restart the container when it exits?
     restart_policy: Literal["no", "always", "unless-stopped", "on-failure"] = "no"
     # Run an init inside the container that forwards signals and reaps processes
-    init: Optional[bool] = None
-    detach: Optional[bool] = None
-    shm_size: Optional[Union[str, int]] = None
+    init: bool | None = None
+    detach: bool | None = None
+    shm_size: str | int | None = None
     # Environment variables to set inside
-    environment: Optional[Union[Dict[str, str]]] = None
-    env_file: Optional[Union[str, Path]] = None
+    environment: dict[str, str] | None = None
+    env_file: str | Path | None = None
     # Local volumes.
-    volumes: Optional[Union[Volume, Sequence[Volume]]] = None
+    volumes: Volume | Sequence[Volume] | None = None
     # List of container names or IDs to get volumes from.
-    volumes_from: Optional[List[str]] = None
+    volumes_from: list[str] | None = None
     # The name of a volume driver/plugin.
-    volume_driver: Optional[str] = None
-    ulimits: Optional[Union[Ulimit, Sequence[Ulimit]]] = None
+    volume_driver: str | None = None
+    ulimits: Ulimit | Sequence[Ulimit] | None = None
     # enable auto-removal of the container on api
     # side when the containeras process exits.
-    auto_remove: Optional[bool] = None
+    auto_remove: bool | None = None
     # Block IO weight (relative device weight) in
     # the form of:. [{"Path": "device_path", "Weight": weight}].
-    blkio_weight_device: Optional[Dict[str, str]] = None
+    blkio_weight_device: dict[str, str] | None = None
     # Number of usable CPUs (Windows only).
-    cpu_count: Optional[int] = None
+    cpu_count: int | None = None
     # Usable percentage of the available CPUs
     # (Windows only).
-    cpu_percent: Optional[int] = None
+    cpu_percent: int | None = None
     # Limit CPU real-time period in microseconds.
-    cpu_rt_period: Optional[int] = None
+    cpu_rt_period: int | None = None
     # Limit CPU real-time runtime in microseconds.
-    cpu_rt_runtime: Optional[int] = None
+    cpu_rt_runtime: int | None = None
     # Memory nodes (MEMs) in which to allow execution
     # (,). Only effective on NUMA systems.
-    cpuset_mems: Optional[str] = None
+    cpuset_mems: str | None = None
     # Expose host resources such as
     # GPUs to the container, as a list ofinstances.
-    device_requests: Optional[List[docker.types.DeviceRequest]] = None
+    device_requests: list[docker.types.DeviceRequest] | None = None
     # Set custom DNS servers.
-    dns: Optional[List[str]] = None
+    dns: list[str] | None = None
     # Additional options to be added to the containers resolv.conf file.
-    dns_opt: Optional[List[str]] = None
+    dns_opt: list[str] | None = None
     # DNS search domains.
-    dns_search: Optional[List[str]] = None
+    dns_search: list[str] | None = None
     # Set custom DNS search domains.
-    domainname: Optional[Union[str, List[str]]] = None
+    domainname: str | list[str] | None = None
     # The entrypoint for the container.
-    entrypoint: Optional[Union[str, List[str]]] = None
+    entrypoint: str | list[str] | None = None
     # Additional hostnames to resolve inside the
     # container, as a mapping of hostname to IP address.
-    extra_hosts: Optional[Dict[str, str]] = None
+    extra_hosts: dict[str, str] | None = None
     # List of additional group names and/or
     # IDs that the container process will run as.
-    group_add: Optional[List[str]] = None
+    group_add: list[str] | None = None
     # Specify a test to perform to check that the
     # container is healthy. The dict takes the following keys:
     # TODO this should have it's own type?
-    healthcheck: Optional[Dict[str, Any]] = None
+    healthcheck: dict[str, Any] | None = None
     # Optional hostname for the container.
-    hostname: Optional[str] = None
+    hostname: str | None = None
     # Path to the docker-init binary
-    init_path: Optional[str] = None
+    init_path: str | None = None
     # Set the IPC mode for the container.
-    ipc_mode: Optional[str] = None
+    ipc_mode: str | None = None
     # Isolation technology to use. Default:.
-    isolation: Optional[str] = None
+    isolation: str | None = None
     # Kernel memory limit
-    kernel_memory: Optional[Union[str, int]] = None
+    kernel_memory: str | int | None = None
     # A dictionary of name-value labels (e.g.) or a list of
     # names of labels to set with empty values (e.g.)
-    labels: Optional[Union[Dict[str, str], List[str]]] = None
+    labels: dict[str, str] | list[str] | None = None
     # Mapping of links using theformat. The alias is optional.
     # Containers declared in this dict will be linked to the new
     # container using the provided alias. Default:.
-    links: Optional[Dict[str, str]] = None
+    links: dict[str, str] | None = None
     # LXC config.
-    lxc_conf: Optional[dict] = None
+    lxc_conf: dict | None = None
     # MAC address to assign to the container.
-    mac_address: Optional[str] = None
+    mac_address: str | None = None
     # Specification for mounts to be added to
     # the container. More powerful alternative to. Each
     # item in the list is expected to be aobject.
-    mounts: Optional[List[docker.types.Mount]] = None
+    mounts: list[docker.types.Mount] | None = None
     # CPU quota in units of 1e-9 CPUs.
-    nano_cpus: Optional[int] = None
+    nano_cpus: int | None = None
     # Name of the network this container will be connected
     # to at creation time. You can connect to additional networks
     # using. Incompatible with.
-    network: Optional[str] = None
+    network: str | None = None
     # Disable networking.
-    network_disabled: Optional[bool] = None
+    network_disabled: bool | None = None
     # Whether to disable OOM killer.
-    oom_kill_disable: Optional[bool] = None
+    oom_kill_disable: bool | None = None
     # If set to, use the host PID
     # inside the container.
-    pid_mode: Optional[str] = None
+    pid_mode: str | None = None
     # Platform in the format.
     # Only used if the method needs to pull the requested image.
-    platform: Optional[str] = None
+    platform: str | None = None
     # Ports to bind inside the container.The keys of the dictionary are the ports to bind inside the
     # container, either as an integer or a string in the form, where the protocol is either,, or.The values of the dictionary are the corresponding ports to
     # open on the host, which can be either:Incompatible withnetwork mode.
-    ports: Optional[dict] = None
+    ports: dict | None = None
     # Give extended privileges to this container.
-    privileged: Optional[bool] = None
+    privileged: bool | None = None
     # Publish all ports to the host.
-    publish_all_ports: Optional[bool] = None
+    publish_all_ports: bool | None = None
     # Runtime to use with this container.
-    runtime: Optional[str] = None
+    runtime: str | None = None
     # A list of string values to
     # customize labels for MLS systems, such as SELinux.
-    security_opt: Optional[List[str]] = None
+    security_opt: list[str] | None = None
     # The stop signal to use to stop the container
     # (e.g.).
-    stop_signal: Optional[str] = None
+    stop_signal: str | None = None
     # Storage driver options per container as a
     # key-value mapping.
-    storage_opt: Optional[dict] = None
+    storage_opt: dict | None = None
     # If true andis false, return a log
     # generator instead of a string. Ignored ifis true.
     # Default:.
-    stream: Optional[bool] = None
+    stream: bool | None = None
     # Kernel parameters to set in the container.
-    sysctls: Optional[dict] = None
+    sysctls: dict | None = None
     # Temporary filesystems to mount, as a dictionary
     # mapping a path inside the container to options for that path.For example:
-    tmpfs: Optional[dict] = None
+    tmpfs: dict | None = None
     # Allocate a pseudo-TTY.
-    tty: Optional[bool] = None
+    tty: bool | None = None
     # If, and if the docker client
     # configuration file (by default)
     # contains a proxy configuration, the corresponding environment
     # variables will be set in the container being built.
-    use_config_proxy: Optional[bool] = None
+    use_config_proxy: bool | None = None
     # Sets the user namespace mode for the container
     # when user namespace remapping option is enabled. Supported
     # values are:
-    userns_mode: Optional[str] = None
+    userns_mode: str | None = None
     # Sets the UTS namespace mode for the container.
     # Supported values are:
-    uts_mode: Optional[str] = None
+    uts_mode: str | None = None
     # The version of the API to use. Set toto
     # automatically detect the serveras version. Default:
-    version: Optional[str] = None
+    version: str | None = None
 
     def __post_init__(self):
         """Validate security-sensitive fields."""
@@ -412,9 +403,7 @@ class DockerContainer:
             from taskflows.security_validation import validate_env_file_path
 
             try:
-                self.env_file = str(
-                    validate_env_file_path(self.env_file, allow_nonexistent=True)
-                )
+                self.env_file = str(validate_env_file_path(self.env_file, allow_nonexistent=True))
             except Exception as e:
                 from taskflows.common import logger
 
@@ -531,9 +520,7 @@ class DockerContainer:
                     raise
 
         # Shouldn't reach here, but just in case
-        raise RuntimeError(
-            f"Failed to create container {self.name} after {max_attempts} attempts"
-        )
+        raise RuntimeError(f"Failed to create container {self.name} after {max_attempts} attempts")
 
     def docker_run_cli_command(self) -> str:
         """Build the docker run CLI command string for this container.
@@ -640,9 +627,7 @@ class DockerContainer:
             cmd.append("-t")
         if self.entrypoint:
             if isinstance(self.entrypoint, list):
-                cmd.extend(
-                    ["--entrypoint", shlex.join([str(e) for e in self.entrypoint])]
-                )
+                cmd.extend(["--entrypoint", shlex.join([str(e) for e in self.entrypoint])])
             else:
                 cmd.extend(["--entrypoint", str(self.entrypoint)])
 
@@ -653,9 +638,7 @@ class DockerContainer:
                         host_port = host_config.get("HostPort")
                         host_ip = host_config.get("HostIp", "")
                         if host_ip:
-                            cmd.extend(
-                                ["-p", f"{host_ip}:{host_port}:{container_port}"]
-                            )
+                            cmd.extend(["-p", f"{host_ip}:{host_port}:{container_port}"])
                         else:
                             cmd.extend(["-p", f"{host_port}:{container_port}"])
                     else:
@@ -668,10 +651,7 @@ class DockerContainer:
         cmd.extend(["--log-opt", "fluentd-buffer-limit=1048576"])
         cmd.extend(["--log-opt", "tag=docker.{{.Name}}"])
 
-        if isinstance(self.image, DockerImage):
-            image_name = self.image.tag
-        else:
-            image_name = self.image
+        image_name = self.image.tag if isinstance(self.image, DockerImage) else self.image
 
         cmd.append(image_name)
 
@@ -728,7 +708,7 @@ class DockerContainer:
         """Remove container."""
         delete_docker_container(self.name)
 
-    def _params(self) -> Dict[str, Any]:
+    def _params(self) -> dict[str, Any]:
         cfg = {k: v for k, v in asdict(self).items() if v is not None}
         # Fields that are internal to our service system and should not be passed to Docker API
         cfg.pop("persisted", None)
@@ -772,7 +752,7 @@ class DockerContainer:
             cfg["image"] = self.image.tag
         return cfg
 
-    def prepare_callable_command(self) -> Optional[PickledFunction]:
+    def prepare_callable_command(self) -> PickledFunction | None:
         """Convert a Python callable command to a signed-pickle entrypoint."""
         if not self.command or isinstance(self.command, str):
             return None
@@ -782,7 +762,7 @@ class DockerContainer:
         self.command = PickledFunction(self.command, self.name, "command")
         return self.command
 
-    def _apply_cgroup_config(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_cgroup_config(self, cfg: dict[str, Any]) -> dict[str, Any]:
         """Apply cgroup configuration to the container config dictionary using intelligent mapping."""
         if not self.cgroup_config:
             return cfg
@@ -816,9 +796,7 @@ class DockerContainer:
         if effective_swap:
             cfg["memswap_limit"] = effective_swap
 
-        effective_reservation = (
-            self.cgroup_config._calculate_effective_memory_reservation()
-        )
+        effective_reservation = self.cgroup_config._calculate_effective_memory_reservation()
         if effective_reservation:
             cfg["mem_reservation"] = effective_reservation
 
@@ -837,23 +815,19 @@ class DockerContainer:
         # Device bandwidth and IOPS limits (direct mapping)
         if self.cgroup_config.device_read_bps:
             cfg["device_read_bps"] = [
-                f"{dev}:{bps}"
-                for dev, bps in self.cgroup_config.device_read_bps.items()
+                f"{dev}:{bps}" for dev, bps in self.cgroup_config.device_read_bps.items()
             ]
         if self.cgroup_config.device_write_bps:
             cfg["device_write_bps"] = [
-                f"{dev}:{bps}"
-                for dev, bps in self.cgroup_config.device_write_bps.items()
+                f"{dev}:{bps}" for dev, bps in self.cgroup_config.device_write_bps.items()
             ]
         if self.cgroup_config.device_read_iops:
             cfg["device_read_iops"] = [
-                f"{dev}:{iops}"
-                for dev, iops in self.cgroup_config.device_read_iops.items()
+                f"{dev}:{iops}" for dev, iops in self.cgroup_config.device_read_iops.items()
             ]
         if self.cgroup_config.device_write_iops:
             cfg["device_write_iops"] = [
-                f"{dev}:{iops}"
-                for dev, iops in self.cgroup_config.device_write_iops.items()
+                f"{dev}:{iops}" for dev, iops in self.cgroup_config.device_write_iops.items()
             ]
 
         # Process limits
@@ -890,7 +864,7 @@ class DockerContainer:
 
         return cfg
 
-    def to_dict(self, include_none: bool = False) -> Dict[str, Any]:
+    def to_dict(self, include_none: bool = False) -> dict[str, Any]:
         """Serialize this container to a dictionary.
 
         Args:
@@ -931,7 +905,7 @@ class DockerContainer:
         return serialize(self, format="yaml", include_none=include_none)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "DockerContainer":
+    def from_dict(cls, data: dict[str, Any]) -> "DockerContainer":
         """Create a DockerContainer from a dictionary.
 
         Args:

@@ -1,12 +1,12 @@
 import os
 import sys
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Literal
 
 from loguru import logger
 
 
-def any_case_env_var(var: str, default: Optional[str] = None) -> Union[str, bool, None]:
+def any_case_env_var(var: str, default: str | None = None) -> str | bool | None:
     value = os.getenv(var) or os.getenv(var.lower()) or os.getenv(var.upper())
     if value is None:
         wanted = var.lower()
@@ -30,11 +30,11 @@ _logger_levels: dict[str, int] = {}
 _logger_file_paths: dict[str, Path] = {}
 
 
-def _logger_key(name: Optional[str]) -> str:
+def _logger_key(name: str | None) -> str:
     return name or "root"
 
 
-def _normalize_level(level: Union[str, int, None]) -> tuple[Union[str, int], int]:
+def _normalize_level(level: str | int | None) -> tuple[str | int, int]:
     if level is None:
         level = "INFO"
     if isinstance(level, int):
@@ -44,8 +44,8 @@ def _normalize_level(level: Union[str, int, None]) -> tuple[Union[str, int], int
 
 
 def _build_format_string(
-    name: Optional[str],
-    show_source: Optional[Literal["pathname", "filename"]],
+    name: str | None,
+    show_source: Literal["pathname", "filename"] | None,
     *,
     dynamic_name: bool = False,
 ) -> str:
@@ -82,15 +82,15 @@ def _shared_file_filter(file_path: Path):
 
 
 def get_logger(
-    name: Optional[str] = None,
-    level: Optional[Union[str, int]] = None,
-    no_terminal: Optional[bool] = None,
-    file_dir: Optional[Union[str, Path]] = None,
-    show_source: Optional[Literal["pathname", "filename"]] = "filename",
-    file_max_bytes: Optional[int] = 20_000_000,
-    max_rotations: Optional[int] = 2,
-    file_name: Optional[Union[str, Path]] = None,
-    single_file: Optional[bool] = None,
+    name: str | None = None,
+    level: str | int | None = None,
+    no_terminal: bool | None = None,
+    file_dir: str | Path | None = None,
+    show_source: Literal["pathname", "filename"] | None = "filename",
+    file_max_bytes: int | None = 20_000_000,
+    max_rotations: int | None = 2,
+    file_name: str | Path | None = None,
+    single_file: bool | None = None,
 ):
     """Create a new logger or return an existing logger with the given name.
 
@@ -187,9 +187,9 @@ def get_logger(
             sys.stderr,
             format=terminal_format,
             level=normalized_level,
-            filter=lambda record: record["extra"].get("logger_name") == logger_key
-            if name
-            else True,
+            filter=lambda record: (
+                record["extra"].get("logger_name") == logger_key if name else True
+            ),
         )
 
     # Add file handler if directory specified
@@ -197,9 +197,7 @@ def get_logger(
         if single_file:
             file_name_path = Path(str(file_name or "taskflows.log"))
             file_path = (
-                file_name_path
-                if file_name_path.is_absolute()
-                else Path(file_dir) / file_name_path
+                file_name_path if file_name_path.is_absolute() else Path(file_dir) / file_name_path
             )
             file_path = file_path.resolve()
             _logger_file_paths[logger_key] = file_path
@@ -225,9 +223,9 @@ def get_logger(
                 level=normalized_level,
                 rotation=file_max_bytes,
                 retention=max_rotations,
-                filter=lambda record: record["extra"].get("logger_name") == logger_key
-                if name
-                else True,
+                filter=lambda record: (
+                    record["extra"].get("logger_name") == logger_key if name else True
+                ),
             )
 
     _logger_levels.setdefault(logger_key, level_no)

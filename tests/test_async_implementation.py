@@ -3,6 +3,7 @@ Simple test to verify the async task implementation works correctly.
 """
 
 import asyncio
+
 import pytest
 
 from taskflows.tasks import task

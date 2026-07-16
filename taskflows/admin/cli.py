@@ -6,9 +6,9 @@ import os
 # This MUST be set before any taskflows imports that use the logger
 _log_level = (
     os.environ.get("TASKFLOWS_LOG_LEVEL")
-    or os.environ.get("taskflows_log_level")
+    or os.environ.get("taskflows_log_level")  # noqa: SIM112 - legacy lowercase name
     or os.environ.get("LOGGERS_LOG_LEVEL")
-    or os.environ.get("loggers_log_level")
+    or os.environ.get("loggers_log_level")  # noqa: SIM112 - legacy lowercase name
     or ""
 ).upper()
 
@@ -19,19 +19,16 @@ if _log_level == "DEBUG":
 else:
     # In non-DEBUG mode, disable all logging to keep CLI output clean
     os.environ["TASKFLOWS_NO_TERMINAL"] = "1"
-    os.environ["TASKFLOWS_FILE_DIR"] = (
-        ""  # Empty string prevents default and disables file logging
-    )
+    os.environ["TASKFLOWS_FILE_DIR"] = ""  # Empty string prevents default and disables file logging
 
 from functools import lru_cache
 from itertools import cycle
 from pathlib import Path
-from typing import Optional
 
 import click
 import yaml
-from msgflows.components import Table
 from click import Group
+from msgflows.components import Table
 from rich.console import Console
 
 from taskflows.admin.core import execute_command_on_servers
@@ -52,7 +49,7 @@ def get_console_with_wrap() -> Console:
     return Console(soft_wrap=True)
 
 
-def _print_results(results: dict, console: Optional[Console] = None) -> None:
+def _print_results(results: dict, console: Console | None = None) -> None:
     """Print command results to the console.
 
     Tables render with their built-in layout; other components are prefixed
@@ -142,9 +139,7 @@ def set_secret(secret: str):
 def security_status():
     """Show current security settings."""
     click.echo("🔒 Current Security Settings:")
-    click.echo(
-        f"  HMAC: {'✅ Enabled' if security_config.enable_hmac else '❌ Disabled'}"
-    )
+    click.echo(f"  HMAC: {'✅ Enabled' if security_config.enable_hmac else '❌ Disabled'}")
     if security_config.enable_hmac and security_config.hmac_secret:
         click.echo("    Secret configured: ✅")
         click.echo(
@@ -156,9 +151,7 @@ def security_status():
         click.echo(f"    Header: {security_config.hmac_header}")
         click.echo(f"    Timestamp Header: {security_config.hmac_timestamp_header}")
         click.echo(f"    Nonce Header: {security_config.hmac_nonce_header}")
-    click.echo(
-        f"  CORS: {'✅ Enabled' if security_config.enable_cors else '❌ Disabled'}"
-    )
+    click.echo(f"  CORS: {'✅ Enabled' if security_config.enable_cors else '❌ Disabled'}")
     if security_config.enable_cors:
         click.echo(f"    Origins: {', '.join(security_config.allowed_origins)}")
     click.echo(
@@ -237,9 +230,7 @@ def generate_secret():
     default=3,
     help="Number of most recent task runs to show.",
 )
-@click.option(
-    "-m", "--match", help="Only show history for this task name or task name pattern."
-)
+@click.option("-m", "--match", help="Only show history for this task name or task name pattern.")
 @click.option(
     "--server",
     "-s",
@@ -247,7 +238,7 @@ def generate_secret():
     help="Server(s) to query. Can be specified multiple times. If not specified, queries all registered servers.",
 )
 @async_entrypoint(blocking=True)
-async def history(limit: int, match: Optional[str] = None, server: tuple = ()):
+async def history(limit: int, match: str | None = None, server: tuple = ()):
     """Show task run history from specified servers."""
     kwargs = {"limit": limit}
     if match:
@@ -266,7 +257,7 @@ async def history(limit: int, match: Optional[str] = None, server: tuple = ()):
     help="Server(s) to query. Can be specified multiple times. If not specified, queries all registered servers.",
 )
 @async_entrypoint(blocking=True)
-async def list_services(match: Optional[str] = None, server: tuple = ()):
+async def list_services(match: str | None = None, server: tuple = ()):
     """List services from specified servers."""
     kwargs = {}
     if match:
@@ -303,7 +294,7 @@ async def list_services(match: Optional[str] = None, server: tuple = ()):
 )
 @async_entrypoint(blocking=True)
 async def status(
-    match: Optional[str] = None,
+    match: str | None = None,
     running: bool = False,
     show_all: bool = False,
     server: tuple = (),
@@ -335,7 +326,7 @@ async def status(
     help="Number of log lines to return (default: 1000)",
 )
 @async_entrypoint(blocking=True)
-async def logs(service_name: str, n_lines: int, server: Optional[str] = None):
+async def logs(service_name: str, n_lines: int, server: str | None = None):
     """Show logs for a service from specified server."""
     results = await execute_command_on_servers(
         "logs", servers=server, service_name=service_name, n_lines=n_lines
@@ -397,12 +388,8 @@ async def cli_create(search_in, include, exclude, server: tuple = ()):
 
 @cli.command
 @click.argument("match", required=True)
-@click.option(
-    "--timers", "-t", is_flag=True, help="Affect timers matching provided pattern."
-)
-@click.option(
-    "--services", is_flag=True, help="Affect services matching provided pattern."
-)
+@click.option("--timers", "-t", is_flag=True, help="Affect timers matching provided pattern.")
+@click.option("--services", is_flag=True, help="Affect services matching provided pattern.")
 @click.option(
     "--server",
     "-s",
@@ -413,7 +400,7 @@ async def start(
     match: str,
     timers: bool = False,
     services: bool = False,
-    server: Optional[str] = None,
+    server: str | None = None,
 ):
     """Start services/timers on specified server."""
     kwargs = {"match": match}
@@ -428,12 +415,8 @@ async def start(
 
 @cli.command
 @click.argument("match", required=True)
-@click.option(
-    "--timers", "-t", is_flag=True, help="Affect timers matching provided pattern."
-)
-@click.option(
-    "--services", is_flag=True, help="Affect services matching provided pattern."
-)
+@click.option("--timers", "-t", is_flag=True, help="Affect timers matching provided pattern.")
+@click.option("--services", is_flag=True, help="Affect services matching provided pattern.")
 @click.option(
     "--server",
     "-s",
@@ -444,7 +427,7 @@ async def stop(
     match: str,
     timers: bool = False,
     services: bool = False,
-    server: Optional[str] = None,
+    server: str | None = None,
 ):
     """Stop services/timers on specified server."""
     kwargs = {"match": match}
@@ -465,7 +448,7 @@ async def stop(
     help="Server to execute on. If not specified, executes on the server that has the matching service.",
 )
 @async_entrypoint(blocking=True)
-async def restart(match: str, server: Optional[str] = None):
+async def restart(match: str, server: str | None = None):
     """Restart services on specified server."""
     results = await execute_command_on_servers("restart", servers=server, match=match)
     _print_results(results)
@@ -473,12 +456,8 @@ async def restart(match: str, server: Optional[str] = None):
 
 @cli.command
 @click.argument("match", required=True)
-@click.option(
-    "--timers", "-t", is_flag=True, help="Enable timers matching provided pattern."
-)
-@click.option(
-    "--services", is_flag=True, help="Enable services matching provided pattern."
-)
+@click.option("--timers", "-t", is_flag=True, help="Enable timers matching provided pattern.")
+@click.option("--services", is_flag=True, help="Enable services matching provided pattern.")
 @click.option(
     "--server",
     "-s",
@@ -489,7 +468,7 @@ async def enable(
     match: str,
     timers: bool = False,
     services: bool = False,
-    server: Optional[str] = None,
+    server: str | None = None,
 ):
     """Enable services/timers on specified server."""
     kwargs = {"match": match}
@@ -504,12 +483,8 @@ async def enable(
 
 @cli.command
 @click.argument("match", required=True)
-@click.option(
-    "--timers", "-t", is_flag=True, help="Disable timers matching provided pattern."
-)
-@click.option(
-    "--services", is_flag=True, help="Disable services matching provided pattern."
-)
+@click.option("--timers", "-t", is_flag=True, help="Disable timers matching provided pattern.")
+@click.option("--services", is_flag=True, help="Disable services matching provided pattern.")
 @click.option(
     "--server",
     "-s",
@@ -520,7 +495,7 @@ async def disable(
     match: str,
     timers: bool = False,
     services: bool = False,
-    server: Optional[str] = None,
+    server: str | None = None,
 ):
     """Disable services/timers on specified server."""
     kwargs = {"match": match}
@@ -541,7 +516,7 @@ async def disable(
     help="Server to execute on. If not specified, executes on the server that has the matching service.",
 )
 @async_entrypoint(blocking=True)
-async def remove(match: str, server: Optional[str] = None):
+async def remove(match: str, server: str | None = None):
     """Remove services/timers on specified server."""
     results = await execute_command_on_servers("remove", servers=server, match=match)
     _print_results(results)
@@ -582,13 +557,11 @@ def discover(path: str, count: bool, verbose: bool):
     found_files = []
 
     # Collect all YAML files
-    yaml_files = list(search_path.glob("**/*.yaml")) + list(
-        search_path.glob("**/*.yml")
-    )
+    yaml_files = list(search_path.glob("**/*.yaml")) + list(search_path.glob("**/*.yml"))
 
     for yaml_file in sorted(yaml_files):
         try:
-            with open(yaml_file, "r") as f:
+            with open(yaml_file) as f:
                 content = yaml.safe_load(f)
 
             # Skip empty files or non-dict content
@@ -598,9 +571,7 @@ def discover(path: str, count: bool, verbose: bool):
             # Check for taskflows_services key
             if "taskflows_services" in content:
                 services = content["taskflows_services"]
-                service_count = (
-                    len(services) if isinstance(services, (list, dict)) else 0
-                )
+                service_count = len(services) if isinstance(services, (list, dict)) else 0
                 found_files.append((yaml_file, service_count))
 
         except yaml.YAMLError as e:

@@ -1,10 +1,10 @@
 from unittest.mock import Mock
 
-import requests
 import pytest
+import requests
 
-from taskflows.admin.core import _API_RESPONSE_MAX_CHARS, call_api, task_history
 from taskflows.admin import utils
+from taskflows.admin.core import _API_RESPONSE_MAX_CHARS, call_api, task_history
 
 
 def test_get_public_ipv4_skips_invalid_responses(monkeypatch):

@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: ruff check
+        run: uvx ruff check .
+      - name: ruff format
+        run: uvx ruff format --check .
+      - name: mypy (advisory)
+        continue-on-error: true
+        run: |
+          uv sync --no-sources
+          uv run --no-sources mypy taskflows
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --no-sources
+      - name: Run unit tests
+        run: uv run --no-sources pytest -m "not integration" --timeout=120
+
+  install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build sdist + wheel
+        run: uv build
+      - name: Install wheel into a clean venv and smoke test
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          cd /tmp
+          /tmp/smoke/bin/python -c "import taskflows; taskflows.Alerts; taskflows.RestartPolicy"
+          /tmp/smoke/bin/tf --help
+
+  # systemd user-session tests; advisory until they prove stable on hosted runners
+  integration:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Enable systemd user session
+        run: sudo loginctl enable-linger "$(whoami)" || true
+      - name: Install dependencies
+        run: uv sync --no-sources
+      - name: Run integration tests
+        run: uv run --no-sources pytest -m integration --timeout=300

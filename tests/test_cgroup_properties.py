@@ -3,7 +3,9 @@
 Tests conversion accuracy between systemd and Docker cgroup parameters.
 """
 
-from hypothesis import given, strategies as st, assume
+from hypothesis import assume, given
+from hypothesis import strategies as st
+
 from taskflows.constraints import CgroupConfig
 
 
@@ -192,9 +194,7 @@ class TestMemoryLimitCalculations:
     )
     def test_swap_limit_calculation(self, memory_limit, memory_swap_max):
         """Test that swap limit is correctly calculated as memory + swap."""
-        config = CgroupConfig(
-            memory_limit=memory_limit, memory_swap_max=memory_swap_max
-        )
+        config = CgroupConfig(memory_limit=memory_limit, memory_swap_max=memory_swap_max)
 
         # Docker memory_swap_limit should be memory + swap
         effective_swap = config._calculate_effective_swap_limit()

@@ -47,21 +47,16 @@ Human-Readable Values:
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from collections.abc import Sequence as ABCSequence
 from dataclasses import MISSING, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from types import NoneType, UnionType
 from typing import (
-    Any,
-    Dict,
-    List,
-    Literal,
-    Optional,
-    Sequence,
     TYPE_CHECKING,
-    Type,
+    Any,
+    Literal,
     TypeVar,
     Union,
     get_args,
@@ -76,7 +71,6 @@ if TYPE_CHECKING:
 from pydantic import BaseModel
 
 from taskflows.common import logger, secure_write_text
-
 
 # =============================================================================
 # Human-Readable Value Parsing
@@ -197,9 +191,7 @@ def parse_memory_size(value: Any) -> int:
         return int(value)
 
     if not isinstance(value, str):
-        raise ValueError(
-            f"Cannot parse memory size from {type(value).__name__}: {value}"
-        )
+        raise ValueError(f"Cannot parse memory size from {type(value).__name__}: {value}")
 
     match = _MEMORY_PATTERN.match(value)
     if not match:
@@ -261,9 +253,7 @@ def parse_time_duration(value: Any) -> int:
         return int(value)
 
     if not isinstance(value, str):
-        raise ValueError(
-            f"Cannot parse time duration from {type(value).__name__}: {value}"
-        )
+        raise ValueError(f"Cannot parse time duration from {type(value).__name__}: {value}")
 
     match = _TIME_PATTERN.match(value)
     if not match:
@@ -349,10 +339,10 @@ T = TypeVar("T")
 
 
 # Type registry for polymorphic deserialization
-_TYPE_REGISTRY: Dict[str, Type] = {}
+_TYPE_REGISTRY: dict[str, type] = {}
 
 # Field name to type mapping for automatic inference
-_FIELD_TYPE_MAP: Dict[str, str] = {
+_FIELD_TYPE_MAP: dict[str, str] = {
     "restart_policy": "RestartPolicy",
     "cgroup_config": "CgroupConfig",
     "container_limits": "ContainerLimits",
@@ -365,7 +355,7 @@ _FIELD_TYPE_MAP: Dict[str, str] = {
 }
 
 # Keys that uniquely identify a type (for content-based inference)
-_TYPE_SIGNATURE_KEYS: Dict[frozenset, str] = {
+_TYPE_SIGNATURE_KEYS: dict[frozenset, str] = {
     # Venv: has env_name
     frozenset(["env_name"]): "Venv",
     # DockerContainer: has image
@@ -408,9 +398,7 @@ _TYPE_SIGNATURE_KEYS: Dict[frozenset, str] = {
 }
 
 
-def _infer_type_from_content(
-    data: Dict[str, Any], field_name: Optional[str] = None
-) -> Optional[str]:
+def _infer_type_from_content(data: dict[str, Any], field_name: str | None = None) -> str | None:
     """Infer the type from dict content based on its keys.
 
     Args:
@@ -426,9 +414,7 @@ def _infer_type_from_content(
     keys = set(data.keys()) - {"type"}  # Exclude type key itself
 
     # Check for signature keys (most specific first - larger sets)
-    for signature_keys, type_name in sorted(
-        _TYPE_SIGNATURE_KEYS.items(), key=lambda x: -len(x[0])
-    ):
+    for signature_keys, type_name in sorted(_TYPE_SIGNATURE_KEYS.items(), key=lambda x: -len(x[0])):
         if signature_keys <= keys:
             return type_name
 
@@ -439,7 +425,7 @@ def _infer_type_from_content(
     return None
 
 
-def _infer_schedule_type(value: Any) -> Optional[str]:
+def _infer_schedule_type(value: Any) -> str | None:
     """Infer schedule type from value.
 
     - String with day/time pattern -> Calendar
@@ -459,7 +445,7 @@ def _infer_schedule_type(value: Any) -> Optional[str]:
     return None
 
 
-def register_type(cls: Type) -> Type:
+def register_type(cls: type) -> type:
     """Register a type for polymorphic deserialization.
 
     Args:
@@ -472,7 +458,7 @@ def register_type(cls: Type) -> Type:
     return cls
 
 
-def get_registered_type(name: str) -> Optional[Type]:
+def get_registered_type(name: str) -> type | None:
     """Get a registered type by name.
 
     Args:
@@ -489,7 +475,7 @@ def _get_type_name(obj: Any) -> str:
     return type(obj).__name__
 
 
-def _is_pydantic_model(cls: Type) -> bool:
+def _is_pydantic_model(cls: type) -> bool:
     """Check if a class is a Pydantic BaseModel."""
     try:
         return issubclass(cls, BaseModel)
@@ -502,7 +488,7 @@ def _is_union_type(annotation: Any) -> bool:
     return get_origin(annotation) in (Union, UnionType)
 
 
-def _sequence_element_type(annotation: Any) -> Optional[Type]:
+def _sequence_element_type(annotation: Any) -> type | None:
     """Return the item type for list-like annotations when available."""
     origin = get_origin(annotation)
     if origin in (Union, UnionType):
@@ -510,7 +496,7 @@ def _sequence_element_type(annotation: Any) -> Optional[Type]:
             element_type = _sequence_element_type(arg)
             if element_type:
                 return element_type
-    if origin in (list, List, tuple, Sequence, ABCSequence):
+    if origin in (list, list, tuple, Sequence, ABCSequence):
         args = get_args(annotation)
         if args:
             return args[0]
@@ -537,8 +523,7 @@ def _resolve_union_type(annotation: Any, value: Any) -> Any:
         non_primitive_args = [
             arg
             for arg in union_args
-            if arg not in (str, int, float, bool, dict, list, Path)
-            and get_origin(arg) is None
+            if arg not in (str, int, float, bool, dict, list, Path) and get_origin(arg) is None
         ]
         if len(non_primitive_args) == 1:
             return non_primitive_args[0]
@@ -605,7 +590,7 @@ def _serialize_value(value: Any, include_none: bool = False) -> Any:
     return value
 
 
-def _filter_none(data: Dict[str, Any], include_none: bool) -> Dict[str, Any]:
+def _filter_none(data: dict[str, Any], include_none: bool) -> dict[str, Any]:
     """Filter out None values from a dict if include_none is False."""
     if include_none:
         return data
@@ -640,13 +625,11 @@ def _parse_volume_string(value: str) -> Any:
         # Can't parse, return as-is
         return value
 
-    return volume_cls(
-        host_path=host_path, container_path=container_path, read_only=read_only
-    )
+    return volume_cls(host_path=host_path, container_path=container_path, read_only=read_only)
 
 
 def _deserialize_value(
-    value: Any, target_type: Optional[Type] = None, field_name: Optional[str] = None
+    value: Any, target_type: type | None = None, field_name: str | None = None
 ) -> Any:
     """Deserialize a value from JSON-compatible format.
 
@@ -766,7 +749,7 @@ def _deserialize_value(
     return value
 
 
-def _get_field_type(cls: Type, field_name: str) -> Optional[Type]:
+def _get_field_type(cls: type, field_name: str) -> type | None:
     """Get the type annotation for a field on a class."""
     if is_dataclass(cls):
         for field in fields(cls):
@@ -779,7 +762,7 @@ def _get_field_type(cls: Type, field_name: str) -> Optional[Type]:
     return None
 
 
-def to_dict(obj: Any, include_none: bool = False) -> Dict[str, Any]:
+def to_dict(obj: Any, include_none: bool = False) -> dict[str, Any]:
     """Convert an object to a dictionary representation.
 
     Args:
@@ -792,7 +775,7 @@ def to_dict(obj: Any, include_none: bool = False) -> Dict[str, Any]:
     return _serialize_value(obj, include_none)
 
 
-def from_dict(data: Dict[str, Any], cls: Type[T]) -> T:
+def from_dict(data: dict[str, Any], cls: type[T]) -> T:
     """Create an object from a dictionary representation.
 
     Args:
@@ -854,9 +837,7 @@ def from_dict(data: Dict[str, Any], cls: Type[T]) -> T:
     # deserialization before calling the constructor.
     if cls.__name__ == "Dashboard" and "panels_grid" in data:
         data = dict(data)
-        data["panels_grid"] = _deserialize_value(
-            data["panels_grid"], field_name="panels_grid"
-        )
+        data["panels_grid"] = _deserialize_value(data["panels_grid"], field_name="panels_grid")
 
     # For regular classes, just pass the data
     return cls(**data)
@@ -887,14 +868,12 @@ def serialize(
     if format == "json":
         return json.dumps(data, indent=indent, default=str)
     elif format == "yaml":
-        return yaml.dump(
-            data, default_flow_style=False, allow_unicode=True, sort_keys=False
-        )
+        return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
     else:
         raise ValueError(f"Unknown format: {format}")
 
 
-def deserialize(data: str, cls: Type[T], format: Literal["json", "yaml"] = "json") -> T:
+def deserialize(data: str, cls: type[T], format: Literal["json", "yaml"] = "json") -> T:
     """Deserialize a JSON or YAML string to an object.
 
     Args:
@@ -925,8 +904,8 @@ def deserialize(data: str, cls: Type[T], format: Literal["json", "yaml"] = "json
 
 def serialize_to_file(
     obj: Any,
-    path: Union[str, Path],
-    format: Optional[Literal["json", "yaml"]] = None,
+    path: str | Path,
+    format: Literal["json", "yaml"] | None = None,
     indent: int = 2,
     include_none: bool = False,
 ) -> None:
@@ -942,19 +921,16 @@ def serialize_to_file(
     path = Path(path)
 
     if format is None:
-        if path.suffix in (".yaml", ".yml"):
-            format = "yaml"
-        else:
-            format = "json"
+        format = "yaml" if path.suffix in (".yaml", ".yml") else "json"
 
     content = serialize(obj, format=format, indent=indent, include_none=include_none)
     secure_write_text(path, content)
 
 
 def deserialize_from_file(
-    path: Union[str, Path],
-    cls: Type[T],
-    format: Optional[Literal["json", "yaml"]] = None,
+    path: str | Path,
+    cls: type[T],
+    format: Literal["json", "yaml"] | None = None,
 ) -> T:
     """Deserialize an object from a file.
 
@@ -969,10 +945,7 @@ def deserialize_from_file(
     path = Path(path)
 
     if format is None:
-        if path.suffix in (".yaml", ".yml"):
-            format = "yaml"
-        else:
-            format = "json"
+        format = "yaml" if path.suffix in (".yaml", ".yml") else "json"
 
     content = path.read_text()
     return deserialize(content, cls, format=format)
@@ -982,26 +955,26 @@ def deserialize_from_file(
 def _register_taskflows_types():
     """Register all taskflows types in the type registry."""
     # Import here to avoid circular imports
-    from taskflows.dashboard import Dashboard, LogsCountPlot, LogsPanelConfig, LogsTextSearch
-    from taskflows.service import Venv, Service, RestartPolicy
-    from taskflows.docker import (
-        DockerContainer,
-        DockerImage,
-        Volume,
-        Ulimit,
-        ContainerLimits,
-    )
-    from taskflows.schedule import Calendar, Periodic
     from taskflows.constraints import (
         CgroupConfig,
-        HardwareConstraint,
-        Memory,
-        CPUs,
-        SystemLoadConstraint,
-        MemoryPressure,
         CPUPressure,
+        CPUs,
+        HardwareConstraint,
         IOPressure,
+        Memory,
+        MemoryPressure,
+        SystemLoadConstraint,
     )
+    from taskflows.dashboard import Dashboard, LogsCountPlot, LogsPanelConfig, LogsTextSearch
+    from taskflows.docker import (
+        ContainerLimits,
+        DockerContainer,
+        DockerImage,
+        Ulimit,
+        Volume,
+    )
+    from taskflows.schedule import Calendar, Periodic
+    from taskflows.service import RestartPolicy, Service, Venv
 
     # Service types
     register_type(Venv)
@@ -1040,7 +1013,7 @@ def _register_taskflows_types():
 _register_taskflows_types()
 
 
-def load_services_from_yaml(path: Union[str, Path]) -> List["Service"]:
+def load_services_from_yaml(path: str | Path) -> list["Service"]:
     """Load multiple services from a YAML file.
 
     The YAML file should contain a 'taskflows_services' key with a list of service definitions.
@@ -1096,9 +1069,7 @@ def load_services_from_yaml(path: Union[str, Path]) -> List["Service"]:
 
     services_data = data[services_key]
     if not isinstance(services_data, list):
-        raise ValueError(
-            f"'services' must be a list, got {type(services_data).__name__}"
-        )
+        raise ValueError(f"'services' must be a list, got {type(services_data).__name__}")
 
     services = []
     for service_data in services_data:
@@ -1109,7 +1080,7 @@ def load_services_from_yaml(path: Union[str, Path]) -> List["Service"]:
     return services
 
 
-def load_dashboards_from_yaml(path: Union[str, Path]) -> List["Dashboard"]:
+def load_dashboards_from_yaml(path: str | Path) -> list["Dashboard"]:
     """Load one or more dashboards from a YAML file.
 
     The YAML file may contain either:
@@ -1145,9 +1116,7 @@ def load_dashboards_from_yaml(path: Union[str, Path]) -> List["Dashboard"]:
         )
 
     if not isinstance(dashboards_data, list):
-        raise ValueError(
-            f"'dashboards' must be a list, got {type(dashboards_data).__name__}"
-        )
+        raise ValueError(f"'dashboards' must be a list, got {type(dashboards_data).__name__}")
 
     dashboards = []
     for dashboard_data in dashboards_data:
@@ -1158,7 +1127,7 @@ def load_dashboards_from_yaml(path: Union[str, Path]) -> List["Dashboard"]:
 
 
 def save_dashboards_to_yaml(
-    dashboards: List["Dashboard"], path: Union[str, Path], include_none: bool = False
+    dashboards: list["Dashboard"], path: str | Path, include_none: bool = False
 ) -> None:
     """Save multiple dashboards to a YAML file."""
     path = Path(path)
@@ -1167,16 +1136,14 @@ def save_dashboards_to_yaml(
         dashboard.pop("type", None)
 
     data = {"dashboards": dashboards_data}
-    content = yaml.dump(
-        data, default_flow_style=False, allow_unicode=True, sort_keys=False
-    )
+    content = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
     secure_write_text(path, content)
 
     logger.info(f"Saved {len(dashboards)} dashboards to {path}")
 
 
 def save_services_to_yaml(
-    services: List["Service"], path: Union[str, Path], include_none: bool = False
+    services: list["Service"], path: str | Path, include_none: bool = False
 ) -> None:
     """Save multiple services to a YAML file.
 
@@ -1193,9 +1160,7 @@ def save_services_to_yaml(
         s.pop("type", None)
 
     data = {"services": services_data}
-    content = yaml.dump(
-        data, default_flow_style=False, allow_unicode=True, sort_keys=False
-    )
+    content = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
     secure_write_text(path, content)
 
     logger.info(f"Saved {len(services)} services to {path}")

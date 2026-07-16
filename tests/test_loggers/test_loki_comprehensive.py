@@ -193,21 +193,10 @@ class TestRequestContext:
 
         # Context should be in the log or nested in context
         context = log_data.get("context", {})
-        assert (
-            log_data.get("request_id") == request_id
-            or context.get("request_id") == request_id
-        )
-        assert (
-            log_data.get("trace_id") == trace_id or context.get("trace_id") == trace_id
-        )
-        assert (
-            log_data.get("user_id") == "user-123"
-            or context.get("user_id") == "user-123"
-        )
-        assert (
-            log_data.get("endpoint") == "/api/test"
-            or context.get("endpoint") == "/api/test"
-        )
+        assert log_data.get("request_id") == request_id or context.get("request_id") == request_id
+        assert log_data.get("trace_id") == trace_id or context.get("trace_id") == trace_id
+        assert log_data.get("user_id") == "user-123" or context.get("user_id") == "user-123"
+        assert log_data.get("endpoint") == "/api/test" or context.get("endpoint") == "/api/test"
 
         # Clear context
         clear_request_context()
