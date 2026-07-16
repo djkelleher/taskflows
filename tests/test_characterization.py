@@ -202,6 +202,44 @@ def test_docker_log_driver_opt_in(container):
     assert container._params()["log_config"].config == {"fluentd-address": "logs.example.com:24224"}
 
 
+def test_cgroup_cli_flags_cover_all_docker_kwargs():
+    """Every to_docker_kwargs key must have a CLI flag mapping (parity guard)."""
+    from taskflows.constraints import _DOCKER_CLI_FLAGS
+
+    cfg = CgroupConfig(
+        cpu_quota=50000,
+        cpu_shares=512,
+        cpuset_cpus="0-1",
+        memory_limit=1024**3,
+        memory_swap_limit=2 * 1024**3,
+        memory_reservation=512 * 1024**2,
+        memory_swappiness=10,
+        blkio_weight=500,
+        device_read_bps={"/dev/sda": 1048576},
+        device_write_bps={"/dev/sda": 1048576},
+        device_read_iops={"/dev/sda": 100},
+        device_write_iops={"/dev/sda": 100},
+        pids_limit=100,
+        nofile_limit=1024,
+        oom_score_adj=100,
+        read_only_rootfs=True,
+        cap_add=["NET_ADMIN"],
+        cap_drop=["ALL"],
+        devices=["/dev/null:/dev/null"],
+        device_cgroup_rules=["c 1:3 mr"],
+        environment={"A": "b"},
+        user="someuser",
+        group="somegroup",
+        working_dir="/work",
+        timeout_stop=30,
+    )
+    kwargs = cfg.to_docker_kwargs()
+    args = cfg.to_docker_cli_args()
+    for key in kwargs:
+        assert key in _DOCKER_CLI_FLAGS, f"no CLI flag mapping for kwarg {key!r}"
+        assert _DOCKER_CLI_FLAGS[key][0] in args, f"flag for {key!r} missing from CLI args"
+
+
 def test_docker_log_driver_from_config(container, monkeypatch):
     monkeypatch.setattr("taskflows.docker.config.docker_log_driver", "json-file")
     log_config = container._params()["log_config"]

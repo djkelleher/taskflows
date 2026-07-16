@@ -486,8 +486,7 @@ class DockerContainer:
         if pkl_func is not None:
             pkl_func.write()
 
-        # Apply cgroup configuration if present
-        cfg = self._apply_cgroup_config(self._params())
+        cfg = self._params()
 
         cfg.update(kwargs)
         logger.info(f"Creating Docker container {self.name}: {redact_sensitive(cfg)}")
@@ -685,9 +684,6 @@ class DockerContainer:
 
         cfg = self._params()
 
-        # Apply cgroup configuration if present
-        self._apply_cgroup_config(cfg)
-
         # Enable auto-removal of the container when it exits
         cfg["auto_remove"] = True
         # Run detached by default (can be overridden by self.detach)
@@ -775,6 +771,17 @@ class DockerContainer:
             }
         if isinstance(self.image, DockerImage):
             cfg["image"] = self.image.tag
+        if self.cgroup_config:
+            cgroup_kwargs = self.cgroup_config.to_docker_kwargs()
+            if nofile := cgroup_kwargs.pop("nofile_limit", None):
+                cfg.setdefault("ulimits", []).append(
+                    docker.types.Ulimit(name="nofile", soft=nofile, hard=nofile)
+                )
+            if cgroup_env := cgroup_kwargs.pop("environment", None):
+                merged_env = cfg.get("environment", {})
+                merged_env.update(cgroup_env)
+                cfg["environment"] = merged_env
+            cfg.update(cgroup_kwargs)
         return cfg
 
     def prepare_callable_command(self) -> PickledFunction | None:
@@ -786,108 +793,6 @@ class DockerContainer:
         self._ensure_name()
         self.command = PickledFunction(self.command, self.name, "command")
         return self.command
-
-    def _apply_cgroup_config(self, cfg: dict[str, Any]) -> dict[str, Any]:
-        """Apply cgroup configuration to the container config dictionary using intelligent mapping."""
-        if not self.cgroup_config:
-            return cfg
-
-        # Use the centralized intelligent mapping logic from CgroupConfig
-        # This leverages all the smart parameter conversion and precedence rules
-
-        # CPU configuration - use intelligent mapping
-        if self.cgroup_config.cpu_quota:
-            cfg["cpu_quota"] = self.cgroup_config.cpu_quota
-        if self.cgroup_config.cpu_period:
-            cfg["cpu_period"] = self.cgroup_config.cpu_period
-
-        # CPU weight: prefer cpu_shares, fallback to converted cpu_weight
-        if self.cgroup_config.cpu_shares:
-            cfg["cpu_shares"] = self.cgroup_config.cpu_shares
-        elif self.cgroup_config.cpu_weight:
-            # Convert systemd weight (1-10000) to Docker shares (~1024 default)
-            docker_shares = int((self.cgroup_config.cpu_weight / 100) * 1024)
-            cfg["cpu_shares"] = docker_shares
-
-        if self.cgroup_config.cpuset_cpus:
-            cfg["cpuset_cpus"] = self.cgroup_config.cpuset_cpus
-
-        # Memory configuration - use intelligent mapping
-        effective_memory = self.cgroup_config._calculate_effective_memory_limit()
-        if effective_memory:
-            cfg["mem_limit"] = effective_memory
-
-        effective_swap = self.cgroup_config._calculate_effective_swap_limit()
-        if effective_swap:
-            cfg["memswap_limit"] = effective_swap
-
-        effective_reservation = self.cgroup_config._calculate_effective_memory_reservation()
-        if effective_reservation:
-            cfg["mem_reservation"] = effective_reservation
-
-        if self.cgroup_config.memory_swappiness is not None:
-            cfg["mem_swappiness"] = self.cgroup_config.memory_swappiness
-
-        # I/O configuration - intelligent mapping
-        # I/O weight: prefer blkio_weight, fallback to converted io_weight
-        if self.cgroup_config.blkio_weight:
-            cfg["blkio_weight"] = self.cgroup_config.blkio_weight
-        elif self.cgroup_config.io_weight:
-            # Convert systemd IOWeight (1-10000) to Docker blkio-weight (10-1000)
-            docker_blkio = max(10, min(1000, int(self.cgroup_config.io_weight / 10)))
-            cfg["blkio_weight"] = docker_blkio
-
-        # Device bandwidth and IOPS limits (direct mapping)
-        if self.cgroup_config.device_read_bps:
-            cfg["device_read_bps"] = [
-                f"{dev}:{bps}" for dev, bps in self.cgroup_config.device_read_bps.items()
-            ]
-        if self.cgroup_config.device_write_bps:
-            cfg["device_write_bps"] = [
-                f"{dev}:{bps}" for dev, bps in self.cgroup_config.device_write_bps.items()
-            ]
-        if self.cgroup_config.device_read_iops:
-            cfg["device_read_iops"] = [
-                f"{dev}:{iops}" for dev, iops in self.cgroup_config.device_read_iops.items()
-            ]
-        if self.cgroup_config.device_write_iops:
-            cfg["device_write_iops"] = [
-                f"{dev}:{iops}" for dev, iops in self.cgroup_config.device_write_iops.items()
-            ]
-
-        # Process limits
-        if self.cgroup_config.pids_limit:
-            cfg["pids_limit"] = self.cgroup_config.pids_limit
-
-        # Security and isolation
-        if self.cgroup_config.oom_score_adj is not None:
-            cfg["oom_score_adj"] = self.cgroup_config.oom_score_adj
-        if self.cgroup_config.read_only_rootfs:
-            cfg["read_only"] = self.cgroup_config.read_only_rootfs
-        if self.cgroup_config.cap_add:
-            cfg["cap_add"] = self.cgroup_config.cap_add
-        if self.cgroup_config.cap_drop:
-            cfg["cap_drop"] = self.cgroup_config.cap_drop
-        if self.cgroup_config.devices:
-            cfg["devices"] = self.cgroup_config.devices
-
-        # Environment and execution settings
-        if self.cgroup_config.environment:
-            env = cfg.get("environment", {})
-            env.update(self.cgroup_config.environment)
-            cfg["environment"] = env
-        if self.cgroup_config.user:
-            cfg["user"] = self.cgroup_config.user
-        if self.cgroup_config.group:
-            cfg["group"] = self.cgroup_config.group
-        if self.cgroup_config.working_dir:
-            cfg["working_dir"] = self.cgroup_config.working_dir
-
-        # Apply timeouts
-        if self.cgroup_config.timeout_stop:
-            cfg["stop_timeout"] = self.cgroup_config.timeout_stop
-
-        return cfg
 
     def to_dict(self, include_none: bool = False) -> dict[str, Any]:
         """Serialize this container to a dictionary.

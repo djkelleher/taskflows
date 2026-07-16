@@ -1,9 +1,41 @@
 import re
 from dataclasses import dataclass
 from numbers import Real
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+# How each CgroupConfig.to_docker_kwargs() key renders as a docker run flag.
+# kinds: value (flag + str), flag (bare flag if truthy), repeat (flag per list
+# item), mapping (flag per key=value), nofile (--ulimit nofile=N:N).
+_DOCKER_CLI_FLAGS: dict[str, tuple[str, str]] = {
+    "cpu_quota": ("--cpu-quota", "value"),
+    "cpu_period": ("--cpu-period", "value"),
+    "cpu_shares": ("--cpu-shares", "value"),
+    "cpuset_cpus": ("--cpuset-cpus", "value"),
+    "mem_limit": ("--memory", "value"),
+    "memswap_limit": ("--memory-swap", "value"),
+    "mem_reservation": ("--memory-reservation", "value"),
+    "mem_swappiness": ("--memory-swappiness", "value"),
+    "blkio_weight": ("--blkio-weight", "value"),
+    "device_read_bps": ("--device-read-bps", "repeat"),
+    "device_write_bps": ("--device-write-bps", "repeat"),
+    "device_read_iops": ("--device-read-iops", "repeat"),
+    "device_write_iops": ("--device-write-iops", "repeat"),
+    "pids_limit": ("--pids-limit", "value"),
+    "nofile_limit": ("--ulimit", "nofile"),
+    "oom_score_adj": ("--oom-score-adj", "value"),
+    "read_only": ("--read-only", "flag"),
+    "cap_add": ("--cap-add", "repeat"),
+    "cap_drop": ("--cap-drop", "repeat"),
+    "devices": ("--device", "repeat"),
+    "device_cgroup_rules": ("--device-cgroup-rule", "repeat"),
+    "environment": ("--env", "mapping"),
+    "user": ("--user", "value"),
+    "group_add": ("--group-add", "repeat"),
+    "working_dir": ("--workdir", "value"),
+    "stop_timeout": ("--stop-timeout", "value"),
+}
 
 _NUMBERED_DIRECTIVE_RE = re.compile(r"^(?P<name>.+)_\d+$")
 
@@ -221,105 +253,115 @@ class CgroupConfig:
                 if value <= 0:
                     raise ValueError(f"{name}[{key!r}] must be positive")
 
-    def to_docker_cli_args(self) -> list[str]:
-        """Convert to Docker CLI arguments."""
-        args = []
+    def to_docker_kwargs(self) -> dict[str, Any]:
+        """Convert to Docker SDK (containers.run) keyword arguments.
+
+        Single source of truth for the cgroup→Docker mapping: the CLI flags
+        (to_docker_cli_args) are a mechanical rendering of this dict via
+        _DOCKER_CLI_FLAGS, so the two code paths cannot drift.
+
+        The insertion order of keys determines CLI flag order.
+        """
+        kwargs: dict[str, Any] = {}
 
         # CPU configuration - intelligent mapping
         if self.cpu_quota:
-            args.extend(["--cpu-quota", str(self.cpu_quota)])
+            kwargs["cpu_quota"] = self.cpu_quota
         if self.cpu_period:
-            args.extend(["--cpu-period", str(self.cpu_period)])
+            kwargs["cpu_period"] = self.cpu_period
 
         # CPU weight: prefer cpu_shares, fallback to converted cpu_weight
         if self.cpu_shares:
-            args.extend(["--cpu-shares", str(self.cpu_shares)])
+            kwargs["cpu_shares"] = self.cpu_shares
         elif self.cpu_weight:
             # Convert systemd weight (1-10000) to Docker shares (~1024 default)
-            docker_shares = int((self.cpu_weight / 100) * 1024)
-            args.extend(["--cpu-shares", str(docker_shares)])
+            kwargs["cpu_shares"] = int((self.cpu_weight / 100) * 1024)
 
         if self.cpuset_cpus:
-            args.extend(["--cpuset-cpus", self.cpuset_cpus])
+            kwargs["cpuset_cpus"] = self.cpuset_cpus
 
         # Memory configuration - use intelligent mapping
-        effective_memory = self._calculate_effective_memory_limit()
-        if effective_memory:
-            args.extend(["--memory", str(effective_memory)])
-
-        effective_swap = self._calculate_effective_swap_limit()
-        if effective_swap:
-            args.extend(["--memory-swap", str(effective_swap)])
-
-        effective_reservation = self._calculate_effective_memory_reservation()
-        if effective_reservation:
-            args.extend(["--memory-reservation", str(effective_reservation)])
-
+        if effective_memory := self._calculate_effective_memory_limit():
+            kwargs["mem_limit"] = effective_memory
+        if effective_swap := self._calculate_effective_swap_limit():
+            kwargs["memswap_limit"] = effective_swap
+        if effective_reservation := self._calculate_effective_memory_reservation():
+            kwargs["mem_reservation"] = effective_reservation
         if self.memory_swappiness is not None:
-            args.extend(["--memory-swappiness", str(self.memory_swappiness)])
+            kwargs["mem_swappiness"] = self.memory_swappiness
 
-        # I/O configuration - intelligent mapping
         # I/O weight: prefer blkio_weight, fallback to converted io_weight
         if self.blkio_weight:
-            args.extend(["--blkio-weight", str(self.blkio_weight)])
+            kwargs["blkio_weight"] = self.blkio_weight
         elif self.io_weight:
             # Convert systemd IOWeight (1-10000) to Docker blkio-weight (10-1000)
-            docker_blkio = max(10, min(1000, int(self.io_weight / 10)))
-            args.extend(["--blkio-weight", str(docker_blkio)])
+            kwargs["blkio_weight"] = max(10, min(1000, int(self.io_weight / 10)))
 
-        # Device bandwidth limits (direct mapping)
-        if self.device_read_bps:
-            for dev, bps in self.device_read_bps.items():
-                args.extend(["--device-read-bps", f"{dev}:{bps}"])
-        if self.device_write_bps:
-            for dev, bps in self.device_write_bps.items():
-                args.extend(["--device-write-bps", f"{dev}:{bps}"])
-        if self.device_read_iops:
-            for dev, iops in self.device_read_iops.items():
-                args.extend(["--device-read-iops", f"{dev}:{iops}"])
-        if self.device_write_iops:
-            for dev, iops in self.device_write_iops.items():
-                args.extend(["--device-write-iops", f"{dev}:{iops}"])
+        # Device bandwidth/IOPS limits (direct mapping)
+        for device_field in (
+            "device_read_bps",
+            "device_write_bps",
+            "device_read_iops",
+            "device_write_iops",
+        ):
+            if limits := getattr(self, device_field):
+                kwargs[device_field] = [f"{dev}:{value}" for dev, value in limits.items()]
 
         # Process limits
         if self.pids_limit:
-            args.extend(["--pids-limit", str(self.pids_limit)])
+            kwargs["pids_limit"] = self.pids_limit
         if self.nofile_limit:
-            args.extend(["--ulimit", f"nofile={self.nofile_limit}:{self.nofile_limit}"])
+            # rendered as a nofile ulimit by both the SDK and CLI paths
+            kwargs["nofile_limit"] = self.nofile_limit
 
         # Security and isolation
         if self.oom_score_adj is not None:
-            args.extend(["--oom-score-adj", str(self.oom_score_adj)])
+            kwargs["oom_score_adj"] = self.oom_score_adj
         if self.read_only_rootfs:
-            args.append("--read-only")
+            kwargs["read_only"] = self.read_only_rootfs
         if self.cap_add:
-            for cap in self.cap_add:
-                args.extend(["--cap-add", cap])
+            kwargs["cap_add"] = list(self.cap_add)
         if self.cap_drop:
-            for cap in self.cap_drop:
-                args.extend(["--cap-drop", cap])
+            kwargs["cap_drop"] = list(self.cap_drop)
         if self.devices:
-            for device in self.devices:
-                args.extend(["--device", device])
+            kwargs["devices"] = list(self.devices)
         if self.device_cgroup_rules:
-            for rule in self.device_cgroup_rules:
-                args.extend(["--device-cgroup-rule", rule])
+            kwargs["device_cgroup_rules"] = list(self.device_cgroup_rules)
 
         # Environment and execution
         if self.environment:
-            for key, value in self.environment.items():
-                args.extend(["--env", f"{key}={value}"])
+            kwargs["environment"] = dict(self.environment)
         if self.user:
-            args.extend(["--user", self.user])
+            kwargs["user"] = self.user
         if self.group:
-            args.extend(["--group-add", self.group])
+            kwargs["group_add"] = [self.group]
         if self.working_dir:
-            args.extend(["--workdir", self.working_dir])
+            kwargs["working_dir"] = self.working_dir
 
         # Timeouts
         if self.timeout_stop:
-            args.extend(["--stop-timeout", str(self.timeout_stop)])
+            kwargs["stop_timeout"] = self.timeout_stop
 
+        return kwargs
+
+    def to_docker_cli_args(self) -> list[str]:
+        """Convert to Docker CLI arguments (rendered from to_docker_kwargs)."""
+        args: list[str] = []
+        for key, value in self.to_docker_kwargs().items():
+            flag, kind = _DOCKER_CLI_FLAGS[key]
+            if kind == "value":
+                args.extend([flag, str(value)])
+            elif kind == "flag":
+                if value:
+                    args.append(flag)
+            elif kind == "repeat":
+                for item in value:
+                    args.extend([flag, str(item)])
+            elif kind == "mapping":
+                for map_key, map_value in value.items():
+                    args.extend([flag, f"{map_key}={map_value}"])
+            elif kind == "nofile":
+                args.extend([flag, f"nofile={value}:{value}"])
         return args
 
     def _calculate_effective_memory_limit(self) -> int | None:

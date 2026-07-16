@@ -1,16 +1,24 @@
 {
+  "cap_drop": [
+    "ALL"
+  ],
   "command": [
     "python",
     "-c",
     "print(1)"
   ],
+  "cpu_period": 100000,
+  "cpu_quota": 50000,
+  "cpuset_cpus": "0,1",
   "environment": {
     "FOO": "bar"
   },
   "image": "python:3.12-slim",
   "init": true,
+  "mem_limit": 1073741824,
   "name": "snap-container",
   "network_mode": "host",
+  "pids_limit": 256,
   "restart_policy": {
     "Name": "no"
   },
