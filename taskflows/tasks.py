@@ -718,7 +718,13 @@ async def _async_task_wrapper(
     """
     import time
 
-    from taskflows.metrics import task_count, task_duration, task_errors, task_retries
+    from taskflows.metrics import get_metrics
+
+    metrics = get_metrics()
+    task_count = metrics.task_count
+    task_duration = metrics.task_duration
+    task_errors = metrics.task_errors
+    task_retries = metrics.task_retries
 
     await task_logger.on_task_start()
     start_time = time.perf_counter()

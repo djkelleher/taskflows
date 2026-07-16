@@ -31,9 +31,12 @@ async def test_prometheus_middleware_uses_monotonic_duration(monkeypatch):
     count_metric = RecordingMetric()
     active_metric = RecordingMetric()
 
-    monkeypatch.setattr(prometheus_middleware, "api_request_duration", duration_metric)
-    monkeypatch.setattr(prometheus_middleware, "api_request_count", count_metric)
-    monkeypatch.setattr(prometheus_middleware, "api_active_requests", active_metric)
+    fake_metrics = SimpleNamespace(
+        api_request_duration=duration_metric,
+        api_request_count=count_metric,
+        api_active_requests=active_metric,
+    )
+    monkeypatch.setattr(prometheus_middleware, "get_metrics", lambda: fake_metrics)
 
     perf_values = iter([10.0, 11.25])
     monkeypatch.setattr(

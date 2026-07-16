@@ -102,13 +102,19 @@ async def test_run_task_rejects_invalid_execution_options():
 @pytest.mark.asyncio
 async def test_run_task_records_duration_with_monotonic_clock(monkeypatch):
     import time
+    from types import SimpleNamespace
 
     from taskflows import metrics
 
     duration_metric = RecordingMetric()
     count_metric = RecordingMetric()
-    monkeypatch.setattr(metrics, "task_duration", duration_metric)
-    monkeypatch.setattr(metrics, "task_count", count_metric)
+    fake_metrics = SimpleNamespace(
+        task_duration=duration_metric,
+        task_count=count_metric,
+        task_errors=RecordingMetric(),
+        task_retries=RecordingMetric(),
+    )
+    monkeypatch.setattr(metrics, "get_metrics", lambda: fake_metrics)
 
     perf_values = iter([5.0, 7.5])
     monkeypatch.setattr(time, "perf_counter", lambda: next(perf_values))

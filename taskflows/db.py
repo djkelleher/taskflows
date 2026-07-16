@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from .common import logger, secure_write_text, services_data_dir
+from .common import ensure_data_dir, logger, secure_write_text, services_data_dir
 
 # JSON file for server registry (replaces servers_table)
 _servers_file = services_data_dir / "servers.json"
@@ -15,7 +15,7 @@ _servers_lock = threading.RLock()
 @contextmanager
 def _locked_servers(write: bool = False):
     lock_file_path = _servers_file.with_suffix(_servers_file.suffix + ".lock")
-    lock_file_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_data_dir()
     with _servers_lock, open(lock_file_path, "a+") as lock_file:
         try:
             import fcntl

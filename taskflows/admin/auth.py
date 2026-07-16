@@ -16,7 +16,7 @@ except ImportError as e:
 from pydantic import BaseModel
 
 from taskflows.admin.security import _locked_json_store
-from taskflows.common import logger, secure_write_text, services_data_dir
+from taskflows.common import ensure_data_dir, logger, secure_write_text, services_data_dir
 
 # Environment variable names for credentials
 ENV_ADMIN_USER = "TF_ADMIN_USER"
@@ -118,6 +118,7 @@ def load_ui_config() -> UIConfig:
 
 def save_ui_config(config: UIConfig) -> None:
     """Save UI configuration to file."""
+    ensure_data_dir()
     secure_write_text(ui_config_file, json.dumps(config.model_dump(), indent=2, default=str))
 
 
@@ -132,6 +133,7 @@ def load_users() -> dict[str, User]:
 def save_users(users: dict[str, User]) -> None:
     """Save users to file."""
     users_data = {username: user.model_dump(mode="json") for username, user in users.items()}
+    ensure_data_dir()
     secure_write_text(users_file, json.dumps(users_data, indent=2, default=str))
 
 

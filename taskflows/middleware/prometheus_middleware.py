@@ -5,11 +5,7 @@ import time
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from taskflows.metrics import (
-    api_active_requests,
-    api_request_count,
-    api_request_duration,
-)
+from taskflows.metrics import get_metrics
 
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
@@ -20,6 +16,11 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
         # Skip metrics endpoint to avoid recursion
         if request.url.path == "/metrics":
             return await call_next(request)
+
+        metrics = get_metrics()
+        api_active_requests = metrics.api_active_requests
+        api_request_count = metrics.api_request_count
+        api_request_duration = metrics.api_request_duration
 
         method = request.method
         endpoint = request.url.path

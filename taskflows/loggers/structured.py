@@ -171,14 +171,28 @@ _default_processors = [
     ),
 ]
 
-# Initialize with default config
-structlog.configure(
-    processors=_default_processors,
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-    cache_logger_on_first_use=True,
-)
+_default_config_applied = False
+
+
+def _ensure_default_config() -> None:
+    """Apply the default structlog config on first logger use.
+
+    Deferred so that importing taskflows does not reconfigure structlog for
+    the embedding application; an explicit structlog.configure (e.g. from
+    configure_loki_logging) takes precedence and is never overwritten.
+    """
+    global _default_config_applied
+    if _default_config_applied or structlog.is_configured():
+        _default_config_applied = True
+        return
+    structlog.configure(
+        processors=_default_processors,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        cache_logger_on_first_use=True,
+    )
+    _default_config_applied = True
 
 
 def get_struct_logger(
@@ -198,6 +212,8 @@ def get_struct_logger(
     Returns:
         Bound structured logger
     """
+    _ensure_default_config()
+
     # Set context variables if provided
     if request_id:
         request_id_var.set(request_id)

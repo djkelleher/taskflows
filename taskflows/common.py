@@ -13,29 +13,33 @@ from textdistance import lcsseq
 
 from .loggers import get_logger
 
-# Set default logging configuration if not already set
-# This ensures logs go to both terminal and file by default
-# CLI will override these to disable terminal output
-_default_data_dir = Path.home() / ".taskflows" / "data"
-if "TASKFLOWS_FILE_DIR" not in os.environ:
-    os.environ["TASKFLOWS_FILE_DIR"] = str(_default_data_dir / "logs")
-if "TASKFLOWS_NO_TERMINAL" not in os.environ:
-    os.environ["TASKFLOWS_NO_TERMINAL"] = "0"  # Enable terminal by default
-
-# Initialize logger - it will use environment variables set above
+# Logging is configured entirely from environment variables (TASKFLOWS_LOG_LEVEL,
+# TASKFLOWS_NO_TERMINAL, TASKFLOWS_FILE_DIR, or their LOGGERS_ fallbacks). No log
+# files are written unless TASKFLOWS_FILE_DIR is set.
 logger = get_logger("taskflows")
 
 _SYSTEMD_FILE_PREFIX = "taskflows-"
 
+_default_data_dir = Path.home() / ".taskflows" / "data"
+
 # Allow configuring data directory via environment variable for testing
 services_data_dir = Path(os.environ.get("TASKFLOWS_DATA_DIR", str(_default_data_dir)))
-services_data_dir.mkdir(parents=True, exist_ok=True)
-try:
-    os.chmod(services_data_dir, stat.S_IRWXU)
-except OSError as exc:
-    logger.warning(f"Could not set secure permissions on {services_data_dir}: {exc}")
 
 systemd_dir = Path.home().joinpath(".config", "systemd", "user")
+
+
+def ensure_data_dir() -> Path:
+    """Create the taskflows data directory with owner-only permissions.
+
+    Called by code that writes state files; importing taskflows performs no
+    filesystem writes.
+    """
+    services_data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(services_data_dir, stat.S_IRWXU)
+    except OSError as exc:
+        logger.warning(f"Could not set secure permissions on {services_data_dir}: {exc}")
+    return services_data_dir
 
 
 class Config(BaseSettings):

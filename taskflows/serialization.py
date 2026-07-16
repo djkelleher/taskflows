@@ -467,6 +467,7 @@ def get_registered_type(name: str) -> type | None:
     Returns:
         The registered class, or None if not found.
     """
+    _ensure_types_registered()
     return _TYPE_REGISTRY.get(name)
 
 
@@ -772,6 +773,7 @@ def to_dict(obj: Any, include_none: bool = False) -> dict[str, Any]:
     Returns:
         A dictionary representation of the object.
     """
+    _ensure_types_registered()
     return _serialize_value(obj, include_none)
 
 
@@ -785,6 +787,7 @@ def from_dict(data: dict[str, Any], cls: type[T]) -> T:
     Returns:
         An instance of the specified class.
     """
+    _ensure_types_registered()
     if not isinstance(data, dict):
         raise TypeError(f"Expected dict, got {type(data).__name__}")
 
@@ -952,8 +955,20 @@ def deserialize_from_file(
 
 
 # Register all taskflows types for polymorphic deserialization
-def _register_taskflows_types():
-    """Register all taskflows types in the type registry."""
+_types_registered = False
+
+
+def _ensure_types_registered():
+    """Register all taskflows types in the type registry on first use.
+
+    Deferred from import time: the imports below pull in the full
+    service/docker/dashboard module graph, which must not happen just because
+    something imported taskflows.serialization.
+    """
+    global _types_registered
+    if _types_registered:
+        return
+    _types_registered = True
     # Import here to avoid circular imports
     from taskflows.constraints import (
         CgroupConfig,
@@ -1010,7 +1025,6 @@ def _register_taskflows_types():
 
 
 # Register types on import
-_register_taskflows_types()
 
 
 def load_services_from_yaml(path: str | Path) -> list["Service"]:

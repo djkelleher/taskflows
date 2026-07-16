@@ -1587,8 +1587,9 @@ def is_start_service(unit_file: str) -> bool:
 
 
 async def _start_service(files: Sequence[str]):
-    from taskflows.metrics import service_state
+    from taskflows.metrics import get_metrics
 
+    service_state = get_metrics().service_state
     mgr = await systemd_manager()
     for sf in files:
         sf = os.path.basename(sf)
@@ -1602,8 +1603,9 @@ async def _start_service(files: Sequence[str]):
 
 
 async def _stop_service(files: Sequence[str]):
-    from taskflows.metrics import service_state
+    from taskflows.metrics import get_metrics
 
+    service_state = get_metrics().service_state
     mgr = await systemd_manager()
     for sf in files:
         sf = os.path.basename(sf)
@@ -1622,7 +1624,9 @@ async def _stop_service(files: Sequence[str]):
 
 
 async def _restart_service(files: Sequence[str]):
-    from taskflows.metrics import service_restarts
+    from taskflows.metrics import get_metrics
+
+    service_restarts = get_metrics().service_restarts
 
     units = [os.path.basename(f) for f in files]
     # only restart main service units

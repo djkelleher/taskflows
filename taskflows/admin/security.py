@@ -8,7 +8,7 @@ from contextlib import contextmanager
 
 from pydantic import BaseModel
 
-from taskflows.common import secure_write_text, services_data_dir
+from taskflows.common import ensure_data_dir, secure_write_text, services_data_dir
 
 _hmac_nonce_lock = threading.Lock()
 _csrf_token_lock = threading.Lock()
@@ -65,7 +65,7 @@ config_file = services_data_dir / "security.json"
 def _locked_json_store(path, process_lock, default_factory=dict):
     """Load/update a JSON store while holding thread and process locks."""
     lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_data_dir()
     with process_lock, open(lock_path, "a+") as lock_file:
         try:
             import fcntl
@@ -107,6 +107,7 @@ security_config = load_security_config()
 
 def save_security_config(config: SecurityConfig):
     """Save security configuration to file."""
+    ensure_data_dir()
     secure_write_text(config_file, json.dumps(config.model_dump()))
 
 

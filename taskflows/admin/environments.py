@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from taskflows.common import logger, secure_write_text, services_data_dir
+from taskflows.common import ensure_data_dir, logger, secure_write_text, services_data_dir
 from taskflows.docker import DockerContainer
 from taskflows.serialization import deserialize, from_dict, serialize, to_dict
 from taskflows.service import Venv
@@ -30,7 +30,7 @@ _ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]$|^[A-
 @contextmanager
 def _locked_environments(write: bool = False):
     lock_path = environments_file.with_suffix(environments_file.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_data_dir()
     with _environments_lock, open(lock_path, "a+") as lock_file:
         try:
             import fcntl
