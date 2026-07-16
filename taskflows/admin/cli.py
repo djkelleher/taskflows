@@ -228,32 +228,6 @@ def generate_secret():
     click.echo(generate_jwt_secret())
 
 
-@cli.command
-@click.option(
-    "-l",
-    "--limit",
-    type=int,
-    default=3,
-    help="Number of most recent task runs to show.",
-)
-@click.option("-m", "--match", help="Only show history for this task name or task name pattern.")
-@click.option(
-    "--server",
-    "-s",
-    multiple=True,
-    help="Server(s) to query. Can be specified multiple times. If not specified, queries all registered servers.",
-)
-@async_entrypoint(blocking=True)
-async def history(limit: int, match: str | None = None, server: tuple = ()):
-    """Show task run history from specified servers."""
-    kwargs = {"limit": limit}
-    if match:
-        kwargs["match"] = match
-
-    results = await execute_command_on_servers("history", servers=server, **kwargs)
-    _print_results(results)
-
-
 @cli.command(name="list")
 @click.argument("match", required=False)
 @click.option(

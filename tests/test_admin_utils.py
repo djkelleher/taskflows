@@ -1,10 +1,9 @@
 from unittest.mock import Mock
 
-import pytest
 import requests
 
 from taskflows.admin import utils
-from taskflows.admin.core import _API_RESPONSE_MAX_CHARS, call_api, task_history
+from taskflows.admin.core import _API_RESPONSE_MAX_CHARS, call_api
 
 
 def test_get_public_ipv4_skips_invalid_responses(monkeypatch):
@@ -61,10 +60,3 @@ def test_call_api_returns_dict_for_long_non_json_http_error(monkeypatch):
     assert result["endpoint"] == "/health"
     assert "response_body" in result
     assert "truncated 20 chars" in result["response_body"]
-
-
-@pytest.mark.asyncio
-async def test_task_history_escapes_example_logql_match():
-    result = await task_history(match='worker.*"prod\\job', as_json=True)
-
-    assert r'{service_name=~".*worker\\.\\*\"prod\\\\job.*"}' in result["message"]

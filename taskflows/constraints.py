@@ -405,12 +405,6 @@ class CgroupConfig:
 
         return None
 
-    def _parse_device_bandwidth_limits(self) -> dict[str, dict[str, int]]:
-        """Parse systemd IOReadBandwidthMax/IOWriteBandwidthMax format."""
-        # This would be used if we had systemd directives to parse
-        # For now, return empty dict as we're generating, not parsing
-        return {}
-
     def _calculate_capability_lists(self) -> tuple[list[str], list[str]]:
         """Calculate cap_add/cap_drop lists from current capabilities."""
         cap_add = list(self.cap_add) if self.cap_add else []

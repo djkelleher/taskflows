@@ -798,16 +798,24 @@ def task(
 
         @wraps(func)
         def sync_wrapper(*args, **kwargs):
-            # Smart wrapper that works with uvloop and existing event loops
+            # A sync-decorated task always returns the task's result. Calling
+            # it from a running event loop would require returning an
+            # awaitable instead, silently changing the return type — refuse
+            # and point callers at the .aio() form.
             try:
-                # Check if we're already in an async context
                 asyncio.get_running_loop()
-                # Return a coroutine/task that can be awaited
-                return asyncio.create_task(async_wrapper(*args, **kwargs))
             except RuntimeError:
                 # No running loop, use the portal
                 portal = _runtime_manager.get_portal()
                 return portal.call(partial(async_wrapper, *args, **kwargs))
+            raise RuntimeError(
+                f"Sync task {task_name!r} was called from a running event loop; "
+                f"await {func.__name__}.aio(...) instead."
+            )
+
+        # Both wrappers expose the awaitable form for use from async code
+        async_wrapper.aio = async_wrapper
+        sync_wrapper.aio = async_wrapper
 
         # Return the appropriate wrapper based on whether the function is async
         return async_wrapper if func_is_async else sync_wrapper

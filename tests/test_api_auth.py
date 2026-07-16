@@ -81,7 +81,6 @@ class TestAPIAuthentication(unittest.TestCase):
         endpoints = [
             ("GET", "/list-servers"),
             ("GET", "/metrics"),
-            ("GET", "/history"),
             ("GET", "/list"),
             ("GET", "/status"),
             ("GET", "/logs/test-service"),
@@ -123,11 +122,6 @@ class TestAPIAuthentication(unittest.TestCase):
                 "taskflows.admin.api.service_status",
                 new_callable=AsyncMock,
                 return_value={"services": [], "hostname": "test"},
-            ),
-            patch(
-                "taskflows.admin.api.task_history",
-                new_callable=AsyncMock,
-                return_value={"history": [], "hostname": "test"},
             ),
             patch(
                 "taskflows.admin.api.logs",
@@ -200,7 +194,6 @@ class TestAPIAuthentication(unittest.TestCase):
         test_cases = [
             ("GET", "/list-servers", None, 200),
             ("GET", "/metrics", None, 200),
-            ("GET", "/history?limit=1", None, 200),
             ("GET", "/list", None, 200),
             ("GET", "/status", None, 200),
             ("GET", "/logs/test-service", None, 200),

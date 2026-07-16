@@ -40,7 +40,6 @@ from taskflows.admin.core import (
     show,
     start,
     stop,
-    task_history,
     upsert_server,
 )
 from taskflows.admin.core import (
@@ -517,14 +516,6 @@ async def metrics_endpoint():
 @app.get("/list-servers")
 async def list_servers_endpoint():
     return await list_servers(as_json=True)
-
-
-@app.get("/history")
-async def task_history_endpoint(
-    limit: int = Query(3),
-    match: str | None = Query(None),
-):
-    return await task_history(limit=limit, match=match, as_json=True)
 
 
 @app.get("/list")

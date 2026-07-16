@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import contextlib
 import hashlib
 import hmac
@@ -159,33 +158,6 @@ def _write_signed_pickle(pickle_path: Path, pickle_data: bytes) -> None:
     logger.info(f"AUDIT: Wrote signed pickle file: {pickle_path}")
 
 
-def _migrate_unsigned_pickle(pickle_path: Path) -> None:
-    """Migrate an unsigned pickle file to signed format.
-
-    This helper is intentionally disabled by default because validating an
-    unsigned pickle requires deserializing it, which can execute arbitrary code.
-    """
-    if os.getenv("TASKFLOWS_ALLOW_UNSIGNED_PICKLE_MIGRATION") != "1":
-        raise ValueError(
-            "Unsigned pickle migration is disabled. Recreate the service, or set "
-            "TASKFLOWS_ALLOW_UNSIGNED_PICKLE_MIGRATION=1 only for a trusted, "
-            "one-time local migration."
-        )
-
-    logger.warning(f"MIGRATION: Found unsigned pickle file: {pickle_path}")
-    pickle_data = pickle_path.read_bytes()
-
-    try:
-        cloudpickle.loads(pickle_data)
-        logger.info("MIGRATION: Successfully validated unsigned pickle")
-    except Exception as e:
-        logger.error(f"MIGRATION: Failed to load unsigned pickle: {e}")
-        raise ValueError(f"Cannot migrate invalid pickle file: {pickle_path}") from e
-
-    _write_signed_pickle(pickle_path, pickle_data)
-    logger.info("MIGRATION: Successfully migrated pickle file to signed format")
-
-
 def _read_signed_pickle(pickle_path: Path) -> bytes:
     """Read and verify pickle data with HMAC signature.
 
@@ -215,44 +187,6 @@ def _read_signed_pickle(pickle_path: Path) -> bytes:
 
     logger.info(f"AUDIT: Verified and loading pickle file: {pickle_path}")
     return pickle_data
-
-
-@click.command()
-@click.argument("b64_pickle_func")
-def _run_function(b64_pickle_func: str):
-    """Run a function from base64-encoded pickle.
-
-    SECURITY NOTE: This loads pickle from command line argument without signature
-    verification. Only use with trusted input. Audit logging is enabled.
-    """
-    if os.getenv("TASKFLOWS_ALLOW_UNSIGNED_PICKLE_CLI") != "1":
-        raise click.ClickException(
-            "Unsigned pickle CLI execution is disabled. Use signed pickle "
-            "service entrypoints, or set TASKFLOWS_ALLOW_UNSIGNED_PICKLE_CLI=1 "
-            "only for trusted local migration/debugging."
-        )
-    logger.warning(
-        f"AUDIT: Loading pickle from command line argument (length: {len(b64_pickle_func)})"
-    )
-    logger.warning(
-        "SECURITY: This operation trusts the caller - ensure input is from trusted source"
-    )
-
-    try:
-        func = cloudpickle.loads(base64.b64decode(b64_pickle_func))
-        logger.info(
-            f"AUDIT: Successfully loaded function: {func.__name__ if hasattr(func, '__name__') else 'unknown'}"
-        )
-
-        if inspect.iscoroutinefunction(func):
-            asyncio.run(func())
-        else:
-            func()
-
-        logger.info("AUDIT: Function execution completed successfully")
-    except Exception as e:
-        logger.error(f"AUDIT: Function execution failed: {e}", exc_info=True)
-        raise
 
 
 class PickledFunction:

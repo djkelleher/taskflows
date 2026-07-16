@@ -405,3 +405,25 @@ async def test_async_retry_count_behavior(retries, expected_attempts):
     assert attempt_count == expected_attempts, (
         f"Expected {expected_attempts} attempts (retries={retries}), but got {attempt_count}"
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_task_raises_in_running_loop_and_exposes_aio():
+    """Sync-decorated tasks refuse ambiguous calls from async code; .aio works."""
+
+    @task(name="sync_in_loop")
+    def compute():
+        return 21 * 2
+
+    with pytest.raises(RuntimeError, match=r"\.aio"):
+        compute()
+
+    assert await compute.aio() == 42
+
+
+def test_sync_task_returns_result_directly():
+    @task(name="sync_direct")
+    def compute():
+        return "plain-result"
+
+    assert compute() == "plain-result"

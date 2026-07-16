@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 import socket
 from collections import defaultdict
 from collections.abc import Sequence
@@ -20,7 +19,6 @@ from taskflows.common import (
     config,
     load_service_files,
     logger,
-    logql_string,
     redact_sensitive,
     sort_service_names,
 )
@@ -130,50 +128,6 @@ async def list_servers() -> Table:
     servers = get_servers()
     # Convert to expected format with 'address' field
     return [{"address": f"{s['public_ipv4']}:7777", "hostname": s["hostname"]} for s in servers]
-
-
-async def task_history(
-    host: str | None = None,
-    limit: int = 3,
-    match: str | None = None,
-    as_json: bool = False,
-) -> Table:
-    """DEPRECATED: Task history is now available via Loki log queries.
-
-    This function previously queried the database for task run history.
-    Use Grafana/Loki to query task logs instead:
-    - Query: {service_name=~".*task_name.*"}
-    - Filter by time range to see historical runs
-
-    Args:
-        host (str): Host address of the admin API server. If None, calls local function.
-        limit (int): Number of recent task runs to show
-        match (str): Optional pattern to filter task names
-
-    Returns:
-        Table: Table with deprecation message
-    """
-    grafana_url = config.grafana.rstrip("/")
-    if not grafana_url.startswith("http"):
-        grafana_url = f"http://{grafana_url}"
-
-    example_pattern = logql_string(f".*{re.escape(match or 'your_task')}.*")
-    message = (
-        f"Task history is now available via Loki log queries. "
-        f"Visit {grafana_url}/explore to query task logs using LogQL. "
-        f"Example query: {{service_name=~{example_pattern}}}"
-    )
-
-    if as_json:
-        return with_hostname(
-            {
-                "history": [],
-                "message": message,
-                "grafana_url": f"{grafana_url}/explore",
-            }
-        )
-
-    return Table([{"Info": message}], title="Task History - Use Loki")
 
 
 async def list_services(
@@ -1010,7 +964,6 @@ async def execute_command_on_servers(command: str, servers=None, **kwargs) -> di
     # Map commands to client functions
     command_map = {
         "health": health_check,
-        "history": task_history,
         "list": list_services,
         "status": status,
         "logs": logs,
