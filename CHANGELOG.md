@@ -30,6 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TASKFLOWS_API_ENV` as an opt-in conda/mamba environment override.
 - The CLI debug log path moved from `/opt/taskflows/data/logs` to
   `~/.taskflows/data/logs`.
+- **Breaking:** importing taskflows no longer creates `~/.taskflows`, mutates
+  environment variables, registers Prometheus collectors, or configures
+  structlog. No log files are written unless `TASKFLOWS_FILE_DIR` is set.
+  `taskflows.metrics` now exposes a `get_metrics()` factory instead of
+  module-level collectors.
+- **Breaking:** the top-level namespace is now lazy (PEP 562) and intentional;
+  Grafana `Dashboard`/logs-panel types must be imported from
+  `taskflows.dashboard` (requires the `grafana` extra).
+- Alert config moved to `taskflows.alerts` (`from taskflows import Alerts`
+  still works). `Alerts.send_to` accepts any msgflows `MsgDst` destination
+  instead of a hardcoded set of three. Alert sending is now best-effort — a
+  failing alert send is logged and never fails the task — and Grafana/Loki
+  log links are only embedded when Grafana is actually configured
+  (`TASKFLOWS_GRAFANA`, `TASKFLOWS_LOKI_URL`, or an API key), so alerts no
+  longer contain dead localhost links by default.
 
 ### Removed
 - Committed personal artifacts (`data/`, `.codigote/`, coverage files).

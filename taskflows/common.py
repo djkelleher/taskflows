@@ -59,6 +59,18 @@ class Config(BaseSettings):
 config = Config()
 
 
+def grafana_configured() -> bool:
+    """True when Grafana/Loki has been explicitly configured.
+
+    Used to decide whether alerts should include Grafana Explore log URLs;
+    the localhost defaults alone don't count as configured (they would
+    produce dead links on machines without the observability stack).
+    """
+    if config.grafana_api_key:
+        return True
+    return any(key.upper() in ("TASKFLOWS_GRAFANA", "TASKFLOWS_LOKI_URL") for key in os.environ)
+
+
 def secure_write_text(
     path: Path,
     content: str,

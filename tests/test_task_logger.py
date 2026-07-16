@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 import pytest
-from msgflows import MsgDst
+from msgflows import MsgDst, SlackChannel  # noqa: F401
 
 from taskflows.tasks import (
     Alerts,
@@ -167,13 +167,14 @@ async def test_task_logger_on_task_finish_with_multiple_errors():
 
 
 @pytest.mark.asyncio
-@patch("taskflows.tasks.send_alert")
-async def test_task_logger_error_alert_includes_loki_url(mock_send_alert):
-    """Test that error alerts include Loki URL."""
+@patch("taskflows.alerts.send_alert")
+async def test_task_logger_error_alert_includes_loki_url(mock_send_alert, monkeypatch):
+    """Test that error alerts include Loki URL when Grafana is configured."""
+    monkeypatch.setattr("taskflows.common.config.grafana_api_key", "test-key")
     mock_send_alert.return_value = None
 
     # Create a mock MsgDst
-    mock_dst = MagicMock(spec=MsgDst)
+    mock_dst = MagicMock(spec=SlackChannel)
     alerts = [Alerts(send_to=mock_dst, send_on=["error"])]
 
     task_logger = TaskLogger(
@@ -206,13 +207,14 @@ async def test_task_logger_error_alert_includes_loki_url(mock_send_alert):
 
 
 @pytest.mark.asyncio
-@patch("taskflows.tasks.send_alert")
-async def test_task_logger_finish_alert_includes_loki_url(mock_send_alert):
-    """Test that finish alerts include Loki URL."""
+@patch("taskflows.alerts.send_alert")
+async def test_task_logger_finish_alert_includes_loki_url(mock_send_alert, monkeypatch):
+    """Test that finish alerts include Loki URL when Grafana is configured."""
+    monkeypatch.setattr("taskflows.common.config.grafana_api_key", "test-key")
     mock_send_alert.return_value = None
 
     # Create a mock MsgDst
-    mock_dst = MagicMock(spec=MsgDst)
+    mock_dst = MagicMock(spec=SlackChannel)
     alerts = [Alerts(send_to=mock_dst, send_on=["finish"])]
 
     task_logger = TaskLogger(
@@ -336,3 +338,41 @@ async def test_timed_sync_task_preserves_task_context():
 
     assert isinstance(task_id, str)
     assert task_id
+
+
+@pytest.mark.asyncio
+@patch("taskflows.alerts.send_alert")
+async def test_alert_urls_omitted_without_grafana(mock_send_alert):
+    """Without Grafana configured, alerts must not embed dead localhost links."""
+    mock_send_alert.return_value = None
+    mock_dst = MagicMock(spec=SlackChannel)
+    task_logger = TaskLogger(
+        name="test_task",
+        required=False,
+        alerts=[Alerts(send_to=mock_dst, send_on=["finish"])],
+    )
+    await task_logger.on_task_start()
+    await task_logger.on_task_finish(success=True, retries=0)
+
+    components = mock_send_alert.call_args.kwargs["content"]
+    assert not any("Loki" in str(getattr(c, "content", "")) for c in components)
+
+
+@pytest.mark.asyncio
+@patch("taskflows.alerts.send_alert")
+async def test_alert_failure_does_not_fail_task(mock_send_alert):
+    """A failing alert send is logged, not raised."""
+    mock_send_alert.side_effect = RuntimeError("slack is down")
+    mock_dst = MagicMock(spec=SlackChannel)
+    task_logger = TaskLogger(
+        name="test_task",
+        required=False,
+        alerts=[Alerts(send_to=mock_dst, send_on=["start", "finish"])],
+    )
+    await task_logger.on_task_start()
+    await task_logger.on_task_finish(success=True, retries=0)
+
+
+def test_alerts_rejects_non_msgdst():
+    with pytest.raises(TypeError, match="MsgDst"):
+        Alerts(send_to="not-a-destination")

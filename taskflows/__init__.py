@@ -8,8 +8,8 @@ dashboard types live in `taskflows.dashboard` (requires the `grafana` extra).
 from typing import TYPE_CHECKING
 
 _SYMBOL_MODULES = {
-    # tasks
-    "Alerts": "tasks",
+    # tasks + alerts
+    "Alerts": "alerts",
     "get_current_task_id": "tasks",
     "run_task": "tasks",
     "task": "tasks",
@@ -63,6 +63,7 @@ def __dir__():
 
 
 if TYPE_CHECKING:
+    from .alerts import Alerts
     from .constraints import (
         CgroupConfig,
         CPUPressure,
@@ -78,4 +79,4 @@ if TYPE_CHECKING:
     from .schedule import Calendar, Periodic
     from .serialization import load_services_from_yaml, save_services_to_yaml
     from .service import RestartPolicy, Service, ServiceRegistry, Venv
-    from .tasks import Alerts, get_current_task_id, run_task, task
+    from .tasks import get_current_task_id, run_task, task

@@ -12,33 +12,23 @@ from datetime import UTC, datetime, timedelta
 from functools import partial, wraps
 from logging import Logger
 from multiprocessing.context import BaseContext
-from typing import Any, Literal, Optional
-from unittest.mock import Mock
+from typing import Any, Literal
 from urllib.parse import urlencode
 
 import anyio
 import cloudpickle
 import structlog.contextvars
 from anyio.from_thread import BlockingPortal
-from msgflows import (
-    ContentType,
-    DiscordChannel,
-    EmailAddrs,
-    Emoji,
-    FontSize,
-    MsgDst,
-    SlackChannel,
-    Text,
-    send_alert,
-)
-from pydantic import BaseModel
+from msgflows import MsgDst
 
-from .common import config, logql_string
+from .alerts import Alerts, normalize_alerts
+from .alerts import send_error_alert as _send_error_alert
+from .alerts import send_finish_alert as _send_finish_alert
+from .alerts import send_start_alert as _send_start_alert
+from .common import config, grafana_configured, logql_string
 from .common import logger as default_logger
 from .loggers import clear_request_context, generate_request_id, set_request_context
 from .loggers.structured import request_id_var, trace_id_var
-
-TaskEvent = Literal["start", "error", "finish"]
 
 # Context variable for current task_id
 _current_task_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -462,36 +452,8 @@ async def _run_sync_with_hard_timeout(
         parent_conn.close()
 
 
-class Alerts(BaseModel):
-    # where to send the alerts (e.g. email, slack, etc.)
-    send_to: Any
-    # when to send the alerts (start, error, finish)
-    send_on: Sequence[TaskEvent] | TaskEvent = ["start", "error", "finish"]
-
-    def model_post_init(self, __context=None) -> None:
-        if not isinstance(self.send_to, (list, tuple)):
-            self.send_to = [self.send_to]
-        valid_destination_types = (EmailAddrs, SlackChannel, DiscordChannel)
-        for destination in self.send_to:
-            is_test_double = isinstance(destination, Mock)
-            if not isinstance(destination, valid_destination_types) and not is_test_double:
-                raise TypeError(
-                    "send_to entries must be EmailAddrs, SlackChannel, "
-                    f"or DiscordChannel instances, got {type(destination).__name__}"
-                )
-        if isinstance(self.send_on, str):
-            self.send_on = [self.send_on]
-
-
-def _normalize_alerts(
-    alerts: Optional["Alerts | MsgDst | Sequence[Alerts | MsgDst]"],
-) -> list[Alerts] | None:
-    """Normalize alert configuration to a list of Alerts objects."""
-    if not alerts:
-        return None
-    if isinstance(alerts, (Alerts, EmailAddrs, SlackChannel, DiscordChannel)):
-        alerts = [alerts]
-    return [a if isinstance(a, Alerts) else Alerts(send_to=a) for a in alerts]
+# Backwards-compatible alias; alert config now lives in taskflows.alerts
+_normalize_alerts = normalize_alerts
 
 
 def _validate_task_options(retries: int, timeout: float | None) -> None:
@@ -546,14 +508,7 @@ class TaskLogger:
 
         # if there are any start alerts configured, send them
         if send_to := self._event_alerts("start"):
-            components = [
-                Text(
-                    f"{Emoji.blue_circle} Starting: {self.name}",
-                    font_size=FontSize.LARGE,
-                    level=ContentType.IMPORTANT,
-                )
-            ]
-            await send_alert(content=components, send_to=send_to)
+            await _send_start_alert(name=self.name, send_to=send_to)
 
     async def on_task_error(self, error: Exception):
         """
@@ -565,33 +520,24 @@ class TaskLogger:
         # 1. add the error to the list of errors encountered by the task
         self.errors.append(error)
 
-        # 2. if there are any error alerts configured, send them with Loki URL
+        # 2. if there are any error alerts configured, send them (with a Loki
+        # log URL when Grafana is actually configured)
         if send_to := self._event_alerts("error"):
-            subject = f"{type(error).__name__} Error executing task {self.name}"
-            error_message = f"{Emoji.red_circle} {subject}: {error}"
-
-            # Build Loki URL for error logs
-            loki_url = build_loki_query_url(
-                task_name=self.name,
-                start_time=self.start_time,
-                end_time=datetime.now(UTC),
-                error_only=True,
+            logs_url = None
+            if grafana_configured():
+                logs_url = build_loki_query_url(
+                    task_name=self.name,
+                    start_time=self.start_time,
+                    end_time=datetime.now(UTC),
+                    error_only=True,
+                )
+            await _send_error_alert(
+                name=self.name,
+                error=error,
+                send_to=send_to,
+                logs_url=logs_url,
+                error_msg_max_length=self.error_msg_max_length,
             )
-
-            components = [
-                Text(
-                    error_message,
-                    font_size=FontSize.LARGE,
-                    level=ContentType.ERROR,
-                    max_length=self.error_msg_max_length,
-                ),
-                Text(
-                    f"View error logs in Loki: {loki_url}",
-                    font_size=FontSize.MEDIUM,
-                    level=ContentType.INFO,
-                ),
-            ]
-            await send_alert(content=components, send_to=send_to, subject=subject)
 
     async def on_task_finish(
         self,
@@ -613,60 +559,25 @@ class TaskLogger:
 
             # if there are any finish alerts configured, send them
             if send_to := self._event_alerts("finish"):
-                components = [
-                    Text(
-                        f"{Emoji.green_circle if success else Emoji.red_circle} Finished: {self.name} | {self.start_time} - {finish_time} ({finish_time - self.start_time})",
-                        font_size=FontSize.LARGE,
-                        level=(ContentType.IMPORTANT if success else ContentType.ERROR),
+                logs_url = None
+                if grafana_configured():
+                    logs_url = build_loki_query_url(
+                        task_name=self.name,
+                        start_time=self.start_time,
+                        end_time=finish_time,
+                        error_only=False,
                     )
-                ]
-
-                if return_value is not None:
-                    components.append(
-                        Text(
-                            f"Result: {return_value}",
-                            font_size=FontSize.MEDIUM,
-                            level=ContentType.IMPORTANT,
-                        )
-                    )
-
-                # Build Loki URL for all logs during task execution
-                loki_url = build_loki_query_url(
-                    task_name=self.name,
+                await _send_finish_alert(
+                    name=self.name,
+                    send_to=send_to,
+                    success=success,
                     start_time=self.start_time,
-                    end_time=finish_time,
-                    error_only=False,
+                    finish_time=finish_time,
+                    return_value=return_value,
+                    errors=self.errors,
+                    logs_url=logs_url,
+                    error_msg_max_length=self.error_msg_max_length,
                 )
-
-                if self.errors:
-                    components.append(
-                        Text(
-                            f"ERRORS{Emoji.red_exclamation}",
-                            font_size=FontSize.LARGE,
-                            level=ContentType.ERROR,
-                        )
-                    )
-                    for e in self.errors:
-                        error_text = f"{type(e).__name__}: {e}"
-                        components.append(
-                            Text(
-                                error_text,
-                                font_size=FontSize.MEDIUM,
-                                level=ContentType.INFO,
-                                max_length=self.error_msg_max_length,
-                            )
-                        )
-
-                # Add Loki URL for viewing logs
-                components.append(
-                    Text(
-                        f"View logs in Loki: {loki_url}",
-                        font_size=FontSize.MEDIUM,
-                        level=ContentType.INFO,
-                    )
-                )
-
-                await send_alert(content=components, send_to=send_to)
 
             # if there were any errors and the task is required, raise an error
             if self.errors and self.required:
