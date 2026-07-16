@@ -183,3 +183,27 @@ def test_docker_cli_command(container, snapshot):
 
 def test_docker_sdk_params(container, snapshot):
     snapshot("docker_sdk_params.json", _normalize_docker_params(container._params()) + "\n")
+
+
+def test_docker_log_driver_opt_in(container):
+    """Log driver is off by default and opt-in per container or via Config."""
+    assert "--log-driver" not in container.docker_run_cli_command()
+    assert "log_config" not in container._params()
+
+    container.log_driver = "fluentd"
+    cli = container.docker_run_cli_command()
+    assert "--log-driver fluentd" in cli
+    assert "fluentd-address=localhost:24224" in cli
+    log_config = container._params()["log_config"]
+    assert log_config.type == "fluentd"
+    assert log_config.config["fluentd-address"] == "localhost:24224"
+
+    container.log_options = {"fluentd-address": "logs.example.com:24224"}
+    assert container._params()["log_config"].config == {"fluentd-address": "logs.example.com:24224"}
+
+
+def test_docker_log_driver_from_config(container, monkeypatch):
+    monkeypatch.setattr("taskflows.docker.config.docker_log_driver", "json-file")
+    log_config = container._params()["log_config"]
+    assert log_config.type == "json-file"
+    assert log_config.config == {}

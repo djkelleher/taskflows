@@ -1131,19 +1131,36 @@ def _start_api_cmd(host: str, port: int, reload: bool, enable_ui: bool):
     uvicorn.run("taskflows.admin.api:app", host=host, port=port, reload=reload)
 
 
-srv_api = Service(
-    name="srv-api",
-    start_command="_start_srv_api",
-    environment=Venv("trading"),
-    restart_policy=RestartPolicy(
-        condition="always",
-        delay=10,
-    ),
-    enabled=True,
-)
+def build_api_service() -> Service:
+    """Build the systemd service definition for the taskflows API server.
+
+    By default the unit runs `_start_srv_api` from the environment taskflows
+    is installed in (resolved to an absolute path so the unit does not depend
+    on PATH). Set TASKFLOWS_API_ENV to a conda/mamba environment name to run
+    it inside that environment instead.
+    """
+    import shutil
+
+    if env_name := os.getenv("TASKFLOWS_API_ENV"):
+        environment = Venv(env_name)
+        start_command = "_start_srv_api"
+    else:
+        environment = None
+        start_command = shutil.which("_start_srv_api") or "_start_srv_api"
+    return Service(
+        name="srv-api",
+        start_command=start_command,
+        environment=environment,
+        restart_policy=RestartPolicy(
+            condition="always",
+            delay=10,
+        ),
+        enabled=True,
+    )
 
 
 def start_api_srv():
+    srv_api = build_api_service()
     if not srv_api.exists:
         logger.info("Creating and starting srv-api service")
         asyncio.run(srv_api.create())

@@ -15,7 +15,10 @@ _log_level = (
 if _log_level == "DEBUG":
     # In DEBUG mode, enable terminal and file logging for troubleshooting
     os.environ["TASKFLOWS_NO_TERMINAL"] = "0"
-    os.environ["TASKFLOWS_FILE_DIR"] = "/opt/taskflows/data/logs"
+    os.environ.setdefault(
+        "TASKFLOWS_FILE_DIR",
+        os.path.join(os.path.expanduser("~"), ".taskflows", "data", "logs"),
+    )
 else:
     # In non-DEBUG mode, disable all logging to keep CLI output clean
     os.environ["TASKFLOWS_NO_TERMINAL"] = "1"
@@ -71,25 +74,28 @@ def api():
     """Manage API service."""
 
 
-@api.command
+@api.command("start")
 def api_start():
+    """Create (if needed) and start the API systemd service."""
     from .api import start_api_srv
 
     start_api_srv()
 
 
-@api.command
+@api.command("restart")
 def api_restart():
-    from .api import srv_api
+    """Restart the API systemd service."""
+    from .api import build_api_service
 
-    asyncio.run(srv_api.restart())
+    asyncio.run(build_api_service().restart())
 
 
-@api.command
+@api.command("stop")
 def api_stop():
-    from .api import srv_api
+    """Stop the API systemd service."""
+    from .api import build_api_service
 
-    asyncio.run(srv_api.stop())
+    asyncio.run(build_api_service().stop())
 
 
 @api.group("security")

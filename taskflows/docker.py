@@ -12,11 +12,10 @@ from docker.errors import ImageNotFound
 from docker.models.containers import Container
 from docker.models.images import Image
 from docker.types import LogConfig
-from docker.types.containers import LogConfigTypesEnum
 from dotenv import dotenv_values
 from xxhash import xxh32
 
-from .common import logger, redact_sensitive
+from .common import config, logger, redact_sensitive
 from .constraints import CgroupConfig
 from .exec import PickledFunction
 
@@ -252,6 +251,13 @@ class DockerContainer:
     # Unified cgroup configuration (preferred method for resource constraints)
     cgroup_config: CgroupConfig | None = None
     network_mode: Literal["bridge", "host", "none", "overlay", "ipvlan", "macvlan"] | None = None
+    # Docker log driver for the container (e.g. "fluentd", "json-file"). When
+    # unset, falls back to Config.docker_log_driver (TASKFLOWS_DOCKER_LOG_DRIVER);
+    # when that is also unset, Docker's default logging is used.
+    log_driver: str | None = None
+    # Options for the log driver (--log-opt). For "fluentd" with no explicit
+    # options, resilient defaults pointing at Config.fluent_bit are used.
+    log_options: dict[str, str] | None = None
     # Restart the container when it exits?
     restart_policy: Literal["no", "always", "unless-stopped", "on-failure"] = "no"
     # Run an init inside the container that forwards signals and reaps processes
@@ -644,12 +650,12 @@ class DockerContainer:
                     else:
                         cmd.extend(["-p", f"{host_config}:{container_port}"])
 
-        # Log configuration with resilience options
-        cmd.extend(["--log-driver", "fluentd"])
-        cmd.extend(["--log-opt", "fluentd-address=localhost:24224"])
-        cmd.extend(["--log-opt", "fluentd-async=true"])
-        cmd.extend(["--log-opt", "fluentd-buffer-limit=1048576"])
-        cmd.extend(["--log-opt", "tag=docker.{{.Name}}"])
+        # Log configuration (opt-in; Docker's default logging when unset)
+        if resolved := self._resolved_log_config():
+            driver, log_opts = resolved
+            cmd.extend(["--log-driver", driver])
+            for key, value in sorted(log_opts.items()):
+                cmd.extend(["--log-opt", f"{key}={value}"])
 
         image_name = self.image.tag if isinstance(self.image, DockerImage) else self.image
 
@@ -708,20 +714,39 @@ class DockerContainer:
         """Remove container."""
         delete_docker_container(self.name)
 
+    def _resolved_log_config(self) -> tuple[str, dict[str, str]] | None:
+        """Resolve the container's log driver and options.
+
+        Returns None when neither the container nor Config configures a
+        driver, leaving Docker's default logging in place.
+        """
+        driver = self.log_driver or config.docker_log_driver
+        if not driver:
+            return None
+        if self.log_options is not None:
+            options = dict(self.log_options)
+        elif driver == "fluentd":
+            # Resilient defaults so a slow/unavailable fluentd does not block the container
+            options = {
+                "fluentd-address": config.fluent_bit,
+                "fluentd-async": "true",
+                "fluentd-buffer-limit": "1048576",
+                "tag": "docker.{{.Name}}",
+            }
+        else:
+            options = {}
+        return driver, options
+
     def _params(self) -> dict[str, Any]:
         cfg = {k: v for k, v in asdict(self).items() if v is not None}
         # Fields that are internal to our service system and should not be passed to Docker API
         cfg.pop("persisted", None)
         cfg.pop("cgroup_config", None)
-        cfg["log_config"] = LogConfig(
-            type=LogConfigTypesEnum.FLUENTD,
-            config={
-                "fluentd-address": "localhost:24224",
-                "fluentd-async": "true",
-                "fluentd-buffer-limit": "1048576",
-                "tag": "docker.{{.Name}}",
-            },
-        )
+        cfg.pop("log_driver", None)
+        cfg.pop("log_options", None)
+        if resolved := self._resolved_log_config():
+            driver, log_opts = resolved
+            cfg["log_config"] = LogConfig(type=driver, config=log_opts)
         restart_policy = cfg.get("restart_policy")
         if isinstance(restart_policy, str):
             cfg["restart_policy"] = {"Name": restart_policy}

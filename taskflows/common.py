@@ -39,9 +39,11 @@ systemd_dir = Path.home().joinpath(".config", "systemd", "user")
 
 
 class Config(BaseSettings):
-    """S3 configuration. Variables will be loaded from environment variables if set."""
+    """taskflows settings, loaded from TASKFLOWS_-prefixed environment variables."""
 
     display_timezone: str = "UTC"
+    # default log driver for Docker containers (e.g. "fluentd"); None uses Docker's default
+    docker_log_driver: str | None = None
     fluent_bit: str = "localhost:24224"
     grafana: str = "localhost:3000"
     grafana_api_key: str | None = None
