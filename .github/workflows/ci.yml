@@ -19,7 +19,7 @@ jobs:
       - name: mypy (advisory)
         continue-on-error: true
         run: |
-          uv sync --no-sources
+          uv sync --no-sources --all-extras
           uv run --no-sources mypy taskflows
 
   test:
@@ -34,7 +34,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: uv sync --no-sources
+        run: uv sync --no-sources --all-extras
       - name: Run unit tests
         run: uv run --no-sources pytest -m "not integration" --timeout=120
 
@@ -63,6 +63,6 @@ jobs:
       - name: Enable systemd user session
         run: sudo loginctl enable-linger "$(whoami)" || true
       - name: Install dependencies
-        run: uv sync --no-sources
+        run: uv sync --no-sources --all-extras
       - name: Run integration tests
         run: uv run --no-sources pytest -m integration --timeout=300

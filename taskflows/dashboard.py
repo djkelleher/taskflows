@@ -1,18 +1,31 @@
 import json
 import uuid
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urljoin
 
 import requests
-from grafanalib._gen import DashboardEncoder
-from grafanalib.core import Annotations, Graph, GridPos, Logs, Templating, Time, TimePicker
-from grafanalib.core import Dashboard as GLDashboard
 from pydantic import BaseModel
 
 from .common import config, logger, sort_service_names
 from .common import logql_string as _logql_string
 from .service import Service
+
+if TYPE_CHECKING:
+    from grafanalib.core import Dashboard as GLDashboard
+
+
+def _import_grafanalib():
+    """Import grafanalib on first use so the core package works without it."""
+    try:
+        import grafanalib._gen
+        import grafanalib.core
+    except ImportError as e:
+        raise ImportError(
+            "Grafana dashboard generation requires the 'grafana' extra: "
+            "pip install 'taskflows[grafana]'"
+        ) from e
+    return grafanalib
 
 
 def _grafana_base_url() -> str:
@@ -197,9 +210,10 @@ class Dashboard:
         if existing_version is not None:
             dashboard_data["overwrite"] = True
 
+        encoder = _import_grafanalib()._gen.DashboardEncoder
         resp = requests.post(
             urljoin(_grafana_base_url(), "api/dashboards/db"),
-            data=json.dumps(dashboard_data, cls=DashboardEncoder, indent=2).encode("utf-8"),
+            data=json.dumps(dashboard_data, cls=encoder, indent=2).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
@@ -248,7 +262,17 @@ class Dashboard:
         )
         return None
 
-    def _create_gl_dashboard(self, loki_uid: str) -> GLDashboard:
+    def _create_gl_dashboard(self, loki_uid: str) -> "GLDashboard":
+        gl = _import_grafanalib()
+        Annotations = gl.core.Annotations
+        GLDashboard = gl.core.Dashboard
+        Graph = gl.core.Graph
+        GridPos = gl.core.GridPos
+        Logs = gl.core.Logs
+        Templating = gl.core.Templating
+        Time = gl.core.Time
+        TimePicker = gl.core.TimePicker
+
         gl_panels = []
         y_pos = 0
 

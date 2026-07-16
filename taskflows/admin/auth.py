@@ -6,8 +6,13 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
-import jwt
-from passlib.context import CryptContext
+try:
+    import jwt
+    from passlib.context import CryptContext
+except ImportError as e:
+    raise ImportError(
+        "Web UI authentication requires the 'server' extra: pip install 'taskflows[server]'"
+    ) from e
 from pydantic import BaseModel
 
 from taskflows.admin.security import _locked_json_store

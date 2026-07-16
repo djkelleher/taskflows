@@ -6,7 +6,13 @@ import traceback
 from contextlib import asynccontextmanager
 
 import click
-import uvicorn
+
+try:
+    import uvicorn
+except ImportError as e:
+    raise ImportError(
+        "The taskflows API server requires the 'server' extra: pip install 'taskflows[server]'"
+    ) from e
 from fastapi import (
     Body,
     FastAPI,
