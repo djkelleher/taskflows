@@ -989,12 +989,13 @@ def _ensure_types_registered():
         Volume,
     )
     from taskflows.schedule import Calendar, Periodic
-    from taskflows.service import RestartPolicy, Service, Venv
+    from taskflows.service import RestartPolicy, Service, Venv, Watchdog
 
     # Service types
     register_type(Venv)
     register_type(Service)
     register_type(RestartPolicy)
+    register_type(Watchdog)
 
     # Dashboard types
     register_type(Dashboard)

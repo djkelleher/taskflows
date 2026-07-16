@@ -13,6 +13,7 @@ import click
 from click import Group
 from dynamic_imports import import_module_attr
 
+from . import notify
 from .common import logger
 
 _INT_RE = re.compile(r"^[+-]?\d+$")
@@ -204,6 +205,10 @@ def async_entrypoint(blocking: bool = False, shutdown_on_exception: bool = True)
 
         async def async_entrypoint_async(*args, **kwargs):
             logger.info(f"Running main task: {f}")
+            # systemd integration (no-ops outside systemd): report readiness
+            # and keep the watchdog fed for Service(watchdog=...) units.
+            notify.ready()
+            watchdog_pinger = notify.start_watchdog_pinger()
             try:
                 await f(*args, **kwargs)
                 if blocking:
@@ -211,6 +216,10 @@ def async_entrypoint(blocking: bool = False, shutdown_on_exception: bool = True)
             except Exception as err:
                 logger.exception(f"Error running main task: {err}")
                 await sdh.shutdown(1)
+            finally:
+                notify.stopping()
+                if watchdog_pinger is not None:
+                    watchdog_pinger.cancel()
 
         @wraps(f)
         def wrapper(*args, **kwargs):

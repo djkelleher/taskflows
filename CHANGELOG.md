@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **systemd watchdog support (hang detection):** `Service(watchdog=Watchdog(
+  interval_seconds=30))` emits `Type=notify`/`WatchdogSec=` so systemd
+  restarts the service if liveness pings stop — catching hung (not just
+  crashed) processes. New `taskflows.notify` module implements the sd_notify
+  protocol in pure stdlib (`ready()`, `status()`, `watchdog_ping()`,
+  `start_watchdog_pinger()`), and `async_entrypoint` reports readiness and
+  feeds the watchdog automatically. All calls are no-ops outside systemd.
 - MIT license, CHANGELOG, and a CI workflow (lint, 3.11–3.13 test matrix,
   wheel install smoke test) that gates PyPI releases.
 - The web UI now ships inside the wheel: release builds bundle the built SPA

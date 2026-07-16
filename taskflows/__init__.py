@@ -16,6 +16,7 @@ _SYMBOL_MODULES = {
     # services
     "RestartPolicy": "service",
     "Service": "service",
+    "Watchdog": "service",
     "ServiceRegistry": "service",
     "Venv": "service",
     # schedules
@@ -78,5 +79,5 @@ if TYPE_CHECKING:
     from .entrypoints import async_entrypoint, get_shutdown_handler
     from .schedule import Calendar, Periodic
     from .serialization import load_services_from_yaml, save_services_to_yaml
-    from .service import RestartPolicy, Service, ServiceRegistry, Venv
+    from .service import RestartPolicy, Service, ServiceRegistry, Venv, Watchdog
     from .tasks import get_current_task_id, run_task, task

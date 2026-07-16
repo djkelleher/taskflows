@@ -300,6 +300,37 @@ class RestartPolicy:
         return entries
 
 
+@pdataclass
+class Watchdog:
+    """systemd watchdog (hang detection) for a service.
+
+    Emits Type=notify + WatchdogSec=, so the process must send READY=1 on
+    startup and WATCHDOG=1 pings at least every `interval_seconds` — use
+    taskflows.notify (async_entrypoint arms the pinger automatically). If
+    pings stop (hung process), systemd kills the unit; with restart_on_hang
+    it is restarted automatically.
+
+    Not supported for DockerContainer environments: NOTIFY_SOCKET does not
+    cross the container boundary.
+    """
+
+    # systemd kills the service if no ping arrives within this many seconds.
+    interval_seconds: int = 30
+    # restart the service after a watchdog kill (Restart=on-watchdog).
+    restart_on_hang: bool = True
+    # allow pings from any process in the cgroup (needed when a runner like
+    # `conda run` interposes a parent process between systemd and the app).
+    notify_access: Literal["main", "all"] = "all"
+
+    @property
+    def service_entries(self) -> set[str]:
+        return {
+            "Type=notify",
+            f"NotifyAccess={self.notify_access}",
+            f"WatchdogSec={self.interval_seconds}",
+        }
+
+
 @dataclass
 class Service:
     """A service to run a command on a specified schedule."""
@@ -323,6 +354,10 @@ class Service:
     # signal used to stop the service.
     kill_signal: str = "SIGTERM"
     restart_policy: str | RestartPolicy | None = "no"
+    # systemd watchdog (hang detection): the service must send sd_notify pings
+    # (see taskflows.notify); systemd restarts it if they stop. Not supported
+    # with DockerContainer environments.
+    watchdog: Optional["Watchdog"] = None
     startup_requirements: Sequence[HardwareConstraint | SystemLoadConstraint] = None
     # Specifies a timeout (in seconds) that starts running when the queued job is actually started.
     # If limit is reached, the job will be cancelled, the unit however will not change state or even enter the "failed" mode.
@@ -627,6 +662,18 @@ class Service:
             )
             self.unit_entries.update(rp.unit_entries)
             self.service_entries.update(rp.service_entries)
+
+        if self.watchdog:
+            if isinstance(self.environment, DockerContainer):
+                raise ValueError(
+                    "watchdog is not supported for DockerContainer environments: "
+                    "NOTIFY_SOCKET does not cross the container boundary"
+                )
+            self.service_entries.update(self.watchdog.service_entries)
+            if self.watchdog.restart_on_hang and self.restart_policy in ("no", None):
+                hang_policy = RestartPolicy(condition="on-watchdog")
+                self.unit_entries.update(hang_policy.unit_entries)
+                self.service_entries.update(hang_policy.service_entries)
 
         # Add cgroup configuration directives to systemd service
         if self.cgroup_config:
