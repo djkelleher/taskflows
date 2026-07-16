@@ -6,7 +6,8 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['coverage', 'dist']),
+  // src/ui is the vendored shared-ui library (linted upstream); app rules don't apply
+  globalIgnores(['coverage', 'dist', 'src/ui']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

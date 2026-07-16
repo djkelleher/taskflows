@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - MIT license, CHANGELOG, and a CI workflow (lint, 3.11–3.13 test matrix,
   wheel install smoke test) that gates PyPI releases.
+- The web UI now ships inside the wheel: release builds bundle the built SPA
+  at `taskflows/admin/static`, so `pip install taskflows[server]` serves the
+  UI out of the box (`TASKFLOWS_FRONTEND_DIST` overrides for development).
+  The frontend no longer depends on a private `file:` package — the shared-ui
+  component library is vendored at `frontend/src/ui`, so `npm ci && npm run
+  build` works from a clean checkout.
 - Characterization tests pinning rendered systemd unit files and Docker
   container config ahead of internal refactors.
 

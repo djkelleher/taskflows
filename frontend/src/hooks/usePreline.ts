@@ -9,7 +9,7 @@ export function usePreline() {
     // Uses dynamic import to avoid SSR issues.
     const init = async () => {
       try {
-        const { HSStaticMethods } = await import("preline/preline");
+        const { HSStaticMethods } = await import("preline");
         HSStaticMethods.autoInit();
       } catch {
         // Preline JS init is optional — our components use React state

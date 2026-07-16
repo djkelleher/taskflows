@@ -1,5 +1,5 @@
 /**
- * Adapter barrel for @danklab/shared-ui.
+ * Adapter barrel for the vendored shared-ui library (src/ui).
  *
  * Single import surface for shared design-system primitives that Taskflows does
  * NOT already implement locally. Components that already exist in this directory
@@ -14,94 +14,94 @@
  *
  * Theming: these components consume Taskflows' own Tailwind tokens (see
  * `src/index.css`, which adds the semantic tokens they require and `@source`s the
- * library's dist). Do NOT import "@danklab/shared-ui/styles.css".
+ * library's dist). Do NOT import the library styles.css.
  */
 
 // Overlays / feedback
-export { Modal } from "@danklab/shared-ui";
-export type { ModalProps, ModalSize } from "@danklab/shared-ui";
+export { Modal } from "../../ui";
+export type { ModalProps, ModalSize } from "../../ui";
 
-export { Alert } from "@danklab/shared-ui";
-export type { AlertProps, AlertTone } from "@danklab/shared-ui";
+export { Alert } from "../../ui";
+export type { AlertProps, AlertTone } from "../../ui";
 
-export { Tooltip } from "@danklab/shared-ui";
-export type { TooltipProps, TooltipSide } from "@danklab/shared-ui";
+export { Tooltip } from "../../ui";
+export type { TooltipProps, TooltipSide } from "../../ui";
 
-export { Popover } from "@danklab/shared-ui";
-export type { PopoverProps } from "@danklab/shared-ui";
+export { Popover } from "../../ui";
+export type { PopoverProps } from "../../ui";
 
-export { DropdownMenu, DropdownMenuItem, DropdownMenuSeparator } from "@danklab/shared-ui";
+export { DropdownMenu, DropdownMenuItem, DropdownMenuSeparator } from "../../ui";
 export type {
   DropdownMenuItemProps,
   DropdownMenuProps,
   DropdownMenuSeparatorProps,
-} from "@danklab/shared-ui";
+} from "../../ui";
 
-export { ContextMenu } from "@danklab/shared-ui";
+export { ContextMenu } from "../../ui";
 
 // Data display
-export { Table } from "@danklab/shared-ui";
+export { Table } from "../../ui";
 export type {
   TableColumn,
   TableColumnAlign,
   TableDensity,
   TableProps,
   TableSortDirection,
-} from "@danklab/shared-ui";
+} from "../../ui";
 
-export { Tab, TabList, TabPanel, Tabs } from "@danklab/shared-ui";
-export type { TabListProps, TabPanelProps, TabProps, TabsProps } from "@danklab/shared-ui";
+export { Tab, TabList, TabPanel, Tabs } from "../../ui";
+export type { TabListProps, TabPanelProps, TabProps, TabsProps } from "../../ui";
 
-export { MetricCard, BigNumber } from "@danklab/shared-ui";
-export type { BigNumberProps, MetricCardProps, MetricTone } from "@danklab/shared-ui";
+export { MetricCard, BigNumber } from "../../ui";
+export type { BigNumberProps, MetricCardProps, MetricTone } from "../../ui";
 
-export { StatusBadge } from "@danklab/shared-ui";
-export type { StatusBadgeProps, StatusTone } from "@danklab/shared-ui";
+export { StatusBadge } from "../../ui";
+export type { StatusBadgeProps, StatusTone } from "../../ui";
 
-export { CodeBlock } from "@danklab/shared-ui";
-export { LogViewer } from "@danklab/shared-ui";
-export { MarkdownContent } from "@danklab/shared-ui";
+export { CodeBlock } from "../../ui";
+export { LogViewer } from "../../ui";
+export { MarkdownContent } from "../../ui";
 
 // Form controls not present locally
-export { FormField } from "@danklab/shared-ui";
-export type { FormFieldProps } from "@danklab/shared-ui";
+export { FormField } from "../../ui";
+export type { FormFieldProps } from "../../ui";
 
-export { Switch } from "@danklab/shared-ui";
-export type { SwitchProps } from "@danklab/shared-ui";
+export { Switch } from "../../ui";
+export type { SwitchProps } from "../../ui";
 
-export { Radio, RadioGroup } from "@danklab/shared-ui";
-export type { RadioGroupProps, RadioProps } from "@danklab/shared-ui";
+export { Radio, RadioGroup } from "../../ui";
+export type { RadioGroupProps, RadioProps } from "../../ui";
 
-export { Textarea } from "@danklab/shared-ui";
-export type { TextareaProps } from "@danklab/shared-ui";
+export { Textarea } from "../../ui";
+export type { TextareaProps } from "../../ui";
 
 // Loading / layout helpers
-export { Skeleton, SkeletonText } from "@danklab/shared-ui";
-export type { SkeletonProps, SkeletonTextProps } from "@danklab/shared-ui";
+export { Skeleton, SkeletonText } from "../../ui";
+export type { SkeletonProps, SkeletonTextProps } from "../../ui";
 
-export { Pagination } from "@danklab/shared-ui";
-export type { PaginationProps } from "@danklab/shared-ui";
+export { Pagination } from "../../ui";
+export type { PaginationProps } from "../../ui";
 
-export { EmptyState, ErrorState, LoadingState } from "@danklab/shared-ui";
-export type { EmptyStateProps, ErrorStateProps, LoadingStateProps } from "@danklab/shared-ui";
+export { EmptyState, ErrorState, LoadingState } from "../../ui";
+export type { EmptyStateProps, ErrorStateProps, LoadingStateProps } from "../../ui";
 
-export { PageHeader } from "@danklab/shared-ui";
-export type { PageHeaderProps } from "@danklab/shared-ui";
+export { PageHeader } from "../../ui";
+export type { PageHeaderProps } from "../../ui";
 
-export { Toolbar, ToolbarSpacer } from "@danklab/shared-ui";
-export type { ToolbarProps } from "@danklab/shared-ui";
+export { Toolbar, ToolbarSpacer } from "../../ui";
+export type { ToolbarProps } from "../../ui";
 
 // Providers (the orchestration layer Taskflows otherwise rebuilds per-app)
-export { ToastProvider, useToast } from "@danklab/shared-ui";
-export type { ToastContextValue, ToastOptions, ToastProviderProps } from "@danklab/shared-ui";
+export { ToastProvider, useToast } from "../../ui";
+export type { ToastContextValue, ToastOptions, ToastProviderProps } from "../../ui";
 
-export { ConfirmProvider, useConfirm } from "@danklab/shared-ui";
-export type { ConfirmFn, ConfirmOptions, ConfirmProviderProps } from "@danklab/shared-ui";
+export { ConfirmProvider, useConfirm } from "../../ui";
+export type { ConfirmFn, ConfirmOptions, ConfirmProviderProps } from "../../ui";
 
-export { ThemeProvider, useTheme } from "@danklab/shared-ui";
+export { ThemeProvider, useTheme } from "../../ui";
 export type {
   ResolvedTheme,
   Theme,
   ThemeContextValue,
   ThemeProviderProps,
-} from "@danklab/shared-ui";
+} from "../../ui";

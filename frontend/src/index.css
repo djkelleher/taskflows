@@ -22,7 +22,7 @@
   --color-positive: #00FF52;
   --color-negative: #FF3366;
 
-  /* Semantic tokens required by @danklab/shared-ui (light mode defaults). */
+  /* Semantic tokens required by the vendored shared-ui components (light mode defaults). */
   --color-warning: #F5A623;
   --color-info: #00AEFF;
   --color-surface: #f5f5f5;
@@ -46,10 +46,9 @@
   --font-sans: "NeueHaasGroteskText Pro", "Inter", system-ui, sans-serif;
 }
 
-/* Generate Tailwind utilities from @danklab/shared-ui's compiled dist using THIS
-   app's tokens above. Do NOT import "@danklab/shared-ui/styles.css" — that would
+/* The shared-ui library is vendored at src/ui and scanned automatically by
+   Tailwind. Do NOT import a prebuilt library styles.css — that would
    override Taskflows' Revival palette with the library's default tokens. */
-@source "../node_modules/@danklab/shared-ui/dist";
 
 /* Dark mode overrides */
 .dark {

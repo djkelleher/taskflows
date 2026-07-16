@@ -44,6 +44,9 @@ htmlcov/
 data/
 .codigote/
 
+# Built web UI copied into the package by the release workflow
+taskflows/admin/static/
+
 # PyBuilder
 .pybuilder/
 target/

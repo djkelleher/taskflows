@@ -1053,7 +1053,21 @@ if UI_ENABLED:
     from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
     from fastapi.staticfiles import StaticFiles
 
-    frontend_dist_dir = Path(__file__).parent.parent.parent / "frontend" / "dist"
+    def _resolve_frontend_dist_dir() -> Path:
+        """Locate the built web UI.
+
+        Priority: TASKFLOWS_FRONTEND_DIST env override (development), then the
+        copy bundled inside the wheel (taskflows/admin/static), then the repo
+        checkout's frontend/dist.
+        """
+        if override := os.getenv("TASKFLOWS_FRONTEND_DIST"):
+            return Path(override)
+        packaged = Path(__file__).parent / "static"
+        if packaged.exists():
+            return packaged
+        return Path(__file__).parent.parent.parent / "frontend" / "dist"
+
+    frontend_dist_dir = _resolve_frontend_dist_dir()
 
     # Mount React assets (JS/CSS bundles with hashes) when the frontend is built.
     assets_dir = frontend_dist_dir / "assets"
@@ -1076,7 +1090,9 @@ if UI_ENABLED:
         index_file = frontend_dist_dir / "index.html"
         if not index_file.exists():
             return PlainTextResponse(
-                "Frontend not built. Run 'cd frontend && npm run build'",
+                "Web UI not found. Reinstall taskflows[server] from a release wheel, "
+                "or build it from a repo checkout: cd frontend && npm ci && npm run build "
+                "(set TASKFLOWS_FRONTEND_DIST to point at a custom build).",
                 status_code=503,
             )
         return FileResponse(index_file)

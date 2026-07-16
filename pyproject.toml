@@ -159,11 +159,18 @@ markers = [
 ]
 
 
+[tool.hatch.build]
+# Built web UI copied to taskflows/admin/static by the release workflow;
+# gitignored, so it must be declared as a build artifact to ship in the wheel.
+artifacts = ["taskflows/admin/static/"]
+
 [tool.hatch.build.targets.sdist]
 include = [
     "/README.md",
     "/pyproject.toml",
     "/taskflows",
+    "/LICENSE",
+    "/CHANGELOG.md",
 ]
 
 [tool.hatch.build.targets.wheel]
