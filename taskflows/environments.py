@@ -1,6 +1,7 @@
 """Runtime execution environments for service commands."""
 
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,8 +56,15 @@ class Venv:
                 raise FileNotFoundError(f"Custom executable not found: {exe}")
             return self._run_command(exe, self.env_name, command)
 
+        # Prefer runners already available on PATH before checking common
+        # installation locations.
+        path_exes = tuple(
+            Path(executable)
+            for name in ("micromamba", "mamba", "conda")
+            if (executable := shutil.which(name))
+        )
         home = Path.home()
-        exes = (
+        exes = path_exes + (
             # Mamba distributions
             home.joinpath("mambaforge", "bin", "mamba"),
             home.joinpath("miniforge3", "bin", "mamba"),
@@ -82,4 +90,9 @@ class Venv:
         for exe in exes:
             if exe.is_file():
                 return self._run_command(exe, self.env_name, command)
-        raise FileNotFoundError(f"Virtualenv not found! Checked: {exes}")
+
+        # Service definitions and serialized configs must remain portable to
+        # machines where the environment runner is installed later. Use the
+        # conventional executable name and let systemd surface a clear runtime
+        # error if it is still unavailable when the service starts.
+        return self._run_command(Path("conda"), self.env_name, command)

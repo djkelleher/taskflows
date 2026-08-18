@@ -493,3 +493,17 @@ async def test_cgroup_device_limits_in_service_unit(log_dir):
     assert "IOReadBandwidthMax=/dev/sdb 2097152" in service_content
 
     await srv.remove()
+
+
+def test_venv_command_is_portable_when_runner_is_not_installed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("taskflows.environments.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "taskflows.environments.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+
+    command = Venv(env_name="future-env").create_env_command("python -V")
+
+    assert command.startswith("conda run -n future-env")
+    assert command.endswith("-- python -V")
