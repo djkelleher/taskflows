@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **AWS Lambda cloud deployment (beta):** `taskflows.cloud` adds boto3 and
+  Pulumi backends, EventBridge schedule translation, dependency-aware Lambda
+  packaging, deployment management for functions and `Service` objects, and
+  focused `aws`, `pulumi`, and `cloud` installation extras. GCP/Azure provider
+  values are reserved for future implementations.
+
 ## [0.19.2] - 2026-08-18
 
 ### Added
