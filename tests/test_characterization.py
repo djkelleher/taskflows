@@ -33,7 +33,9 @@ HOME = str(Path.home())
 def normalize_unit_text(text: str, replacements: dict[str, str] | None = None) -> str:
     """Sort lines within each unit-file section and mask machine-specific paths."""
     replacements = {HOME: "<HOME>", **(replacements or {})}
-    for old, new in replacements.items():
+    # Replace nested paths before their parents (for example, when pytest's
+    # temporary directory is configured beneath the user's home directory).
+    for old, new in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
         text = text.replace(old, new)
     sections: list[tuple[str, list[str]]] = []
     current_header = None
@@ -53,6 +55,14 @@ def normalize_unit_text(text: str, replacements: dict[str, str] | None = None) -
         out.append(header)
         out.extend(lines)
     return "\n".join(out) + "\n"
+
+
+def test_normalize_unit_text_prefers_specific_paths():
+    text = f"[Service]\nExecStart={HOME}/tmp/runner\n"
+
+    assert normalize_unit_text(text, {f"{HOME}/tmp": "<TMP>"}) == (
+        "[Service]\nExecStart=<TMP>/runner\n"
+    )
 
 
 @pytest.fixture
