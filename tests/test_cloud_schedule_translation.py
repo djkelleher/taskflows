@@ -42,11 +42,10 @@ class TestCalendarToCron:
         result = _calendar_to_cron(schedule)
         assert result == "cron(00 00 ? * * *)"
 
-    def test_with_seconds(self):
-        """Test schedule with seconds (should ignore seconds)."""
-        schedule = Calendar(schedule="Mon-Fri 16:30:45")
+    def test_with_zero_seconds(self):
+        """Test a schedule whose seconds can be represented without data loss."""
+        schedule = Calendar(schedule="Mon-Fri 16:30:00")
         result = _calendar_to_cron(schedule)
-        # EventBridge doesn't support seconds, should use just hours:minutes
         assert result == "cron(30 16 ? * MON-FRI *)"
 
     def test_midnight(self):

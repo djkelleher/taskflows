@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 from ..common import logger
@@ -17,10 +18,11 @@ from ..common import logger
 class DependencyManager:
     """Manages dependencies for cloud function deployments."""
 
-    def __init__(self, python_version: str = "3.11"):
+    def __init__(self, python_version: str = "3.11", architecture: str = "x86_64"):
         self.python_version = python_version
-        self.cache_dir = Path.home() / ".taskflows" / "lambda-deps-cache"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if architecture not in {"x86_64", "arm64"}:
+            raise ValueError("architecture must be 'x86_64' or 'arm64'")
+        self.architecture = architecture
 
     def build_deployment_package(
         self,
@@ -96,8 +98,10 @@ class DependencyManager:
 
         docker_available = shutil.which("docker") is not None
         if not docker_available:
-            logger.warning("Docker not available, falling back to local build")
-            return self._build_locally(requirements, include_files)
+            raise RuntimeError(
+                "Docker is required for Lambda-compatible dependency builds; "
+                "set build_dependencies_in_docker=False only for verified pure-Python dependencies"
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -118,15 +122,25 @@ RUN pip install --target /asset -r requirements.txt
 
             # Build Docker image
             logger.info("Building dependencies in Docker...")
+            image_name = f"taskflows-builder-{uuid.uuid4().hex}"
+            platform = "linux/amd64" if self.architecture == "x86_64" else "linux/arm64"
             subprocess.run(
-                ["docker", "build", "-t", "taskflows-builder", str(tmp_path)],
+                [
+                    "docker",
+                    "build",
+                    "--platform",
+                    platform,
+                    "-t",
+                    image_name,
+                    str(tmp_path),
+                ],
                 check=True,
                 capture_output=True,
             )
 
             # Extract dependencies
             container_id = subprocess.check_output(
-                ["docker", "create", "taskflows-builder"],
+                ["docker", "create", image_name],
                 text=True,
             ).strip()
 
@@ -162,11 +176,13 @@ RUN pip install --target /asset -r requirements.txt
             finally:
                 # Cleanup
                 subprocess.run(["docker", "rm", container_id], capture_output=True)
+                subprocess.run(["docker", "image", "rm", image_name], capture_output=True)
 
     def create_layer_package(
         self,
         requirements: list[str],
         runtime: str = "python3.11",
+        use_docker: bool = False,
     ) -> bytes:
         """Create a Lambda Layer package with proper structure.
 
@@ -181,6 +197,22 @@ RUN pip install --target /asset -r requirements.txt
         import zipfile
 
         python_version = runtime.replace("python", "")  # e.g., "3.11"
+
+        if use_docker:
+            dependency_zip = self._build_with_docker(requirements)
+            prefix = Path("python") / "lib" / f"python{python_version}" / "site-packages"
+            zip_buffer = io.BytesIO()
+            with (
+                zipfile.ZipFile(io.BytesIO(dependency_zip)) as source,
+                zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as target,
+            ):
+                for member in source.infolist():
+                    if not member.is_dir():
+                        target.writestr(
+                            (prefix / member.filename).as_posix(),
+                            source.read(member.filename),
+                        )
+            return zip_buffer.getvalue()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -281,62 +313,4 @@ RUN pip install --target /asset -r requirements.txt
             import_pattern = r"^\s*(?:import|from)\s+([a-zA-Z0-9_]+)"
             imports.update(re.findall(import_pattern, source_code, re.MULTILINE))
 
-        # Filter stdlib modules (simplified)
-        stdlib = {
-            "os",
-            "sys",
-            "re",
-            "json",
-            "time",
-            "datetime",
-            "pathlib",
-            "typing",
-            "dataclasses",
-            "collections",
-            "itertools",
-            "functools",
-            "io",
-            "math",
-            "random",
-            "string",
-            "asyncio",
-            "threading",
-            "multiprocessing",
-            "subprocess",
-            "logging",
-            "argparse",
-            "configparser",
-            "urllib",
-            "http",
-            "email",
-            "html",
-            "xml",
-            "csv",
-            "sqlite3",
-            "pickle",
-            "hashlib",
-            "hmac",
-            "secrets",
-            "uuid",
-            "base64",
-            "binascii",
-            "struct",
-            "socket",
-            "ssl",
-            "tempfile",
-            "shutil",
-            "glob",
-            "fnmatch",
-            "traceback",
-            "warnings",
-            "contextlib",
-            "abc",
-            "enum",
-            "decimal",
-            "fractions",
-            "statistics",
-            "copy",
-            "pprint",
-        }
-
-        return imports - stdlib
+        return imports - sys.stdlib_module_names

@@ -49,6 +49,8 @@ class LayerConfig:
     layer_name: str | None = None  # Create new layer with this name
     dependencies: list[str] | None = None  # pip packages for new layer
     compatible_runtimes: list[str] = field(default_factory=lambda: ["python3.11"])
+    compatible_architectures: list[str] = field(default_factory=lambda: ["x86_64"])
+    build_in_docker: bool = True
 
 
 @dataclass
@@ -128,6 +130,7 @@ class CloudFunctionConfig:
     # Layers and dependencies
     layers: list[LayerConfig] | None = None
     use_s3_for_large_packages: bool = True  # Auto-upload to S3 if >50MB
+    build_dependencies_in_docker: bool = True  # Match Lambda Linux/runtime wheels
 
     # Error handling
     dead_letter_config: DeadLetterConfig | None = None
@@ -145,6 +148,45 @@ class CloudFunctionConfig:
     architecture: str = "x86_64"  # x86_64 or arm64
     code_signing_config_arn: str | None = None
     file_system_configs: list[dict[str, str]] | None = None  # EFS mounts
+
+    def __post_init__(self) -> None:
+        """Reject invalid settings before a deployment reaches a provider API."""
+        if not self.function_name:
+            raise ValueError("function_name cannot be empty")
+        if self.timeout_seconds < 1 or self.timeout_seconds > 900:
+            raise ValueError("timeout_seconds must be between 1 and 900")
+        if self.memory_mb < 128 or self.memory_mb > 10240:
+            raise ValueError("memory_mb must be between 128 and 10240")
+        if self.ephemeral_storage_mb < 512 or self.ephemeral_storage_mb > 10240:
+            raise ValueError("ephemeral_storage_mb must be between 512 and 10240")
+        if self.architecture not in {"x86_64", "arm64"}:
+            raise ValueError("architecture must be 'x86_64' or 'arm64'")
+        if (
+            self.reserved_concurrent_executions is not None
+            and self.reserved_concurrent_executions < 0
+        ):
+            raise ValueError("reserved_concurrent_executions cannot be negative")
+        if self.provisioned_concurrency is not None:
+            if self.provisioned_concurrency < 1:
+                raise ValueError("provisioned_concurrency must be at least 1")
+            if not self.enable_versioning:
+                raise ValueError("provisioned_concurrency requires enable_versioning=True")
+        if self.retry_config:
+            if not 0 <= self.retry_config.max_retry_attempts <= 2:
+                raise ValueError("max_retry_attempts must be between 0 and 2")
+            if not 60 <= self.retry_config.max_event_age_seconds <= 21600:
+                raise ValueError("max_event_age_seconds must be between 60 and 21600")
+        if self.layers:
+            for layer in self.layers:
+                choices = (layer.layer_arn is not None, layer.layer_name is not None)
+                if sum(choices) != 1:
+                    raise ValueError("each layer must set exactly one of layer_arn or layer_name")
+                if not layer.compatible_runtimes:
+                    raise ValueError("layer compatible_runtimes cannot be empty")
+                if not layer.compatible_architectures or not set(
+                    layer.compatible_architectures
+                ) <= {"x86_64", "arm64"}:
+                    raise ValueError("layer compatible_architectures must contain x86_64 or arm64")
 
 
 class CloudEnvironment(ABC):

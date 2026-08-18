@@ -3,6 +3,7 @@
 import base64
 import io
 import re
+import sys
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -11,6 +12,63 @@ import cloudpickle
 
 from ..common import logger
 from ..schedule import Calendar, Periodic, Schedule
+from .base import CloudFunctionConfig
+
+AWS_LOG_RETENTION_DAYS = {
+    0,
+    1,
+    3,
+    5,
+    7,
+    14,
+    30,
+    60,
+    90,
+    120,
+    150,
+    180,
+    365,
+    400,
+    545,
+    731,
+    1096,
+    1827,
+    2192,
+    2557,
+    2922,
+    3288,
+    3653,
+}
+
+
+def validate_aws_lambda_config(config: CloudFunctionConfig) -> None:
+    """Validate configuration shared by both AWS Lambda backends."""
+    validate_lambda_constraints(config.timeout_seconds, config.memory_mb, config.function_name)
+    if not config.runtime.startswith("python"):
+        raise ValueError("callable packaging currently supports only Python Lambda runtimes")
+    if config.handler != "index.handler":
+        raise ValueError("callable packaging requires handler='index.handler'")
+    if config.secrets:
+        raise ValueError(
+            "secrets cannot be injected as Lambda environment variables; pass secret ARNs "
+            "as environment variables and load values from Secrets Manager at runtime"
+        )
+    if config.create_alias and not config.enable_versioning:
+        raise ValueError("create_alias requires enable_versioning=True")
+    if config.create_alias and (
+        len(config.create_alias) > 128
+        or config.create_alias.isdigit()
+        or not re.fullmatch(r"[A-Za-z0-9-_]+", config.create_alias)
+    ):
+        raise ValueError("create_alias is not a valid Lambda alias name")
+    if config.log_retention_days not in AWS_LOG_RETENTION_DAYS:
+        raise ValueError("log_retention_days is not supported by CloudWatch Logs")
+    if bool(config.security_group_ids) != bool(config.subnet_ids):
+        raise ValueError("both security_group_ids and subnet_ids are required for a VPC")
+    if config.monitoring:
+        threshold = config.monitoring.error_rate_threshold
+        if threshold is not None and not 0 <= threshold <= 1:
+            raise ValueError("error_rate_threshold must be between 0 and 1")
 
 
 def schedule_to_eventbridge_expression(schedule: Schedule) -> str:
@@ -58,7 +116,7 @@ def _calendar_to_cron(calendar: Calendar) -> str:
     # In production, you'd want to convert the time to UTC based on the timezone
     match = re.fullmatch(
         r"(?P<days>[A-Za-z]{3}(?:-[A-Za-z]{3})?(?:,[A-Za-z]{3})*)\s+"
-        r"(?P<hours>\d{1,2}):(?P<minutes>\d{2})(?::\d{2})?"
+        r"(?P<hours>\d{1,2}):(?P<minutes>\d{2})(?::(?P<seconds>\d{2}))?"
         r"(?:\s+(?P<timezone>\S+))?",
         schedule_str,
     )
@@ -69,8 +127,13 @@ def _calendar_to_cron(calendar: Calendar) -> str:
     hours = int(match.group("hours"))
     minutes = int(match.group("minutes"))
     timezone = match.group("timezone")
+    seconds = int(match.group("seconds") or 0)
     if hours > 23 or minutes > 59:
         raise ValueError(f"Invalid calendar schedule time: {hours:02d}:{minutes:02d}")
+    if seconds > 59:
+        raise ValueError(f"Invalid calendar schedule seconds: {seconds:02d}")
+    if seconds:
+        raise ValueError("EventBridge scheduled rules do not support non-zero seconds")
     valid_days = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
     supplied_days = {day.upper() for day in re.split(r"[-,]", day_of_week_str)}
     if not supplied_days <= valid_days:
@@ -90,10 +153,10 @@ def _calendar_to_cron(calendar: Calendar) -> str:
     # Format: cron(Minutes Hours Day-of-month Month Day-of-week Year)
     cron_expr = f"cron({minutes:02d} {hours:02d} ? * {day_of_week} *)"
 
-    if timezone:
-        logger.warning(
-            f"Timezone '{timezone}' specified but EventBridge cron expressions use UTC. "
-            f"Consider converting time to UTC or using EventBridge Scheduler instead."
+    if timezone and timezone.upper() not in {"UTC", "ETC/UTC"}:
+        raise ValueError(
+            f"Timezone {timezone!r} cannot be represented by EventBridge scheduled rules; "
+            "convert the schedule to UTC or use EventBridge Scheduler"
         )
 
     return cron_expr
@@ -151,6 +214,10 @@ def create_lambda_deployment_package(
     function: Callable[[], None],
     dependencies: list[str] | None = None,
     include_files: list[Path] | None = None,
+    *,
+    runtime: str | None = None,
+    architecture: str = "x86_64",
+    use_docker: bool = False,
 ) -> bytes:
     """Create a Lambda deployment package (zip file) containing the function and dependencies.
 
@@ -162,9 +229,8 @@ def create_lambda_deployment_package(
     Returns:
         Bytes of the zip file ready for Lambda deployment
 
-    Note:
-        For production use, dependencies should be installed into a temp directory
-        and included in the zip. This POC includes a simplified version.
+    Dependencies are installed at the archive root, as required by Lambda.
+    Docker builds should be used for packages with native extensions.
     """
     zip_buffer = io.BytesIO()
 
@@ -204,8 +270,14 @@ def handler(event, context):
             if not any(
                 re.match(r"^cloudpickle(?:\W|$)", item, re.IGNORECASE) for item in requirements
             ):
-                requirements.append("cloudpickle")
-            dependency_package = DependencyManager().build_deployment_package(requirements)
+                requirements.append(f"cloudpickle=={cloudpickle.__version__}")
+            python_version = (
+                runtime or f"python{sys.version_info.major}.{sys.version_info.minor}"
+            ).removeprefix("python")
+            dependency_package = DependencyManager(
+                python_version=python_version,
+                architecture=architecture,
+            ).build_deployment_package(requirements, use_docker=use_docker)
             with zipfile.ZipFile(io.BytesIO(dependency_package)) as dependency_zip:
                 for member in dependency_zip.infolist():
                     if not member.is_dir():
@@ -239,18 +311,33 @@ def create_lambda_layer_package(dependencies: list[str]) -> bytes:
     Returns:
         Bytes of the layer zip file
 
-    Note:
-        In production, you would use `pip install -t python/lib/python3.11/site-packages`
-        to install packages in the correct structure for Lambda layers.
+    This convenience function builds locally for the current interpreter.
+    Provider deployments use :class:`LayerConfig` and default to Docker builds
+    that match the configured runtime and architecture.
     """
-    zip_buffer = io.BytesIO()
+    from .dependencies import DependencyManager
 
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        requirements = "\n".join(dependencies)
-        # Lambda layers must have python/lib/python3.x/site-packages structure
-        zip_file.writestr("python/requirements.txt", requirements)
+    return DependencyManager().create_layer_package(dependencies)
 
-    return zip_buffer.getvalue()
+
+def validate_lambda_package(package: bytes) -> tuple[int, int]:
+    """Validate Lambda's compressed and extracted zip size limits.
+
+    Returns the compressed and extracted sizes in bytes. Packages above the
+    direct-upload limit can still be deployed through S3.
+    """
+    compressed_size = len(package)
+    try:
+        with zipfile.ZipFile(io.BytesIO(package)) as archive:
+            extracted_size = sum(member.file_size for member in archive.infolist())
+    except zipfile.BadZipFile as exc:
+        raise ValueError("deployment package is not a valid zip archive") from exc
+    if extracted_size > 250 * 1024 * 1024:
+        raise ValueError(
+            "Lambda deployment package exceeds the 250 MB extracted-size limit "
+            f"({extracted_size / 1024 / 1024:.2f} MB)"
+        )
+    return compressed_size, extracted_size
 
 
 def extract_dependencies_from_function(function: Callable) -> list[str]:
@@ -278,28 +365,8 @@ def extract_dependencies_from_function(function: Callable) -> list[str]:
     import_pattern = r"^\s*(?:import|from)\s+([a-zA-Z0-9_]+)"
     imports = re.findall(import_pattern, source, re.MULTILINE)
 
-    # Filter out standard library modules (simplified)
-    stdlib_modules = {
-        "os",
-        "sys",
-        "re",
-        "json",
-        "time",
-        "datetime",
-        "pathlib",
-        "typing",
-        "dataclasses",
-        "collections",
-        "itertools",
-        "functools",
-        "io",
-        "math",
-        "random",
-    }
-
-    third_party = [m for m in imports if m not in stdlib_modules]
-
-    return list(set(third_party))
+    third_party = set(imports) - sys.stdlib_module_names
+    return sorted(third_party)
 
 
 def validate_lambda_constraints(

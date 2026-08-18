@@ -1,8 +1,7 @@
-"""Production AWS Lambda deployment using Pulumi for infrastructure as code.
+"""Experimental AWS Lambda deployment using Pulumi Automation API.
 
-This module provides a production-oriented implementation of AWS Lambda deployment
-using Pulumi, enabling infrastructure as code, state management, and multi-cloud
-extensibility.
+Each function is stored in a separate deterministic Pulumi stack. This backend
+has not yet been certified by an end-to-end AWS deployment test.
 
 Requirements:
     pip install "taskflows[pulumi]"
@@ -12,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import tempfile
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,9 +25,9 @@ try:
     PULUMI_AVAILABLE = True
 except ImportError:
     PULUMI_AVAILABLE = False
-    pulumi = None
-    aws = None
-    auto = None
+    pulumi = None  # type: ignore[assignment]
+    aws = None  # type: ignore[assignment]
+    auto = None  # type: ignore[assignment]
 
 from ..common import logger
 from .base import (
@@ -40,19 +39,19 @@ from .base import (
 from .utils import (
     create_lambda_deployment_package,
     schedule_to_eventbridge_expression,
-    validate_lambda_constraints,
+    validate_aws_lambda_config,
+    validate_lambda_package,
 )
 
 
 class PulumiAWSEnvironment(CloudEnvironment):
-    """Production AWS Lambda environment using Pulumi.
+    """Experimental AWS Lambda environment using Pulumi.
 
     This implementation uses Pulumi for infrastructure as code, providing:
     - Declarative infrastructure management
     - State tracking and drift detection
     - Preview changes before deployment
-    - Automatic rollback on failures
-    - Multi-cloud extensibility
+    - Separate state and lifecycle per function
 
     Example:
         >>> env = PulumiAWSEnvironment(
@@ -97,7 +96,9 @@ class PulumiAWSEnvironment(CloudEnvironment):
         self.project_name = project_name
         self.stack_name = stack_name
         self.region = region
-        self.work_dir = work_dir or Path(tempfile.mkdtemp(prefix="taskflows-pulumi-"))
+        self.work_dir = work_dir or Path.home() / ".taskflows" / "pulumi" / project_name
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.auto_create_stack = auto_create_stack
 
         # Create project structure
         self._init_pulumi_project()
@@ -131,15 +132,30 @@ description: TaskFlows cloud deployment infrastructure
         """Deploy function using Pulumi infrastructure as code."""
 
         try:
-            validate_lambda_constraints(
-                config.timeout_seconds,
-                config.memory_mb,
-                config.function_name,
-            )
+            validate_aws_lambda_config(config)
+            if not config.auto_create_role and not config.execution_role_arn:
+                raise ValueError("execution_role_arn is required when auto_create_role=False")
+            if config.execution_role_arn and config.additional_iam_policies:
+                raise ValueError(
+                    "additional_iam_policies can only be attached to an auto-created role"
+                )
+            if (
+                config.execution_role_arn
+                and config.dead_letter_config
+                and config.dead_letter_config.auto_create
+            ):
+                raise ValueError("auto_create DLQ requires an auto-created execution role")
 
             # Create deployment package
             logger.info(f"Creating deployment package for {config.function_name}")
-            deployment_package = create_lambda_deployment_package(function, dependencies)
+            deployment_package = create_lambda_deployment_package(
+                function,
+                dependencies,
+                runtime=config.runtime,
+                architecture=config.architecture,
+                use_docker=config.build_dependencies_in_docker,
+            )
+            validate_lambda_package(deployment_package)
             package_size_mb = len(deployment_package) / (1024 * 1024)
 
             # Determine deployment method
@@ -150,19 +166,23 @@ description: TaskFlows cloud deployment infrastructure
                 return self._create_lambda_infrastructure(config, deployment_package, use_s3)
 
             # Execute Pulumi deployment
-            stack = self._get_or_create_stack(pulumi_program)
+            stack = self._get_or_create_stack(pulumi_program, config.function_name)
             up_result = stack.up(on_output=logger.info)
 
             # Extract outputs
             outputs = up_result.outputs
-            function_arn = outputs.get("function_arn", {}).value
-            function_version = outputs.get("function_version", {}).value
+            function_arn_output = outputs.get("function_arn")
+            function_version_output = outputs.get("function_version")
+            function_arn = function_arn_output.value if function_arn_output else ""
+            function_version = function_version_output.value if function_version_output else None
 
             # Store deployment info
             self._deployed_functions[config.function_name] = {
                 "arn": function_arn,
                 "version": function_version,
                 "config": config,
+                "function": function,
+                "dependencies": dependencies,
                 "stack": stack,
             }
 
@@ -175,7 +195,7 @@ description: TaskFlows cloud deployment infrastructure
                     "region": self.region,
                     "package_size_mb": round(package_size_mb, 2),
                     "deployment_method": "s3" if use_s3 else "direct",
-                    "stack": self.stack_name,
+                    "stack": self._function_stack_name(config.function_name),
                 },
             )
 
@@ -187,6 +207,34 @@ description: TaskFlows cloud deployment infrastructure
                 error=str(e),
             )
 
+    def preview_function(
+        self,
+        function: Callable[[], None],
+        config: CloudFunctionConfig,
+        dependencies: list[str] | None = None,
+    ) -> dict[str, int]:
+        """Preview a deployment without applying it and return change counts."""
+        validate_aws_lambda_config(config)
+        package = create_lambda_deployment_package(
+            function,
+            dependencies,
+            runtime=config.runtime,
+            architecture=config.architecture,
+            use_docker=config.build_dependencies_in_docker,
+        )
+        validate_lambda_package(package)
+
+        def pulumi_program():
+            return self._create_lambda_infrastructure(
+                config,
+                package,
+                config.use_s3_for_large_packages and len(package) > 50 * 1024 * 1024,
+            )
+
+        stack = self._get_or_create_stack(pulumi_program, config.function_name)
+        result = stack.preview(on_output=logger.info)
+        return {str(key): value for key, value in result.change_summary.items()}
+
     def _create_lambda_infrastructure(
         self,
         config: CloudFunctionConfig,
@@ -197,22 +245,25 @@ description: TaskFlows cloud deployment infrastructure
 
         This is the Pulumi program that defines the infrastructure.
         """
-        resources = {}
-
-        # Create IAM role if needed
-        if config.auto_create_role and not config.execution_role_arn:
-            role = self._create_lambda_role(config)
-            execution_role_arn = role.arn
-            resources["role"] = role
-        else:
-            execution_role_arn = config.execution_role_arn
+        resources: dict[str, Any] = {}
 
         # Create Dead Letter Queue if configured
-        dlq_arn = None
+        dlq_arn: Any | None = None
         if config.dead_letter_config and config.dead_letter_config.auto_create:
             dlq = self._create_dlq(config)
             dlq_arn = dlq.arn
             resources["dlq"] = dlq
+        elif config.dead_letter_config:
+            dlq_arn = config.dead_letter_config.target_arn
+
+        # Create IAM role after the DLQ so its send permission can be scoped.
+        execution_role_arn: Any
+        if config.auto_create_role and not config.execution_role_arn:
+            role = self._create_lambda_role(config, dlq_arn)
+            execution_role_arn = role.arn
+            resources["role"] = role
+        else:
+            execution_role_arn = config.execution_role_arn
 
         # Persist the deployment archive for Pulumi's asset APIs.
         package_hash = hashlib.sha256(deployment_package).hexdigest()[:16]
@@ -230,7 +281,7 @@ description: TaskFlows cloud deployment infrastructure
             code_args = {"code": pulumi.FileArchive(str(package_path))}
 
         # Create Lambda Layers if specified
-        layer_arns = []
+        layer_arns: list[Any] = []
         if config.layers:
             for layer_config in config.layers:
                 if layer_config.layer_arn:
@@ -249,6 +300,7 @@ description: TaskFlows cloud deployment infrastructure
             "timeout": config.timeout_seconds,
             "memory_size": config.memory_mb,
             "publish": config.enable_versioning,
+            "reserved_concurrent_executions": config.reserved_concurrent_executions,
             **code_args,
         }
 
@@ -265,8 +317,8 @@ description: TaskFlows cloud deployment infrastructure
         if config.vpc_config:
             lambda_args["vpc_config"] = config.vpc_config
 
-        if dlq_arn or (config.dead_letter_config and config.dead_letter_config.target_arn):
-            target = dlq_arn or config.dead_letter_config.target_arn
+        if dlq_arn:
+            target = dlq_arn
             lambda_args["dead_letter_config"] = {"target_arn": target}
 
         if config.enable_xray_tracing:
@@ -288,23 +340,51 @@ description: TaskFlows cloud deployment infrastructure
         )
         resources["function"] = lambda_function
 
-        # Publish version if versioning enabled
-        if config.enable_versioning:
-            # Function version is automatically created
-            pass
+        log_group = aws.cloudwatch.LogGroup(
+            f"{config.function_name}-logs",
+            name=pulumi.Output.concat("/aws/lambda/", lambda_function.name),
+            retention_in_days=config.log_retention_days,
+            tags=config.tags,
+        )
+        resources["log_group"] = log_group
 
-        # Set concurrency limits
-        if config.reserved_concurrent_executions:
-            concurrency = aws.lambda_.FunctionConcurrency(
-                f"{config.function_name}-concurrency",
+        invoke_arn = lambda_function.arn
+        invoke_qualifier = None
+        if config.create_alias:
+            alias = aws.lambda_.Alias(
+                f"{config.function_name}-{config.create_alias}-alias",
+                name=config.create_alias,
                 function_name=lambda_function.name,
-                reserved_concurrent_executions=config.reserved_concurrent_executions,
+                function_version=lambda_function.version,
             )
-            resources["concurrency"] = concurrency
+            resources["alias"] = alias
+            invoke_arn = alias.arn
+            invoke_qualifier = alias.name
+
+        if config.retry_config:
+            event_invoke_config = aws.lambda_.FunctionEventInvokeConfig(
+                f"{config.function_name}-async-invocation",
+                function_name=lambda_function.name,
+                qualifier=invoke_qualifier,
+                maximum_retry_attempts=config.retry_config.max_retry_attempts,
+                maximum_event_age_in_seconds=config.retry_config.max_event_age_seconds,
+            )
+            resources["event_invoke_config"] = event_invoke_config
+
+        if config.provisioned_concurrency:
+            provisioned = aws.lambda_.ProvisionedConcurrencyConfig(
+                f"{config.function_name}-provisioned-concurrency",
+                function_name=lambda_function.name,
+                qualifier=invoke_qualifier or lambda_function.version,
+                provisioned_concurrent_executions=config.provisioned_concurrency,
+            )
+            resources["provisioned_concurrency"] = provisioned
 
         # Create EventBridge rules for schedules
         if config.schedules:
-            rules = self._create_eventbridge_schedules(config, lambda_function)
+            rules = self._create_eventbridge_schedules(
+                config, lambda_function, invoke_arn, invoke_qualifier
+            )
             resources["schedule_rules"] = rules
 
         # Create CloudWatch alarms if monitoring enabled
@@ -320,7 +400,9 @@ description: TaskFlows cloud deployment infrastructure
 
         return resources
 
-    def _create_lambda_role(self, config: CloudFunctionConfig) -> aws.iam.Role:
+    def _create_lambda_role(
+        self, config: CloudFunctionConfig, dlq_arn: Any | None = None
+    ) -> aws.iam.Role:
         """Create IAM role for Lambda execution."""
         role_name = config.role_name or f"{config.function_name}-role"
 
@@ -369,6 +451,28 @@ description: TaskFlows cloud deployment infrastructure
                     policy_arn=policy_arn,
                 )
 
+        if dlq_arn:
+            aws.iam.RolePolicy(
+                f"{config.function_name}-dlq-policy",
+                role=role.name,
+                policy=pulumi.Output.json_dumps(
+                    {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Effect": "Allow",
+                                "Action": (
+                                    "sns:Publish"
+                                    if isinstance(dlq_arn, str) and ":sns:" in dlq_arn
+                                    else "sqs:SendMessage"
+                                ),
+                                "Resource": dlq_arn,
+                            }
+                        ],
+                    }
+                ),
+            )
+
         return role
 
     def _create_dlq(self, config: CloudFunctionConfig) -> aws.sqs.Queue:
@@ -405,25 +509,37 @@ description: TaskFlows cloud deployment infrastructure
 
     def _create_lambda_layer(self, layer_config: LayerConfig) -> aws.lambda_.LayerVersion:
         """Create Lambda Layer from dependencies."""
-        # This would need proper layer packaging (dependencies in python/lib/python3.x/site-packages)
-        # For now, simplified implementation
-        from .utils import create_lambda_layer_package
+        from .dependencies import DependencyManager
 
-        layer_package = create_lambda_layer_package(layer_config.dependencies or [])
+        layer_package = DependencyManager(
+            python_version=layer_config.compatible_runtimes[0].removeprefix("python"),
+            architecture=layer_config.compatible_architectures[0],
+        ).create_layer_package(
+            layer_config.dependencies or [],
+            runtime=layer_config.compatible_runtimes[0],
+            use_docker=layer_config.build_in_docker,
+        )
         layer_path = self.work_dir / f"{layer_config.layer_name}-layer.zip"
         layer_path.write_bytes(layer_package)
+        if layer_config.layer_name is None:
+            raise ValueError("layer_name is required when creating a layer")
 
         layer = aws.lambda_.LayerVersion(
             layer_config.layer_name,
             layer_name=layer_config.layer_name,
             code=pulumi.FileArchive(str(layer_path)),
             compatible_runtimes=layer_config.compatible_runtimes,
+            compatible_architectures=layer_config.compatible_architectures,
         )
 
         return layer
 
     def _create_eventbridge_schedules(
-        self, config: CloudFunctionConfig, lambda_function: aws.lambda_.Function
+        self,
+        config: CloudFunctionConfig,
+        lambda_function: aws.lambda_.Function,
+        invoke_arn: Any,
+        invoke_qualifier: Any | None,
     ) -> list[aws.cloudwatch.EventRule]:
         """Create EventBridge rules for schedules."""
         rules = []
@@ -447,13 +563,14 @@ description: TaskFlows cloud deployment infrastructure
                 function=lambda_function.name,
                 principal="events.amazonaws.com",
                 source_arn=rule.arn,
+                qualifier=invoke_qualifier,
             )
 
             # Add Lambda as target
             aws.cloudwatch.EventTarget(
                 f"{rule_name}-target",
                 rule=rule.name,
-                arn=lambda_function.arn,
+                arn=invoke_arn,
             )
 
             rules.append(rule)
@@ -464,26 +581,52 @@ description: TaskFlows cloud deployment infrastructure
         self, config: CloudFunctionConfig, lambda_function: aws.lambda_.Function
     ) -> list[aws.cloudwatch.MetricAlarm]:
         """Create CloudWatch alarms for monitoring."""
-        alarms = []
+        alarms: list[Any] = []
         monitoring = config.monitoring
+        if monitoring is None:
+            return alarms
 
         # Error rate alarm
-        if monitoring.error_rate_threshold:
+        if monitoring.error_rate_threshold is not None:
             error_alarm = aws.cloudwatch.MetricAlarm(
                 f"{config.function_name}-error-rate",
                 name=f"{config.function_name}-error-rate",
                 comparison_operator="GreaterThanThreshold",
                 evaluation_periods=2,
-                metric_name="Errors",
-                namespace="AWS/Lambda",
-                period=300,  # 5 minutes
-                statistic="Average",
                 threshold=monitoring.error_rate_threshold,
-                dimensions={"FunctionName": lambda_function.name},
                 alarm_description=f"Error rate > {monitoring.error_rate_threshold * 100}%",
                 alarm_actions=[monitoring.alarm_sns_topic_arn]
                 if monitoring.alarm_sns_topic_arn
                 else [],
+                treat_missing_data="notBreaching",
+                metric_queries=[
+                    {
+                        "id": "rate",
+                        "expression": "IF(invocations>0,errors/invocations,0)",
+                        "label": "Error rate",
+                        "return_data": True,
+                    },
+                    {
+                        "id": "invocations",
+                        "metric": {
+                            "metric_name": "Invocations",
+                            "namespace": "AWS/Lambda",
+                            "period": 300,
+                            "stat": "Sum",
+                            "dimensions": {"FunctionName": lambda_function.name},
+                        },
+                    },
+                    {
+                        "id": "errors",
+                        "metric": {
+                            "metric_name": "Errors",
+                            "namespace": "AWS/Lambda",
+                            "period": 300,
+                            "stat": "Sum",
+                            "dimensions": {"FunctionName": lambda_function.name},
+                        },
+                    },
+                ],
             )
             alarms.append(error_alarm)
 
@@ -509,11 +652,18 @@ description: TaskFlows cloud deployment infrastructure
 
         return alarms
 
-    def _get_or_create_stack(self, program: Callable) -> auto.Stack:
+    def _function_stack_name(self, function_name: str) -> str:
+        """Return a stable stack name so functions cannot replace one another."""
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]", "-", function_name)
+        digest = hashlib.sha256(function_name.encode()).hexdigest()[:8]
+        return f"{self.stack_name}-{safe_name[:60]}-{digest}"
+
+    def _get_or_create_stack(self, program: Callable, function_name: str) -> auto.Stack:
         """Get or create Pulumi stack."""
         try:
-            stack = auto.create_or_select_stack(
-                stack_name=self.stack_name,
+            operation = auto.create_or_select_stack if self.auto_create_stack else auto.select_stack
+            stack = operation(
+                stack_name=self._function_stack_name(function_name),
                 project_name=self.project_name,
                 program=program,
                 opts=auto.LocalWorkspaceOptions(work_dir=str(self.work_dir)),
@@ -567,10 +717,20 @@ description: TaskFlows cloud deployment infrastructure
         try:
             if function_name in self._deployed_functions:
                 stack = self._deployed_functions[function_name]["stack"]
-                stack.destroy(on_output=logger.info)
-                del self._deployed_functions[function_name]
-                return True
-            return False
+            else:
+                stack = auto.select_stack(
+                    stack_name=self._function_stack_name(function_name),
+                    project_name=self.project_name,
+                    program=lambda: None,
+                    opts=auto.LocalWorkspaceOptions(work_dir=str(self.work_dir)),
+                )
+            stack.destroy(on_output=logger.info)
+            try:
+                stack.workspace.remove_stack(stack.name)
+            except Exception as error:
+                logger.warning(f"Destroyed stack but could not remove its state: {error}")
+            self._deployed_functions.pop(function_name, None)
+            return True
         except Exception as e:
             logger.error(f"Failed to delete {function_name}: {e}")
             return False
@@ -637,7 +797,7 @@ description: TaskFlows cloud deployment infrastructure
                 "name": name,
                 "arn": info["arn"],
                 "version": info["version"],
-                "stack": self.stack_name,
+                "stack": self._function_stack_name(name),
             }
             for name, info in self._deployed_functions.items()
         ]
@@ -666,6 +826,18 @@ description: TaskFlows cloud deployment infrastructure
         config: CloudFunctionConfig,
     ) -> CloudDeploymentResult:
         """Update function configuration using Pulumi update."""
-        # This would trigger a Pulumi update with new configuration
-        # Implementation would re-run the Pulumi program with updated config
-        raise NotImplementedError("Configuration update via Pulumi not yet implemented")
+        deployed = self._deployed_functions.get(function_name)
+        if not deployed:
+            return CloudDeploymentResult(
+                success=False,
+                resource_id=function_name,
+                error=(
+                    "Function code is not available in this process; use deploy_function "
+                    "to reconcile a persisted Pulumi stack"
+                ),
+            )
+        return self.deploy_function(
+            deployed["function"],
+            config,
+            deployed["dependencies"],
+        )

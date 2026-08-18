@@ -3,17 +3,14 @@
 This beta module deploys taskflows services to AWS Lambda. GCP, Azure, and
 Kubernetes provider values are reserved for future implementations.
 
-Features:
-    - Multiple backends (Pulumi for IaC, boto3 for direct deployment)
-    - Production features (monitoring, DLQ, layers, versioning)
-    - Service integration (deploy existing Service objects)
-    - Multi-environment support (dev, staging, production)
-    - Docker-based dependency builds
+The boto3 backend implements the AWS resource lifecycle directly. The Pulumi
+backend is experimental. See ``docs/cloud.md`` for the supported contract and
+known limitations.
 
 Quick Start:
     >>> from taskflows.cloud.manager import DeploymentManager
     >>>
-    >>> manager = DeploymentManager(provider="aws", backend="pulumi")
+    >>> manager = DeploymentManager(provider="aws", backend="boto3")
     >>> result = manager.deploy_function(
     ...     name="my-task",
     ...     function=lambda: print("Hello"),

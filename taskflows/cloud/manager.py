@@ -1,16 +1,18 @@
 """Deployment manager for coordinating cloud deployments.
 
-This module provides a high-level interface for deploying taskflows services
-to cloud platforms, with support for multiple backends (Pulumi, boto3, etc.).
+This module provides a high-level interface for the AWS boto3 and experimental
+Pulumi backends. Other provider enum values are not implemented.
 """
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from ..schedule import Schedule
 from ..service import Service
 from .base import (
     CloudDeploymentResult,
+    CloudEnvironment,
     CloudFunctionConfig,
     CloudProvider,
     DeploymentBackend,
@@ -21,8 +23,7 @@ from .base import (
 class DeploymentManager:
     """High-level deployment manager for cloud functions.
 
-    This manager provides a unified interface for deploying taskflows services
-    to various cloud platforms using different backends.
+    This manager provides a unified interface for AWS Lambda backends.
 
     Example:
         >>> manager = DeploymentManager(
@@ -50,8 +51,8 @@ class DeploymentManager:
         region: str = "us-east-1",
         project_name: str = "taskflows",
         environment: str = "production",
-        **backend_kwargs,
-    ):
+        **backend_kwargs: Any,
+    ) -> None:
         """Initialize deployment manager.
 
         Args:
@@ -71,7 +72,7 @@ class DeploymentManager:
         # Initialize backend environment
         self._environment = self._create_environment(**backend_kwargs)
 
-    def _create_environment(self, **kwargs):
+    def _create_environment(self, **kwargs: Any) -> CloudEnvironment:
         """Create cloud environment based on provider and backend."""
         if self.provider == CloudProvider.AWS:
             if self.backend == DeploymentBackend.PULUMI:
@@ -94,10 +95,10 @@ class DeploymentManager:
                 raise ValueError(f"Backend {self.backend} not supported for AWS")
 
         elif self.provider == CloudProvider.GCP:
-            raise NotImplementedError("GCP support coming soon")
+            raise NotImplementedError("GCP is not implemented")
 
         elif self.provider == CloudProvider.AZURE:
-            raise NotImplementedError("Azure support coming soon")
+            raise NotImplementedError("Azure is not implemented")
 
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
@@ -111,8 +112,8 @@ class DeploymentManager:
         timeout_seconds: int = 60,
         environment_variables: dict[str, str] | None = None,
         dependencies: list[str] | None = None,
-        enable_monitoring: bool = True,
-        **config_kwargs,
+        enable_monitoring: bool = False,
+        **config_kwargs: Any,
     ) -> CloudDeploymentResult:
         """Deploy a function with simplified configuration.
 
@@ -134,23 +135,24 @@ class DeploymentManager:
         schedules = self._parse_schedule(schedule) if schedule else None
 
         # Build configuration
-        config = CloudFunctionConfig(
-            function_name=name,
-            memory_mb=memory_mb,
-            timeout_seconds=timeout_seconds,
-            environment_variables=environment_variables,
-            schedules=schedules,
-            deployment_environment=self.environment,
-            monitoring=MonitoringConfig(enable_cloudwatch_alarms=enable_monitoring)
+        config_values: dict[str, Any] = {
+            "function_name": name,
+            "memory_mb": memory_mb,
+            "timeout_seconds": timeout_seconds,
+            "environment_variables": environment_variables,
+            "schedules": schedules,
+            "deployment_environment": self.environment,
+            "monitoring": MonitoringConfig(enable_cloudwatch_alarms=True)
             if enable_monitoring
             else None,
-            tags={
+            "tags": {
                 "Project": self.project_name,
                 "Environment": self.environment,
                 "ManagedBy": "TaskFlows",
             },
-            **config_kwargs,
-        )
+        }
+        config_values.update(config_kwargs)
+        config = CloudFunctionConfig(**config_values)
 
         return self._environment.deploy_function(function, config, dependencies)
 
@@ -158,7 +160,7 @@ class DeploymentManager:
         self,
         service: Service,
         dependencies: list[str] | None = None,
-        **config_overrides,
+        **config_overrides: Any,
     ) -> CloudDeploymentResult:
         """Deploy a taskflows Service to the cloud.
 
@@ -171,7 +173,7 @@ class DeploymentManager:
             CloudDeploymentResult
         """
         # Extract configuration from Service
-        schedules = []
+        schedules: list[Schedule] = []
         if service.start_schedule:
             if isinstance(service.start_schedule, Sequence):
                 schedules.extend(service.start_schedule)
@@ -179,38 +181,36 @@ class DeploymentManager:
                 schedules.append(service.start_schedule)
 
         # Build configuration from Service
-        config = CloudFunctionConfig(
-            function_name=service.name,
-            schedules=schedules if schedules else None,
-            environment_variables=service.env or {},
-            timeout_seconds=service.timeout or 60,
-            deployment_environment=self.environment,
-            tags={
+        config_values: dict[str, Any] = {
+            "function_name": service.name,
+            "schedules": schedules or None,
+            "environment_variables": service.env or {},
+            "timeout_seconds": service.timeout or 60,
+            "deployment_environment": self.environment,
+            "tags": {
                 "Project": self.project_name,
                 "Environment": self.environment,
                 "ManagedBy": "TaskFlows",
                 "ServiceType": "Scheduled",
             },
-            **config_overrides,
-        )
+        }
+        config_values.update(config_overrides)
+        config = CloudFunctionConfig(**config_values)
 
         # Get the function to deploy
         if callable(service.start_command):
             function = service.start_command
         else:
-            # If start_command is a string, wrap it
-            def command_wrapper():
-                import subprocess
-
-                subprocess.run(service.start_command, shell=True, check=True)
-
-            function = command_wrapper
+            raise ValueError(
+                "cloud deployment requires Service.start_command to be a Python callable; "
+                "local shell commands and systemd environments cannot run in Lambda"
+            )
 
         return self._environment.deploy_function(function, config, dependencies)
 
     def deploy_multiple(
         self,
-        functions: list[dict],
+        functions: list[dict[str, Any]],
         parallel: bool = False,
     ) -> list[CloudDeploymentResult]:
         """Deploy multiple functions.
@@ -223,7 +223,7 @@ class DeploymentManager:
             List of CloudDeploymentResults
         """
 
-        def deploy(item: dict) -> CloudDeploymentResult:
+        def deploy(item: dict[str, Any]) -> CloudDeploymentResult:
             func_config = dict(item)
             name = func_config.pop("name")
             function = func_config.pop("function")
@@ -284,7 +284,7 @@ class DeploymentManager:
         """
         return self._environment.delete_function(function_name)
 
-    def list_functions(self) -> list[dict]:
+    def list_functions(self) -> list[dict[str, Any]]:
         """List all deployed functions.
 
         Returns:
@@ -313,7 +313,7 @@ class DeploymentManager:
         function_name: str,
         start_time: int | None = None,
         end_time: int | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get function metrics.
 
         Args:
@@ -338,14 +338,15 @@ class DeploymentManager:
         from ..schedule import Calendar
 
         if isinstance(schedule, list):
+            if not all(isinstance(item, Schedule) for item in schedule):
+                raise ValueError("schedule list must contain only Schedule objects")
             return schedule
-        elif isinstance(schedule, Schedule):
+        if isinstance(schedule, Schedule):
             return [schedule]
-        elif isinstance(schedule, str):
+        if isinstance(schedule, str):
             # Parse schedule string (e.g., "Mon-Fri 09:00")
             return [Calendar(schedule=schedule)]
-        else:
-            raise ValueError(f"Invalid schedule format: {type(schedule)}")
+        raise ValueError(f"Invalid schedule format: {type(schedule)}")
 
 
 def deploy_service_to_cloud(
@@ -354,7 +355,7 @@ def deploy_service_to_cloud(
     backend: DeploymentBackend | str = DeploymentBackend.PULUMI,
     region: str = "us-east-1",
     environment: str = "production",
-    **config_overrides,
+    **config_overrides: Any,
 ) -> CloudDeploymentResult:
     """Convenience function to deploy a Service to the cloud.
 
