@@ -28,6 +28,7 @@ A Python library for task management, service scheduling, and alerting. Convert 
 - [CLI Reference](#cli-reference)
 - [Web UI](#web-ui)
 - [API Server](#api-server)
+- [AWS Lambda (Beta)](#aws-lambda-beta)
 - [Security](#security)
 - [Logging & Monitoring](#logging--monitoring)
 - [Slack Bot](#slack-bot)
@@ -114,6 +115,13 @@ srv = Service(
 )
 srv.create()
 ```
+
+## AWS Lambda (Beta)
+
+Install `taskflows[aws]` to package a no-argument Python callable for AWS
+Lambda and reconcile UTC EventBridge schedules. The Pulumi backend is
+experimental. Read the [supported contract and limitations](docs/cloud.md)
+before deploying; the feature has not yet completed a live AWS certification.
 
 ## Tasks
 
