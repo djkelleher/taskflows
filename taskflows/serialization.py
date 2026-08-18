@@ -554,7 +554,7 @@ def _serialize_value(value: Any, include_none: bool = False) -> Any:
         return str(value)
 
     # Handle Pydantic models (recurse per-field so nested registered types —
-    # e.g. msgflows destinations inside Alerts/MissedRunAlert — keep their
+    # e.g. alert destinations inside Alerts/MissedRunAlert — keep their
     # type markers; model_dump would flatten them to plain dicts)
     if isinstance(value, BaseModel):
         data = {"type": _get_type_name(value)}
@@ -975,8 +975,6 @@ def _ensure_types_registered():
         return
     _types_registered = True
     # Import here to avoid circular imports
-    from msgflows import DiscordChannel, EmailAddrs, SlackChannel
-
     from taskflows.constraints import (
         CgroupConfig,
         CPUPressure,
@@ -999,13 +997,15 @@ def _ensure_types_registered():
     from taskflows.schedule import Calendar, Periodic
     from taskflows.service import RestartPolicy, Service, Venv, Watchdog
 
+    from .alerts import DiscordChannel, EmailAddrs, SlackChannel
+
     # Service types
     register_type(Venv)
     register_type(Service)
     register_type(RestartPolicy)
     register_type(Watchdog)
     register_type(MissedRunAlert)
-    # msgflows alert destinations (used by Alerts / MissedRunAlert configs)
+    # Alert destinations (used by Alerts / MissedRunAlert configs)
     register_type(SlackChannel)
     register_type(EmailAddrs)
     register_type(DiscordChannel)

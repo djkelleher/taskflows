@@ -4,10 +4,10 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from msgflows import SlackChannel
 
 from taskflows import MissedRunAlert, Service
 from taskflows import monitor as monitor_mod
+from taskflows.alerts import SlackChannel
 from taskflows.monitor import (
     build_monitor_service,
     check_missed_runs,

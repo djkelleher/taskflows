@@ -12,9 +12,9 @@ from zoneinfo import ZoneInfo
 
 import requests
 from dynamic_imports import find_instances
-from msgflows.components import Component, Map, Table, Text
-from msgflows.utils import as_code_block
 
+from taskflows.alerts.components import Component, Map, Table, Text
+from taskflows.alerts.utils import as_code_block
 from taskflows.common import (
     config,
     load_service_files,

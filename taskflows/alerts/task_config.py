@@ -1,7 +1,7 @@
-"""Task alert configuration and msgflows-backed sending.
+"""Task alert configuration and built-in sending.
 
-Alert destinations are msgflows `MsgDst` instances (SlackChannel, EmailAddrs,
-DiscordChannel, ...). New destination types only need to be added to msgflows;
+Alert destinations are `MsgDst` instances (SlackChannel, EmailAddrs,
+DiscordChannel, ...). New destination types only need to be added to taskflows.alerts;
 taskflows accepts any MsgDst. Alert sending is best-effort: a failing alert is
 logged and never fails the task that triggered it.
 """
@@ -10,16 +10,16 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from msgflows import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
 from pydantic import BaseModel
 
-from .common import logger
+from ..common import logger
+from . import ContentType, Emoji, FontSize, MsgDst, Text
 
 TaskEvent = Literal["start", "error", "finish"]
 
 
 class Alerts(BaseModel):
-    # where to send the alerts (any msgflows destination, e.g. SlackChannel, EmailAddrs)
+    # where to send the alerts (any alert destination, e.g. SlackChannel, EmailAddrs)
     send_to: Any
     # when to send the alerts (start, error, finish)
     send_on: Sequence[TaskEvent] | TaskEvent = ["start", "error", "finish"]
@@ -30,7 +30,7 @@ class Alerts(BaseModel):
         for destination in self.send_to:
             if not isinstance(destination, MsgDst):
                 raise TypeError(
-                    f"send_to entries must be msgflows destinations (MsgDst), "
+                    f"send_to entries must be alert destinations (MsgDst), "
                     f"got {type(destination).__name__}"
                 )
         if isinstance(self.send_on, str):
@@ -50,6 +50,10 @@ def normalize_alerts(
 
 async def _safe_send(task_name: str, event: str, **kwargs) -> None:
     """Send an alert; log and swallow failures so alerts never fail the task."""
+    # Resolve through the package at call time so applications can replace or
+    # instrument the public sender without reaching into this implementation.
+    from . import send_alert
+
     try:
         await send_alert(**kwargs)
     except Exception as error:

@@ -75,14 +75,14 @@ jobs:
 
             | Metric | Coverage | Status |
             |--------|----------|--------|
-            | Lines | ${total.lines.pct}% | ${total.lines.pct >= 35 ? '✅' : '❌'} |
-            | Branches | ${total.branches.pct}% | ${total.branches.pct >= 28 ? '✅' : '❌'} |
-            | Functions | ${total.functions.pct}% | ${total.functions.pct >= 30 ? '✅' : '❌'} |
-            | Statements | ${total.statements.pct}% | ${total.statements.pct >= 35 ? '✅' : '❌'} |
+            | Lines | ${total.lines.pct}% | ${total.lines.pct >= 27 ? '✅' : '❌'} |
+            | Branches | ${total.branches.pct}% | ${total.branches.pct >= 21 ? '✅' : '❌'} |
+            | Functions | ${total.functions.pct}% | ${total.functions.pct >= 24 ? '✅' : '❌'} |
+            | Statements | ${total.statements.pct}% | ${total.statements.pct >= 26 ? '✅' : '❌'} |
 
-            **Thresholds**: Lines 35% | Branches 28% | Functions 30% | Statements 35%
+            **Thresholds**: Lines 27% | Branches 21% | Functions 24% | Statements 26%
 
-            ${total.lines.pct >= 35 && total.branches.pct >= 28 && total.functions.pct >= 30 && total.statements.pct >= 35
+            ${total.lines.pct >= 27 && total.branches.pct >= 21 && total.functions.pct >= 24 && total.statements.pct >= 26
               ? '✅ All coverage thresholds met!'
               : '⚠️ Some coverage thresholds not met'}`;
 

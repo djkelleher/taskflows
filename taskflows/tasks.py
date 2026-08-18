@@ -19,9 +19,8 @@ import anyio
 import cloudpickle
 import structlog.contextvars
 from anyio.from_thread import BlockingPortal
-from msgflows import MsgDst
 
-from .alerts import Alerts, normalize_alerts
+from .alerts import Alerts, MsgDst, normalize_alerts
 from .alerts import send_error_alert as _send_error_alert
 from .alerts import send_finish_alert as _send_finish_alert
 from .alerts import send_start_alert as _send_start_alert

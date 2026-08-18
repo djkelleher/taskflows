@@ -30,9 +30,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from msgflows import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
 from pydantic import BaseModel
 
+from .alerts import ContentType, Emoji, FontSize, MsgDst, Text, send_alert
 from .common import (
     _SYSTEMD_FILE_PREFIX,
     ensure_data_dir,
@@ -47,7 +47,7 @@ MONITOR_SUFFIX = "#monitor.json"
 class MissedRunAlert(BaseModel):
     """Dead-man-switch config for one service."""
 
-    # msgflows destination(s) to alert (SlackChannel, EmailAddrs, ...)
+    # destination(s) to alert (SlackChannel, EmailAddrs, ...)
     send_to: Any
     # how long past the expected run time before alerting
     grace_seconds: int = 300
@@ -60,7 +60,7 @@ class MissedRunAlert(BaseModel):
         for destination in self.send_to:
             if not isinstance(destination, MsgDst):
                 raise TypeError(
-                    f"send_to entries must be msgflows destinations (MsgDst), "
+                    f"send_to entries must be alert destinations (MsgDst), "
                     f"got {type(destination).__name__}"
                 )
 

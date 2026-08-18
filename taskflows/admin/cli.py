@@ -31,10 +31,10 @@ from pathlib import Path
 import click
 import yaml
 from click import Group
-from msgflows.components import Table
 from rich.console import Console
 
 from taskflows.admin.core import execute_command_on_servers
+from taskflows.alerts.components import Table
 from taskflows.entrypoints import async_entrypoint, parse_str_kwargs
 
 from .security import (

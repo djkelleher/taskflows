@@ -60,64 +60,48 @@ We chose Prometheus for metrics collection with the following implementation:
 #### Task Metrics
 ```python
 task_duration = Histogram(
-    'taskflows_task_duration_seconds',
-    'Task execution duration',
-    ['task_name', 'status'],  # Labels
-    buckets=(0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0)
+    "taskflows_task_duration_seconds",
+    "Task execution duration",
+    ["task_name", "status"],  # Labels
+    buckets=(0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0),
 )
 
-task_count = Counter(
-    'taskflows_task_total',
-    'Total task executions',
-    ['task_name', 'status']
-)
+task_count = Counter("taskflows_task_total", "Total task executions", ["task_name", "status"])
 
 task_errors = Counter(
-    'taskflows_task_errors_total',
-    'Task errors by type',
-    ['task_name', 'error_type']
+    "taskflows_task_errors_total", "Task errors by type", ["task_name", "error_type"]
 )
 
-task_retries = Counter(
-    'taskflows_task_retries_total',
-    'Task retry attempts',
-    ['task_name']
-)
+task_retries = Counter("taskflows_task_retries_total", "Task retry attempts", ["task_name"])
 ```
 
 #### Service Metrics
 ```python
 service_state = Gauge(
-    'taskflows_service_state',
-    'Service state (1=active, 0=inactive, -1=failed)',
-    ['service_name', 'state']
+    "taskflows_service_state",
+    "Service state (1=active, 0=inactive, -1=failed)",
+    ["service_name", "state"],
 )
 
 service_restarts = Counter(
-    'taskflows_service_restarts_total',
-    'Service restart count',
-    ['service_name', 'reason']
+    "taskflows_service_restarts_total", "Service restart count", ["service_name", "reason"]
 )
 ```
 
 #### API Metrics
 ```python
 api_request_duration = Histogram(
-    'taskflows_api_request_duration_seconds',
-    'API request duration',
-    ['method', 'endpoint', 'status_code']
+    "taskflows_api_request_duration_seconds",
+    "API request duration",
+    ["method", "endpoint", "status_code"],
 )
 
 api_request_count = Counter(
-    'taskflows_api_request_total',
-    'Total API requests',
-    ['method', 'endpoint', 'status_code']
+    "taskflows_api_request_total", "Total API requests", ["method", "endpoint", "status_code"]
 )
 
 api_active_requests = Gauge(
-    'taskflows_api_active_requests',
-    'Currently active API requests',
-    ['method', 'endpoint']
+    "taskflows_api_active_requests", "Currently active API requests", ["method", "endpoint"]
 )
 ```
 

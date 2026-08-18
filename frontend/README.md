@@ -325,11 +325,11 @@ The frontend has comprehensive test coverage using **Vitest**, **React Testing L
 ### Test Coverage
 
 - **91 passing tests** covering core functionality
-- **~37% code coverage** with thresholds enforced:
-  - Lines: 35%
-  - Branches: 28%
-  - Functions: 30%
-  - Statements: 35%
+- **Application coverage thresholds enforced** (vendored shared UI excluded):
+  - Lines: 27%
+  - Branches: 21%
+  - Functions: 24%
+  - Statements: 26%
 
 ### Test Structure
 

@@ -78,6 +78,7 @@ Example:
 ```python
 from taskflows import task
 
+
 @task(name="data-ingestion", timeout=300, retries=3)
 async def ingest_data(source: str):
     # Task code here
@@ -104,7 +105,7 @@ service = Service(
     exec_start="uvicorn app:app --host 0.0.0.0",
     schedule=Periodic(hours=1),  # Run hourly
     cgroup=CgroupConfig(
-        memory_limit=2 * 1024 ** 3,  # 2 GB
+        memory_limit=2 * 1024**3,  # 2 GB
         cpu_quota=200000,  # 2 CPUs
     ),
     restart_policy="on-failure",
@@ -238,10 +239,7 @@ Subclass `Service` to add domain-specific behavior:
 ```python
 class WebService(Service):
     def __init__(self, app_module: str, port: int, **kwargs):
-        super().__init__(
-            exec_start=f"uvicorn {app_module} --port {port}",
-            **kwargs
-        )
+        super().__init__(exec_start=f"uvicorn {app_module} --port {port}", **kwargs)
 ```
 
 ### Custom Metrics
@@ -249,7 +247,7 @@ Add application-specific metrics:
 ```python
 from prometheus_client import Counter
 
-my_metric = Counter('my_app_events_total', 'Custom events', ['event_type'])
+my_metric = Counter("my_app_events_total", "Custom events", ["event_type"])
 ```
 
 ### Task Hooks

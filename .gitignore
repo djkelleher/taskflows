@@ -16,6 +16,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+# The web UI vendors two runtime helpers under a directory named `lib`.
+!frontend/src/ui/lib/
+!frontend/src/ui/lib/*.ts
 lib64/
 parts/
 sdist/
@@ -37,6 +40,7 @@ MANIFEST
 .pytest_cache/
 .coverage
 .coverage.*
+.toplayer/
 htmlcov/
 .hypothesis/
 

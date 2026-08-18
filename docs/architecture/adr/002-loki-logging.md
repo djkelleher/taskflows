@@ -81,11 +81,7 @@ Python services use `structlog` via `taskflows.loggers.structured` to emit JSON-
 ```python
 from taskflows.loggers.structured import configure_loki_logging, get_logger
 
-configure_loki_logging(
-    app_name="my-service",
-    environment="production",
-    log_level="INFO"
-)
+configure_loki_logging(app_name="my-service", environment="production", log_level="INFO")
 
 log = get_logger()
 log.info("task_started", task_id="abc123", user_id=42)

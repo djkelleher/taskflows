@@ -19,43 +19,53 @@ Created a centralized `taskflows/constants.py` module organizing all magic numbe
 ```python
 from typing import Final
 
+
 class API:
     """API server configuration constants."""
+
     DEFAULT_PORT: Final[int] = 7777
     DEFAULT_TIMEOUT: Final[int] = 10
     MAX_RESPONSE_SIZE: Final[int] = 8000
     MAX_TRACEBACK_LINES: Final[int] = 40
 
+
 class Security:
     """Security and authentication constants."""
+
     HMAC_WINDOW_SECONDS: Final[int] = 300  # 5 minutes
     JWT_EXPIRATION_SECONDS: Final[int] = 3600  # 1 hour
     BCRYPT_ROUNDS: Final[int] = 12
 
+
 class Service:
     """Service management constants."""
+
     DEFAULT_RESTART_DELAY: Final[int] = 10
     DEFAULT_STOP_TIMEOUT: Final[int] = 120
     MAX_SERVICE_NAME_LENGTH: Final[int] = 255
 
+
 class Logging:
     """Logging configuration constants."""
+
     DEFAULT_LOG_LEVEL: Final[str] = "INFO"
     MAX_LOG_MESSAGE_SIZE: Final[int] = 10000
     LOG_ROTATION_SIZE: Final[int] = 10 * 1024 * 1024  # 10 MB
 
+
 class Metrics:
     """Prometheus metrics configuration."""
+
     NAMESPACE: Final[str] = "taskflows"
-    DURATION_BUCKETS: Final[tuple] = (
-        0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0
-    )
+    DURATION_BUCKETS: Final[tuple] = (0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0)
     TASK_DURATION: Final[str] = "task_duration_seconds"
     SERVICE_STATE: Final[str] = "service_state"
     API_REQUEST_DURATION: Final[str] = "api_request_duration_seconds"
 
+
 class Docker:
     """Docker-related constants."""
+
     DEFAULT_NETWORK: Final[str] = "bridge"
     DEFAULT_STOP_TIMEOUT: Final[int] = 10
     MAX_CONTAINER_NAME_LENGTH: Final[int] = 63
@@ -105,7 +115,7 @@ if time_diff > 300:  # What's 300?
 resp = requests.get(url, timeout=10)  # Why 10?
 
 # service.py
-restart_sec=10  # Same as API timeout? Coincidence?
+restart_sec = 10  # Same as API timeout? Coincidence?
 ```
 
 **After** (Named Constants):
@@ -120,7 +130,7 @@ if time_diff > Security.HMAC_WINDOW_SECONDS:
 resp = requests.get(url, timeout=API.DEFAULT_TIMEOUT)
 
 # service.py
-restart_sec=Service.DEFAULT_RESTART_DELAY
+restart_sec = Service.DEFAULT_RESTART_DELAY
 ```
 
 ### Benefits

@@ -84,18 +84,17 @@ loginctl enable-linger
 from taskflows import task, Alerts
 from alerts import Slack
 
+
 @task(
     name="my-task",
     retries=3,
     timeout=60,
-    alerts=Alerts(
-        send_to=Slack(channel="alerts"),
-        send_on=["start", "error", "finish"]
-    )
+    alerts=Alerts(send_to=Slack(channel="alerts"), send_on=["start", "error", "finish"]),
 )
 async def process_data():
     # Your code here
     return "Done"
+
 
 # Execute the task
 if __name__ == "__main__":
@@ -126,22 +125,19 @@ The `@task` decorator wraps any function with managed execution:
 from taskflows import task, Alerts, get_current_task_id
 from alerts import Slack, Email
 
+
 @task(
-    name="data-pipeline",        # Task identifier (default: function name)
-    required=True,               # Raise exception on failure
-    retries=3,                   # Retry attempts on failure
-    timeout=300,                 # Timeout in seconds
+    name="data-pipeline",  # Task identifier (default: function name)
+    required=True,  # Raise exception on failure
+    retries=3,  # Retry attempts on failure
+    timeout=300,  # Timeout in seconds
     alerts=Alerts(
         send_to=[
             Slack(channel="alerts"),
-            Email(
-                addr="sender@example.com",
-                password="...",
-                receiver_addr=["team@example.com"]
-            )
+            Email(addr="sender@example.com", password="...", receiver_addr=["team@example.com"]),
         ],
-        send_on=["start", "error", "finish"]
-    )
+        send_on=["start", "error", "finish"],
+    ),
 )
 async def run_pipeline():
     # Access current task ID for correlation
@@ -168,16 +164,12 @@ Run functions as tasks without the decorator:
 ```python
 from taskflows import run_task
 
+
 async def my_function(x, y):
     return x + y
 
-result = await run_task(
-    my_function,
-    name="add-numbers",
-    retries=2,
-    timeout=30,
-    x=1, y=2
-)
+
+result = await run_task(my_function, name="add-numbers", retries=2, timeout=30, x=1, y=2)
 ```
 
 ### Alerts
@@ -192,12 +184,10 @@ alerts = Alerts(
     send_to=[
         Slack(channel="critical"),
         Email(
-            addr="sender@gmail.com",
-            password="app-password",
-            receiver_addr=["oncall@company.com"]
-        )
+            addr="sender@gmail.com", password="app-password", receiver_addr=["oncall@company.com"]
+        ),
     ],
-    send_on=["start", "error", "finish"]  # Events to trigger alerts
+    send_on=["start", "error", "finish"],  # Events to trigger alerts
 )
 ```
 
@@ -221,30 +211,24 @@ srv = Service(
     # Identity
     name="my-service",
     description="Processes daily reports",
-
     # Commands
     start_command="python process.py",
-    stop_command="pkill -f process.py",       # Optional
-    restart_command="python process.py reload", # Optional
-
+    stop_command="pkill -f process.py",  # Optional
+    restart_command="python process.py reload",  # Optional
     # Scheduling
     start_schedule=Calendar("Mon-Fri 09:00"),
     stop_schedule=Calendar("Mon-Fri 17:00"),  # Optional
-    restart_schedule=Periodic(                 # Optional
-        start_on="boot",
-        period=3600,
-        relative_to="finish"
+    restart_schedule=Periodic(  # Optional
+        start_on="boot", period=3600, relative_to="finish"
     ),
-
     # Environment
     environment=Venv("myenv"),  # Or DockerContainer, or named env string
     working_directory="/app",
     env={"DEBUG": "1"},
     env_file="/path/to/.env",
-
     # Behavior
-    enabled=True,               # Auto-start on boot
-    timeout=300,                # Max runtime in seconds
+    enabled=True,  # Auto-start on boot
+    timeout=300,  # Max runtime in seconds
     kill_signal="SIGTERM",
     restart_policy="on-failure",
 )
@@ -286,6 +270,7 @@ Calendar("Mon,Wed,Fri 16:30:30")
 
 # From a datetime object
 from datetime import datetime, timedelta
+
 Calendar.from_datetime(datetime.now() + timedelta(hours=1))
 ```
 
@@ -306,10 +291,10 @@ from taskflows import Periodic
 
 # Every 5 minutes after boot
 Periodic(
-    start_on="boot",        # "boot", "login", or "command"
-    period=300,             # Interval in seconds
-    relative_to="finish",   # "start" or "finish"
-    accuracy="1ms"
+    start_on="boot",  # "boot", "login", or "command"
+    period=300,  # Interval in seconds
+    relative_to="finish",  # "start" or "finish"
+    accuracy="1ms",
 )
 ```
 
@@ -330,21 +315,17 @@ Control service startup order and relationships:
 srv = Service(
     name="app-server",
     start_command="./start.sh",
-
     # Ordering
-    start_after=["database", "cache"],      # Start after these
-    start_before=["monitoring"],            # Start before these
-
+    start_after=["database", "cache"],  # Start after these
+    start_before=["monitoring"],  # Start before these
     # Dependencies
-    requires=["database"],      # Fail if dependency fails
-    wants=["cache"],           # Start together, don't fail if cache fails
-    binds_to=["database"],     # Stop when database stops
-    part_of=["app-stack"],     # Propagate stop/restart
-
+    requires=["database"],  # Fail if dependency fails
+    wants=["cache"],  # Start together, don't fail if cache fails
+    binds_to=["database"],  # Stop when database stops
+    part_of=["app-stack"],  # Propagate stop/restart
     # Failure handling
-    on_failure=["alert-service"],   # Activate on failure
-    on_success=["cleanup-service"], # Activate on success
-
+    on_failure=["alert-service"],  # Activate on failure
+    on_success=["cleanup-service"],  # Activate on success
     # Mutual exclusion
     conflicts=["maintenance-mode"],
 )
@@ -370,9 +351,9 @@ srv = Service(
     start_command="python worker.py",
     restart_policy=RestartPolicy(
         condition="on-failure",  # When to restart
-        delay=10,                # Seconds between restarts
-        max_attempts=5,          # Max restarts in window
-        window=300,              # Time window in seconds
+        delay=10,  # Seconds between restarts
+        max_attempts=5,  # Max restarts in window
+        window=300,  # Time window in seconds
     ),
 )
 ```
@@ -403,13 +384,13 @@ registry = ServiceRegistry(
 registry.add(Service(name="monitor", start_command="./monitor.sh"))
 
 # Bulk operations
-registry.create()    # Create all services
-registry.start()     # Start all services
-registry.stop()      # Stop all services
-registry.restart()   # Restart all services
-registry.enable()    # Enable all services
-registry.disable()   # Disable all services
-registry.remove()    # Remove all services
+registry.create()  # Create all services
+registry.start()  # Start all services
+registry.stop()  # Stop all services
+registry.restart()  # Restart all services
+registry.enable()  # Enable all services
+registry.disable()  # Disable all services
+registry.remove()  # Remove all services
 
 # Access individual services
 registry["web"].logs()
@@ -447,17 +428,11 @@ srv = Service(
         image="python:3.11",
         command="python app.py",
         ports={"8080/tcp": 8080},
-        volumes=[
-            Volume(
-                host_path="/data",
-                container_path="/app/data",
-                read_only=False
-            )
-        ],
+        volumes=[Volume(host_path="/data", container_path="/app/data", read_only=False)],
         environment={"ENV": "production"},
         network_mode="bridge",
         restart_policy="no",  # Let systemd handle restarts
-        persisted=True,       # Keep container between restarts
+        persisted=True,  # Keep container between restarts
         cgroup_config=CgroupConfig(
             memory_limit=1024 * 1024 * 1024,  # 1GB
             cpu_quota=50000,  # 50% CPU
@@ -813,7 +788,7 @@ srv = Service(
     start_command="python train.py",
     startup_requirements=[
         Memory(amount=8 * 1024**3, constraint=">="),  # 8GB RAM
-        CPUs(amount=4, constraint=">="),              # 4+ CPUs
+        CPUs(amount=4, constraint=">="),  # 4+ CPUs
     ],
 )
 ```
@@ -858,28 +833,24 @@ srv = Service(
     start_command="python app.py",
     cgroup_config=CgroupConfig(
         # CPU limits
-        cpu_quota=50000,           # Microseconds per period (50% of 1 CPU)
-        cpu_period=100000,         # Period in microseconds (default 100ms)
-        cpu_shares=512,            # Relative weight
-        cpuset_cpus="0-3",         # Pin to CPUs 0-3
-
+        cpu_quota=50000,  # Microseconds per period (50% of 1 CPU)
+        cpu_period=100000,  # Period in microseconds (default 100ms)
+        cpu_shares=512,  # Relative weight
+        cpuset_cpus="0-3",  # Pin to CPUs 0-3
         # Memory limits
         memory_limit=2 * 1024**3,  # 2GB hard limit
-        memory_high=1.5 * 1024**3, # 1.5GB soft limit
-        memory_swap_max=0,         # Disable swap for this unit
-
+        memory_high=1.5 * 1024**3,  # 1.5GB soft limit
+        memory_swap_max=0,  # Disable swap for this unit
         # I/O limits
-        io_weight=100,             # I/O priority (1-10000)
-        device_read_bps={"/dev/sda": 100 * 1024**2},   # 100MB/s read
-        device_write_bps={"/dev/sda": 50 * 1024**2},   # 50MB/s write
-
+        io_weight=100,  # I/O priority (1-10000)
+        device_read_bps={"/dev/sda": 100 * 1024**2},  # 100MB/s read
+        device_write_bps={"/dev/sda": 50 * 1024**2},  # 50MB/s write
         # Process limits
-        pids_limit=100,            # Max processes
-
+        pids_limit=100,  # Max processes
         # Security
-        oom_score_adj=500,         # OOM killer priority
-        oom_policy="kill",         # Kill the whole unit if one process is OOM-killed
-        cap_drop=["NET_RAW"],      # Drop capabilities
+        oom_score_adj=500,  # OOM killer priority
+        oom_policy="kill",  # Kill the whole unit if one process is OOM-killed
+        cap_drop=["NET_RAW"],  # Drop capabilities
     ),
 )
 ```
@@ -899,9 +870,9 @@ svc = Service(
     name="memory-sensitive-worker",
     start_command="python worker.py",
     cgroup_config=CgroupConfig(
-        memory_high=3 * 1024**3,   # Apply reclaim pressure first
+        memory_high=3 * 1024**3,  # Apply reclaim pressure first
         memory_limit=4 * 1024**3,  # Hard ceiling; triggers OOM inside the unit
-        memory_swap_max=0,         # Optional: avoid swap thrashing
+        memory_swap_max=0,  # Optional: avoid swap thrashing
         oom_policy="kill",
     ),
     restart_policy=RestartPolicy(
@@ -1194,7 +1165,7 @@ Service(name="my-service-v2.0_prod")
 
 # ❌ Blocked - path characters
 Service(name="../malicious")  # Raises SecurityError
-Service(name="/etc/passwd")   # Raises SecurityError
+Service(name="/etc/passwd")  # Raises SecurityError
 
 # ❌ Blocked - special characters
 Service(name="bad; rm -rf /")  # Raises SecurityError
@@ -1231,12 +1202,13 @@ DockerContainer(command='python script.py --arg "unterminated')  # Raises ValueE
 2. **Use environment variables** for sensitive configuration
    ```python
    import os
+
    Service(
        name="app",
        environment={
            "DB_PASSWORD": os.getenv("DB_PASSWORD"),
            "API_KEY": os.getenv("API_KEY"),
-       }
+       },
    )
    ```
 
@@ -1277,10 +1249,10 @@ When using `docker_container`, the service accesses Docker's Unix socket (`/var/
        name="app",
        cgroup=CgroupConfig(
            memory_limit=1 * 1024**3,  # 1 GB max
-           cpu_quota=100000,          # 1 CPU max
-           pids_limit=100,             # Max 100 processes
-           read_only_rootfs=True,      # Immutable filesystem
-       )
+           cpu_quota=100000,  # 1 CPU max
+           pids_limit=100,  # Max 100 processes
+           read_only_rootfs=True,  # Immutable filesystem
+       ),
    )
    ```
 
@@ -1289,9 +1261,9 @@ When using `docker_container`, the service accesses Docker's Unix socket (`/var/
    DockerContainer(
        name="app",
        cgroup=CgroupConfig(
-           cap_drop=["ALL"],           # Drop all capabilities
+           cap_drop=["ALL"],  # Drop all capabilities
            cap_add=["NET_BIND_SERVICE"],  # Only add what's needed
-       )
+       ),
    )
    ```
 
@@ -1398,12 +1370,10 @@ Send task alerts and notifications to Slack channels.
 from taskflows import task, Alerts
 from taskflows.alerts import Slack
 
+
 @task(
     name="my-task",
-    alerts=Alerts(
-        send_to=Slack(channel="alerts"),
-        send_on=["start", "error", "finish"]
-    )
+    alerts=Alerts(send_to=Slack(channel="alerts"), send_on=["start", "error", "finish"]),
 )
 async def my_task():
     # Your code here

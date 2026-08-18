@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 import pytest
-from msgflows import MsgDst, SlackChannel  # noqa: F401
 
+from taskflows.alerts import MsgDst, SlackChannel  # noqa: F401
 from taskflows.tasks import (
     Alerts,
     TaskLogger,
@@ -342,8 +342,9 @@ async def test_timed_sync_task_preserves_task_context():
 
 @pytest.mark.asyncio
 @patch("taskflows.alerts.send_alert")
-async def test_alert_urls_omitted_without_grafana(mock_send_alert):
+async def test_alert_urls_omitted_without_grafana(mock_send_alert, monkeypatch):
     """Without Grafana configured, alerts must not embed dead localhost links."""
+    monkeypatch.setattr("taskflows.common.config.grafana_api_key", None)
     mock_send_alert.return_value = None
     mock_dst = MagicMock(spec=SlackChannel)
     task_logger = TaskLogger(
