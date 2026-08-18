@@ -7,7 +7,14 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      react: path.resolve(__dirname, "./node_modules/react"),
+      "react-dom": path.resolve(__dirname, "./node_modules/react-dom"),
     },
+    dedupe: ["react", "react-dom"],
+    preserveSymlinks: true,
+  },
+  ssr: {
+    noExternal: ["@danklab/shared-ui"],
   },
   test: {
     globals: true,
@@ -24,16 +31,14 @@ export default defineConfig({
         "src/**/__tests__/**",
         "src/main.tsx",
         "src/vite-env.d.ts",
-        // Vendored shared UI is maintained and tested in its source project.
-        "src/ui/**",
       ],
       thresholds: {
-        // Keep these at the measured application baseline and ratchet upward
-        // as coverage is added. Vendored UI code is excluded above.
-        lines: 27,
-        branches: 21,
-        functions: 24,
-        statements: 26,
+        // Shared primitive implementation and tests live in @danklab/shared-ui.
+        // Keep these at the measured Taskflows-only baseline and ratchet upward.
+        lines: 24,
+        branches: 16,
+        functions: 21,
+        statements: 23,
       },
     },
   },

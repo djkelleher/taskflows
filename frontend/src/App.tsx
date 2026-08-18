@@ -1,10 +1,8 @@
 import { useEffect } from "react";
 import { Routes, Route, Navigate, Outlet } from "react-router-dom";
-import { ToastProvider } from "@/components/ui/Toast";
-import { ConfirmProvider } from "@/components/ui/ConfirmDialog";
+import { ConfirmProvider, ThemeProvider, ToastProvider } from "@/components/ui";
 import { MainLayout } from "@/components/layout";
 import { useAuthStore } from "@/stores/authStore";
-import { useTheme } from "@/hooks/useTheme";
 import { usePreline } from "@/hooks/usePreline";
 
 // Pages
@@ -36,8 +34,7 @@ function App() {
   const initialize = useAuthStore((state) => state.initialize);
   const isInitialized = useAuthStore((state) => state.isInitialized);
 
-  // Initialize theme and Preline UI components
-  useTheme();
+  // Initialize Preline UI components.
   usePreline();
 
   useEffect(() => {
@@ -50,29 +47,31 @@ function App() {
   }
 
   return (
-    <ToastProvider>
-      <ConfirmProvider>
-        <Routes>
-          {/* Public routes */}
-          <Route path="/login" element={<LoginPage />} />
+    <ThemeProvider attribute="class" defaultTheme="dark" storageKey="theme">
+      <ToastProvider>
+        <ConfirmProvider>
+          <Routes>
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
 
-          {/* Protected routes */}
-          <Route element={<ProtectedRoute />}>
-            <Route element={<MainLayout />}>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/services/create" element={<CreateServicePage />} />
-              <Route path="/logs/:serviceName" element={<LogsPage />} />
-              <Route path="/environments" element={<EnvironmentsPage />} />
-              <Route path="/environments/create" element={<EnvironmentCreatePage />} />
-              <Route path="/environments/edit/:name" element={<EnvironmentEditPage />} />
+            {/* Protected routes */}
+            <Route element={<ProtectedRoute />}>
+              <Route element={<MainLayout />}>
+                <Route path="/" element={<DashboardPage />} />
+                <Route path="/services/create" element={<CreateServicePage />} />
+                <Route path="/logs/:serviceName" element={<LogsPage />} />
+                <Route path="/environments" element={<EnvironmentsPage />} />
+                <Route path="/environments/create" element={<EnvironmentCreatePage />} />
+                <Route path="/environments/edit/:name" element={<EnvironmentEditPage />} />
+              </Route>
             </Route>
-          </Route>
 
-          {/* Catch all */}
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </ConfirmProvider>
-    </ToastProvider>
+            {/* Catch all */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </ConfirmProvider>
+      </ToastProvider>
+    </ThemeProvider>
   );
 }
 

@@ -7,7 +7,7 @@ import { getErrorMessage } from "@/utils/error";
 import type { BatchOperation } from "@/types";
 
 export function BatchActions() {
-  const { showSuccess, showError } = useToast();
+  const { toast } = useToast();
   const confirm = useConfirm();
   const batchActionMutation = useBatchAction();
   const { selectedServices, clearSelection } = useServiceStore();
@@ -24,21 +24,27 @@ export function BatchActions() {
     // Confirm all actions
     const dangerActions = ["stop", "remove", "disable"];
     const confirmed = await confirm({
-      message: `Are you sure you want to ${operation} ${selectedCount} service(s)?`,
-      confirmText: operation.charAt(0).toUpperCase() + operation.slice(1),
-      cancelText: "Cancel",
-      variant: dangerActions.includes(operation) ? "danger" : "primary",
+      title: `Are you sure you want to ${operation} ${selectedCount} service(s)?`,
+      confirmLabel: operation.charAt(0).toUpperCase() + operation.slice(1),
+      cancelLabel: "Cancel",
+      tone: dangerActions.includes(operation) ? "danger" : "default",
     });
     if (!confirmed) return;
 
     setActionInProgress(operation);
     try {
       await batchActionMutation.mutateAsync({ serviceNames, operation });
-      showSuccess(`Batch ${operation} initiated for ${selectedCount} service(s)`);
+      toast({
+        title: `Batch ${operation} initiated for ${selectedCount} service(s)`,
+        tone: "success",
+      });
       clearSelection();
     } catch (error) {
       logger.error(`Failed to ${operation} services:`, error);
-      showError(`Failed to ${operation} selected services: ${getErrorMessage(error)}`);
+      toast({
+        title: `Failed to ${operation} selected services: ${getErrorMessage(error)}`,
+        tone: "danger",
+      });
     } finally {
       setActionInProgress(null);
     }

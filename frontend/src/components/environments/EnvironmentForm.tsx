@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Input, Select, Checkbox, Card, CardHeader, CardContent, CardFooter, useToast } from "@/components/ui";
+import { Button, Input, Select, Checkbox, Card, CardHeader, CardContent, CardFooter, FormField, useToast } from "@/components/ui";
 import { DynamicFieldList, PortMappingField, VolumeMappingField, EnvVarField } from "./DynamicFieldList";
 import { useCreateEnvironment, useUpdateEnvironment } from "@/hooks/useEnvironments";
 import { logger } from "@/utils/logger";
@@ -69,7 +69,7 @@ function validateEnvVarName(name: string): string | null {
 
 export function EnvironmentForm({ initialData, isEdit = false }: EnvironmentFormProps) {
   const navigate = useNavigate();
-  const { showSuccess, showError } = useToast();
+  const { toast } = useToast();
   const createMutation = useCreateEnvironment();
   const updateMutation = useUpdateEnvironment();
 
@@ -177,7 +177,7 @@ export function EnvironmentForm({ initialData, isEdit = false }: EnvironmentForm
 
     // Validate all fields before submission
     if (!validateAllFields()) {
-      showError("Please fix validation errors before submitting");
+      toast({ title: "Please fix validation errors before submitting", tone: "danger" });
       return;
     }
 
@@ -204,19 +204,20 @@ export function EnvironmentForm({ initialData, isEdit = false }: EnvironmentForm
     try {
       if (isEdit && initialData) {
         await updateMutation.mutateAsync({ name: initialData.name, environment });
-        showSuccess(`Environment "${name}" updated`);
+        toast({ title: `Environment "${name}" updated`, tone: "success" });
       } else {
         await createMutation.mutateAsync(environment);
-        showSuccess(`Environment "${name}" created`);
+        toast({ title: `Environment "${name}" created`, tone: "success" });
       }
       navigate("/environments");
     } catch (error) {
       logger.error("Failed to save environment:", error);
-      showError(
-        isEdit
+      toast({
+        title: isEdit
           ? `Failed to update environment: ${getErrorMessage(error)}`
-          : `Failed to create environment: ${getErrorMessage(error)}`
-      );
+          : `Failed to create environment: ${getErrorMessage(error)}`,
+        tone: "danger",
+      });
     }
   };
 
@@ -229,64 +230,71 @@ export function EnvironmentForm({ initialData, isEdit = false }: EnvironmentForm
           </h2>
         </CardHeader>
         <CardContent className="space-y-4">
-          <Input
-            label="Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-            disabled={isEdit}
-          />
+          <FormField label="Name" required>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+              disabled={isEdit}
+            />
+          </FormField>
 
-          <Select
-            label="Type"
-            options={TYPE_OPTIONS}
-            value={type}
-            onChange={(e) => handleTypeChange(e.target.value as EnvironmentType)}
-            disabled={isEdit}
-          />
+          <FormField label="Type">
+            <Select
+              options={TYPE_OPTIONS}
+              value={type}
+              onChange={(e) => handleTypeChange(e.target.value as EnvironmentType)}
+              disabled={isEdit}
+            />
+          </FormField>
 
           {type === "venv" && (
-            <Input
-              label="Environment Name"
-              value={venvName}
-              onChange={(e) => setVenvName(e.target.value)}
-              placeholder="e.g., myenv"
-              required
-            />
+            <FormField label="Environment Name" required>
+              <Input
+                value={venvName}
+                onChange={(e) => setVenvName(e.target.value)}
+                placeholder="e.g., myenv"
+                required
+              />
+            </FormField>
           )}
 
           {type === "docker" && (
             <>
-              <Input
-                label="Image"
-                value={image}
-                onChange={(e) => setImage(e.target.value)}
-                placeholder="e.g., python:3.11"
-                required
-              />
+              <FormField label="Image" required>
+                <Input
+                  value={image}
+                  onChange={(e) => setImage(e.target.value)}
+                  placeholder="e.g., python:3.11"
+                  required
+                />
+              </FormField>
 
               <div className="grid grid-cols-2 gap-4">
-                <Select
-                  label="Network Mode"
-                  options={NETWORK_MODE_OPTIONS}
-                  value={networkMode}
-                  onChange={(e) => setNetworkMode(e.target.value as NetworkMode)}
-                />
+                <FormField label="Network Mode">
+                  <Select
+                    options={NETWORK_MODE_OPTIONS}
+                    value={networkMode}
+                    onChange={(e) => setNetworkMode(e.target.value as NetworkMode)}
+                  />
+                </FormField>
 
-                <Select
-                  label="Restart Policy"
-                  options={RESTART_POLICY_OPTIONS}
-                  value={restartPolicy}
-                  onChange={(e) => setRestartPolicy(e.target.value as RestartPolicy)}
-                />
+                <FormField label="Restart Policy">
+                  <Select
+                    options={RESTART_POLICY_OPTIONS}
+                    value={restartPolicy}
+                    onChange={(e) => setRestartPolicy(e.target.value as RestartPolicy)}
+                  />
+                </FormField>
               </div>
 
-              <Input
-                label="Shared Memory Size"
-                value={shmSize}
-                onChange={(e) => setShmSize(e.target.value)}
-                placeholder="e.g., 2g"
-              />
+              <FormField label="Shared Memory Size">
+                <Input
+                  value={shmSize}
+                  onChange={(e) => setShmSize(e.target.value)}
+                  placeholder="e.g., 2g"
+                />
+              </FormField>
 
               <Checkbox
                 label="Privileged Mode"

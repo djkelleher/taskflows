@@ -1,6 +1,13 @@
 import { Link } from "react-router-dom";
-import { Button, Badge, Card, useToast, useConfirm, LoadingSpinner } from "@/components/ui";
-import { EmptyState } from "@/components/ui/shared-ui";
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  LoadingSpinner,
+  useConfirm,
+  useToast,
+} from "@/components/ui";
 import { useDeleteEnvironment } from "@/hooks/useEnvironments";
 import { Pencil, Trash2, Plus } from "lucide-react";
 import { logger } from "@/utils/logger";
@@ -13,26 +20,29 @@ interface EnvironmentTableProps {
 }
 
 export function EnvironmentTable({ environments, isLoading }: EnvironmentTableProps) {
-  const { showSuccess, showError } = useToast();
+  const { toast } = useToast();
   const confirm = useConfirm();
   const deleteMutation = useDeleteEnvironment();
 
   const handleDelete = async (name: string) => {
     const confirmed = await confirm({
-      message: `Are you sure you want to delete environment "${name}"?`,
-      confirmText: "Delete",
-      cancelText: "Cancel",
-      variant: "danger",
+      title: `Are you sure you want to delete environment "${name}"?`,
+      confirmLabel: "Delete",
+      cancelLabel: "Cancel",
+      tone: "danger",
     });
 
     if (!confirmed) return;
 
     try {
       await deleteMutation.mutateAsync(name);
-      showSuccess(`Environment "${name}" deleted`);
+      toast({ title: `Environment "${name}" deleted`, tone: "success" });
     } catch (error) {
       logger.error("Failed to delete environment:", error);
-      showError(`Failed to delete environment "${name}": ${getErrorMessage(error)}`);
+      toast({
+        title: `Failed to delete environment "${name}": ${getErrorMessage(error)}`,
+        tone: "danger",
+      });
     }
   };
 
@@ -98,7 +108,7 @@ export function EnvironmentTable({ environments, isLoading }: EnvironmentTablePr
                     {env.name}
                   </td>
                   <td className="px-4 py-3 text-sm">
-                    <Badge variant={env.type === "docker" ? "info" : "muted"}>
+                    <Badge variant={env.type === "docker" ? "accent" : "muted"}>
                       {env.type === "docker" ? "Docker" : "Venv"}
                     </Badge>
                   </td>

@@ -9,7 +9,7 @@ import { Upload } from "lucide-react";
 
 export function CreateServicePage() {
   const navigate = useNavigate();
-  const { showSuccess, showError } = useToast();
+  const { toast } = useToast();
   const createMutation = useCreateService();
   const { data: servers } = useServers();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -27,7 +27,7 @@ export function CreateServicePage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedFile) {
-      showError("Please select a YAML file");
+      toast({ title: "Please select a YAML file", tone: "danger" });
       return;
     }
 
@@ -38,11 +38,11 @@ export function CreateServicePage() {
         include: include || undefined,
         exclude: exclude || undefined,
       });
-      showSuccess("Services created successfully");
+      toast({ title: "Services created successfully", tone: "success" });
       navigate("/");
     } catch (error) {
       logger.error("Failed to create services:", error);
-      showError(`Failed to create services: ${getErrorMessage(error)}`);
+      toast({ title: `Failed to create services: ${getErrorMessage(error)}`, tone: "danger" });
     }
   };
 

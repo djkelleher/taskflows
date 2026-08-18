@@ -7,7 +7,13 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      react: path.resolve(__dirname, "./node_modules/react"),
+      "react-dom": path.resolve(__dirname, "./node_modules/react-dom"),
     },
+    // Local file-linked UI packages have their own devDependencies; always
+    // render through Taskflows' React instance to preserve hook identity.
+    dedupe: ["react", "react-dom"],
+    preserveSymlinks: true,
   },
   server: {
     port: 3000,

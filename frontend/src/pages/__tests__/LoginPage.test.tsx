@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { BrowserRouter } from "react-router-dom";
 import { LoginPage } from "../LoginPage";
 import { useAuthStore } from "@/stores/authStore";
-import { ToastProvider } from "@/components/ui/Toast";
+import { ToastProvider } from "@/components/ui";
 import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
 

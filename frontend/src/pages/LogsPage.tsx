@@ -3,7 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { Header } from "@/components/layout";
 import { GrafanaEmbed, DateRangePicker, LogLevelFilter } from "@/components/logs";
 import type { TimeRange } from "@/components/logs";
-import { useTheme } from "@/hooks/useTheme";
+import { useTheme } from "@/components/ui";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 
 const DEFAULT_TIME_RANGE: TimeRange = {
@@ -14,7 +14,7 @@ const DEFAULT_TIME_RANGE: TimeRange = {
 
 export function LogsPage() {
   const { serviceName } = useParams<{ serviceName: string }>();
-  const { theme } = useTheme();
+  const { resolvedTheme } = useTheme();
   const [timeRange, setTimeRange] = useState<TimeRange>(DEFAULT_TIME_RANGE);
   const [level, setLevel] = useState(".*");
 
@@ -81,7 +81,7 @@ export function LogsPage() {
             level={level}
             from={timeRange.from}
             to={timeRange.to}
-            theme={theme}
+            theme={resolvedTheme}
           />
         </div>
       </div>

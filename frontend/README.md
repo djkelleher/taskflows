@@ -324,12 +324,13 @@ The frontend has comprehensive test coverage using **Vitest**, **React Testing L
 
 ### Test Coverage
 
-- **91 passing tests** covering core functionality
-- **Application coverage thresholds enforced** (vendored shared UI excluded):
-  - Lines: 27%
-  - Branches: 21%
-  - Functions: 24%
-  - Statements: 26%
+- Application tests cover core functionality; shared primitive behavior is tested in
+  `@danklab/shared-ui` rather than duplicated in this repository.
+- **Application coverage thresholds enforced**:
+  - Lines: 24%
+  - Branches: 16%
+  - Functions: 21%
+  - Statements: 23%
 
 ### Test Structure
 

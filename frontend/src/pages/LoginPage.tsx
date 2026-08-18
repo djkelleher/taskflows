@@ -1,12 +1,12 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Input, Card, CardHeader, CardContent, useToast } from "@/components/ui";
+import { Button, Input, Card, CardHeader, CardContent, FormField, useToast } from "@/components/ui";
 import { useAuthStore } from "@/stores/authStore";
 import { login } from "@/api";
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const { showError } = useToast();
+  const { toast } = useToast();
   const { isAuthenticated, login: storeLogin } = useAuthStore();
 
   const [username, setUsername] = useState("");
@@ -32,7 +32,7 @@ export function LoginPage() {
     } catch (err) {
       const message = err instanceof Error ? err.message : "Login failed";
       setError(message);
-      showError(message);
+      toast({ title: message, tone: "danger" });
     } finally {
       setIsLoading(false);
     }
@@ -49,25 +49,26 @@ export function LoginPage() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <Input
-              label="Username"
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              required
-              autoComplete="username"
-              autoFocus
-            />
+            <FormField label="Username" required>
+              <Input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                required
+                autoComplete="username"
+                autoFocus
+              />
+            </FormField>
 
-            <Input
-              label="Password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              autoComplete="current-password"
-              error={error}
-            />
+            <FormField error={error} label="Password" required>
+              <Input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                autoComplete="current-password"
+              />
+            </FormField>
 
             <Button
               type="submit"
