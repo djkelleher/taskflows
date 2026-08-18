@@ -25,14 +25,14 @@
             <div class='fl pad1y space-right2'>
                 <span class="strong">0% </span>
                 <span class="quiet">Statements</span>
-                <span class='fraction'>0/15</span>
+                <span class='fraction'>0/16</span>
             </div>
         
             
             <div class='fl pad1y space-right2'>
                 <span class="strong">0% </span>
                 <span class="quiet">Branches</span>
-                <span class='fraction'>0/14</span>
+                <span class='fraction'>0/16</span>
             </div>
         
             
@@ -46,7 +46,7 @@
             <div class='fl pad1y space-right2'>
                 <span class="strong">0% </span>
                 <span class="quiet">Lines</span>
-                <span class='fraction'>0/14</span>
+                <span class='fraction'>0/15</span>
             </div>
         
             
@@ -200,26 +200,7 @@
 <a name='L135'></a><a href='#L135'>135</a>
 <a name='L136'></a><a href='#L136'>136</a>
 <a name='L137'></a><a href='#L137'>137</a>
-<a name='L138'></a><a href='#L138'>138</a>
-<a name='L139'></a><a href='#L139'>139</a>
-<a name='L140'></a><a href='#L140'>140</a>
-<a name='L141'></a><a href='#L141'>141</a>
-<a name='L142'></a><a href='#L142'>142</a>
-<a name='L143'></a><a href='#L143'>143</a>
-<a name='L144'></a><a href='#L144'>144</a>
-<a name='L145'></a><a href='#L145'>145</a>
-<a name='L146'></a><a href='#L146'>146</a>
-<a name='L147'></a><a href='#L147'>147</a></td><td class="line-coverage quiet"><span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
+<a name='L138'></a><a href='#L138'>138</a></td><td class="line-coverage quiet"><span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
@@ -251,13 +232,14 @@
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-no">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
@@ -356,19 +338,9 @@
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span></td><td class="text"><pre class="prettyprint lang-js">import { Link } from "react-router-dom";
-import {
-  Badge,
-  Button,
-  Card,
-  EmptyState,
-  LoadingSpinner,
-  useConfirm,
-  useToast,
-} from "@/components/ui";
+import { Button, Badge, Card, useToast, useConfirm } from "@/components/ui";
 import { useDeleteEnvironment } from "@/hooks/useEnvironments";
-import { Pencil, Trash2, Plus } from "lucide-react";
-import { logger } from "@/utils/logger";
-import { getErrorMessage } from "@/utils/error";
+import { Pencil, Trash2 } from "lucide-react";
 import type { NamedEnvironment } from "@/types";
 &nbsp;
 interface EnvironmentTableProps {
@@ -377,45 +349,35 @@ interface EnvironmentTableProps {
 }
 &nbsp;
 export function <span class="fstat-no" title="function not covered" >EnvironmentTable({</span> environments, isLoading }: EnvironmentTableProps) {
-  const { toast <span class="cstat-no" title="statement not covered" >} = useToast();</span>
+  const { showSuccess, showError <span class="cstat-no" title="statement not covered" >} = useToast();</span>
   const <span class="cstat-no" title="statement not covered" >confirm = useConfirm();</span>
   const <span class="cstat-no" title="statement not covered" >deleteMutation = useDeleteEnvironment();</span>
 &nbsp;
   const handleDelete = <span class="cstat-no" title="statement not covered" ><span class="fstat-no" title="function not covered" >async (n</span>ame: string) =&gt; {</span>
     const confirmed = <span class="cstat-no" title="statement not covered" >await confirm({</span>
-      title: `Are you sure you want to delete environment "${name}"?`,
-      confirmLabel: "Delete",
-      cancelLabel: "Cancel",
-      tone: "danger",
+      message: `Are you sure you want to delete environment "${name}"?`,
+      confirmText: "Delete",
+      cancelText: "Cancel",
+      variant: "danger",
     });
 &nbsp;
 <span class="cstat-no" title="statement not covered" >    if (!confirmed) <span class="cstat-no" title="statement not covered" >return;</span></span>
 &nbsp;
 <span class="cstat-no" title="statement not covered" >    try {</span>
 <span class="cstat-no" title="statement not covered" >      await deleteMutation.mutateAsync(name);</span>
-<span class="cstat-no" title="statement not covered" >      toast({ title: `Environment "${name}" deleted`, tone: "success" });</span>
+<span class="cstat-no" title="statement not covered" >      showSuccess(`Environment "${name}" deleted`);</span>
     } catch (error) {
-<span class="cstat-no" title="statement not covered" >      logger.error("Failed to delete environment:", error);</span>
-<span class="cstat-no" title="statement not covered" >      toast({</span>
-        title: `Failed to delete environment "${name}": ${getErrorMessage(error)}`,
-        tone: "danger",
-      });
+<span class="cstat-no" title="statement not covered" >      console.error("Failed to delete environment:", error);</span>
+      const errorMessage = <span class="cstat-no" title="statement not covered" >error instanceof Error ? error.message : "Unknown error";</span>
+<span class="cstat-no" title="statement not covered" >      showError(`Failed to delete environment "${name}": ${errorMessage}`);</span>
     }
   };
 &nbsp;
 <span class="cstat-no" title="statement not covered" >  return (</span>
     &lt;Card&gt;
-      &lt;div className="px-4 py-3 border-b border-border flex items-center justify-end"&gt;
-        &lt;Link to="/environments/create"&gt;
-          &lt;Button variant="primary"&gt;
-            &lt;Plus className="w-4 h-4" /&gt;
-            Create Environment
-          &lt;/Button&gt;
-        &lt;/Link&gt;
-      &lt;/div&gt;
       &lt;div className="overflow-x-auto"&gt;
         &lt;table className="w-full"&gt;
-          &lt;thead className="bg-muted/30 border-b border-border"&gt;
+          &lt;thead className="bg-gray-50 border-b border-border"&gt;
             &lt;tr&gt;
               &lt;th className="px-4 py-3 text-left text-xs font-semibold text-muted uppercase tracking-wider"&gt;
                 Name
@@ -435,41 +397,52 @@ export function <span class="fstat-no" title="function not covered" >Environment
             {isLoading ? (
               &lt;tr&gt;
                 &lt;td colSpan={4} className="px-4 py-8 text-center text-muted"&gt;
-                  &lt;div className="flex items-center justify-center"&gt;
-                    &lt;LoadingSpinner label="Loading environments..." /&gt;
+                  &lt;div className="flex items-center justify-center gap-2"&gt;
+                    &lt;svg
+                      className="animate-spin h-5 w-5"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    &gt;
+                      &lt;circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      /&gt;
+                      &lt;path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      /&gt;
+                    &lt;/svg&gt;
+                    Loading environments...
                   &lt;/div&gt;
                 &lt;/td&gt;
               &lt;/tr&gt;
             ) : environments.length === 0 ? (
               &lt;tr&gt;
-                &lt;td colSpan={4} className="p-4"&gt;
-                  &lt;EmptyState
-                    className="border-none bg-transparent"
-                    title="No environments found"
-                    description="Create your first environment to get started."
-                    action={
-                      &lt;Link to="/environments/create"&gt;
-                        &lt;Button variant="primary"&gt;
-                          &lt;Plus className="w-4 h-4" /&gt;
-                          Create Environment
-                        &lt;/Button&gt;
-                      &lt;/Link&gt;
-                    }
-                  /&gt;
+                &lt;td colSpan={4} className="px-4 py-8 text-center text-muted"&gt;
+                  No environments found.{" "}
+                  &lt;Link to="/environments/create" className="text-electric-blue hover:underline"&gt;
+                    Create one
+                  &lt;/Link&gt;
                 &lt;/td&gt;
               &lt;/tr&gt;
             ) : (
               environments.map(<span class="fstat-no" title="function not covered" >(e</span>nv) =&gt; (
-<span class="cstat-no" title="statement not covered" >                &lt;tr key={env.name} className="hover:bg-muted/20"&gt;</span>
-                  &lt;td className="px-4 py-3 text-sm font-medium text-electric-blue"&gt;
+<span class="cstat-no" title="statement not covered" >                &lt;tr key={env.name} className="hover:bg-gray-50"&gt;</span>
+                  &lt;td className="px-4 py-3 text-sm font-medium text-foreground"&gt;
                     {env.name}
                   &lt;/td&gt;
                   &lt;td className="px-4 py-3 text-sm"&gt;
-                    &lt;Badge variant={env.type === "docker" ? "accent" : "muted"}&gt;
+                    &lt;Badge variant={env.type === "docker" ? "info" : "muted"}&gt;
                       {env.type === "docker" ? "Docker" : "Venv"}
                     &lt;/Badge&gt;
                   &lt;/td&gt;
-                  &lt;td className="px-4 py-3 text-sm text-electric-blue"&gt;
+                  &lt;td className="px-4 py-3 text-sm text-muted"&gt;
                     {env.type === "venv" &amp;&amp; env.venv?.name}
                     {env.type === "docker" &amp;&amp; env.docker?.image}
                   &lt;/td&gt;
@@ -508,7 +481,7 @@ export function <span class="fstat-no" title="function not covered" >Environment
             <div class='footer quiet pad2 space-top1 center small'>
                 Code coverage generated by
                 <a href="https://istanbul.js.org/" target="_blank" rel="noopener noreferrer">istanbul</a>
-                at 2026-08-18T20:02:08.504Z
+                at 2026-01-14T14:37:39.653Z
             </div>
         <script src="../../../prettify.js"></script>
         <script>

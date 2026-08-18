@@ -3,7 +3,7 @@
 <html lang="en">
 
 <head>
-    <title>Code coverage report for src/components/logs/GrafanaEmbed.tsx</title>
+    <title>Code coverage report for src/components/ui/Checkbox.tsx</title>
     <meta charset="utf-8" />
     <link rel="stylesheet" href="../../../prettify.css" />
     <link rel="stylesheet" href="../../../base.css" />
@@ -19,34 +19,34 @@
 <body>
 <div class='wrapper'>
     <div class='pad1'>
-        <h1><a href="../../../index.html">All files</a> / <a href="index.html">src/components/logs</a> GrafanaEmbed.tsx</h1>
+        <h1><a href="../../../index.html">All files</a> / <a href="index.html">src/components/ui</a> Checkbox.tsx</h1>
         <div class='clearfix'>
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">0% </span>
+                <span class="strong">80% </span>
                 <span class="quiet">Statements</span>
-                <span class='fraction'>0/6</span>
+                <span class='fraction'>8/10</span>
             </div>
         
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">0% </span>
+                <span class="strong">83.33% </span>
                 <span class="quiet">Branches</span>
-                <span class='fraction'>0/2</span>
+                <span class='fraction'>10/12</span>
             </div>
         
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">0% </span>
+                <span class="strong">100% </span>
                 <span class="quiet">Functions</span>
-                <span class='fraction'>0/3</span>
+                <span class='fraction'>2/2</span>
             </div>
         
             
             <div class='fl pad1y space-right2'>
-                <span class="strong">0% </span>
+                <span class="strong">80% </span>
                 <span class="quiet">Lines</span>
-                <span class='fraction'>0/6</span>
+                <span class='fraction'>8/10</span>
             </div>
         
             
@@ -61,7 +61,7 @@
             </div>
         </template>
     </div>
-    <div class='status-line low'></div>
+    <div class='status-line high'></div>
     <pre><table class="coverage">
 <tr><td class="line-count quiet"><a name='L1'></a><a href='#L1'>1</a>
 <a name='L2'></a><a href='#L2'>2</a>
@@ -106,7 +106,9 @@
 <a name='L41'></a><a href='#L41'>41</a>
 <a name='L42'></a><a href='#L42'>42</a>
 <a name='L43'></a><a href='#L43'>43</a>
-<a name='L44'></a><a href='#L44'>44</a></td><td class="line-coverage quiet"><span class="cline-any cline-neutral">&nbsp;</span>
+<a name='L44'></a><a href='#L44'>44</a>
+<a name='L45'></a><a href='#L45'>45</a>
+<a name='L46'></a><a href='#L46'>46</a></td><td class="line-coverage quiet"><span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
@@ -114,26 +116,21 @@
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-yes">3x</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-yes">9x</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-yes">9x</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-yes">18x</span>
+<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-yes">18x</span>
 <span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
+<span class="cline-any cline-yes">18x</span>
+<span class="cline-any cline-yes">9x</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
@@ -144,54 +141,63 @@
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-no">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
 <span class="cline-any cline-neutral">&nbsp;</span>
-<span class="cline-any cline-neutral">&nbsp;</span></td><td class="text"><pre class="prettyprint lang-js">import { useMemo, useState } from "react";
-import { LoadingSpinner } from "@/components/ui";
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-neutral">&nbsp;</span>
+<span class="cline-any cline-yes">3x</span>
+<span class="cline-any cline-neutral">&nbsp;</span></td><td class="text"><pre class="prettyprint lang-js">import { forwardRef } from "react";
+import { clsx } from "clsx";
 &nbsp;
-interface GrafanaEmbedProps {
-  serviceName: string;
-  level: string;
-  from: string;
-  to: string;
-  theme: "dark" | "light";
+interface CheckboxProps extends React.InputHTMLAttributes&lt;HTMLInputElement&gt; {
+  label?: string;
+  indeterminate?: boolean;
 }
 &nbsp;
-export function <span class="fstat-no" title="function not covered" >GrafanaEmbed({</span> serviceName, level, from, to, theme }: GrafanaEmbedProps) {
-  const [loading, setLoading<span class="cstat-no" title="statement not covered" >] = useState(true);</span>
+export const Checkbox = forwardRef&lt;HTMLInputElement, CheckboxProps&gt;(
+  ({ label, indeterminate, className, id, ...props }, ref) =&gt; {
+    const checkboxId = id || label?.toLowerCase().replace(/\s+/g, "-");
 &nbsp;
-  const <span class="cstat-no" title="statement not covered" >src = useMemo(<span class="fstat-no" title="function not covered" >() =&gt; {</span></span>
-    const params = <span class="cstat-no" title="statement not covered" >new URLSearchParams({</span>
-      orgId: "1",
-      panelId: "1",
-      "var-service_name": serviceName,
-      "var-level": level,
-      from,
-      to,
-      theme,
-    });
-<span class="cstat-no" title="statement not covered" >    return `/grafana/d-solo/taskflows-service-logs/taskflows-service-logs?${params.toString()}`;</span>
-  }, [serviceName, level, from, to, theme]);
+    return (
+      &lt;div className="flex items-center gap-2"&gt;
+        &lt;input
+          ref={(el) =&gt; {
+            <span class="missing-if-branch" title="if path not taken" >I</span>if (typeof ref === "function") {
+<span class="cstat-no" title="statement not covered" >              ref(el);</span>
+            <span class="missing-if-branch" title="if path not taken" >I</span>} else if (ref) {
+<span class="cstat-no" title="statement not covered" >              ref.current = el;</span>
+            }
+            if (el) {
+              el.indeterminate = indeterminate ?? false;
+            }
+          }}
+          type="checkbox"
+          id={checkboxId}
+          className={clsx(
+            "h-4 w-4 rounded border-border text-electric-blue",
+            "focus:ring-2 focus:ring-electric-blue focus:ring-offset-0",
+            className
+          )}
+          {...props}
+        /&gt;
+        {label &amp;&amp; (
+          &lt;label htmlFor={checkboxId} className="text-sm text-foreground"&gt;
+            {label}
+          &lt;/label&gt;
+        )}
+      &lt;/div&gt;
+    );
+  }
+);
 &nbsp;
-<span class="cstat-no" title="statement not covered" >  return (</span>
-    &lt;div className="relative w-full h-full"&gt;
-      {loading &amp;&amp; (
-        &lt;div className="absolute inset-0 flex items-center justify-center bg-card rounded-lg z-10"&gt;
-          &lt;LoadingSpinner label="Loading Grafana panel..." /&gt;
-        &lt;/div&gt;
-      )}
-      &lt;iframe
-        key={src}
-        src={src}
-        className="w-full h-full border-0 rounded-lg"
-        onLoad={<span class="fstat-no" title="function not covered" >() =&gt; <span class="cstat-no" title="statement not covered" >s</span>etLoading(false)}</span>
-      /&gt;
-    &lt;/div&gt;
-  );
-}
+Checkbox.displayName = "Checkbox";
 &nbsp;</pre></td></tr></table></pre>
 
                 <div class='push'></div><!-- for sticky footer -->
@@ -199,7 +205,7 @@ export function <span class="fstat-no" title="function not covered" >GrafanaEmbe
             <div class='footer quiet pad2 space-top1 center small'>
                 Code coverage generated by
                 <a href="https://istanbul.js.org/" target="_blank" rel="noopener noreferrer">istanbul</a>
-                at 2026-08-18T20:02:08.468Z
+                at 2026-01-14T14:37:39.653Z
             </div>
         <script src="../../../prettify.js"></script>
         <script>
