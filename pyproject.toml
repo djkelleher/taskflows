@@ -1,6 +1,6 @@
 [project]
 name = "taskflows"
-version = "0.19.1"
+version = "0.19.2"
 description = "Tasks and systemd services with scheduling, resource constraints, alerts, and observability"
 authors = [
     {name = "Dan Kelleher",email = "kelleherjdan@gmail.com"}

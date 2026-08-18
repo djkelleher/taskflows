@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-08-18
+
 ### Added
 - **Dead-man switch (`alert_on_missed_run`):** services can declare
   `Service(alert_on_missed_run=MissedRunAlert(send_to=..., grace_seconds=300))`;
@@ -71,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Grafana `Dashboard`/logs-panel types must be imported from
   `taskflows.dashboard` (requires the `grafana` extra).
 - Alert config moved to `taskflows.alerts` (`from taskflows import Alerts`
-  still works). `Alerts.send_to` accepts any msgflows `MsgDst` destination
+  still works). `Alerts.send_to` accepts the built-in `MsgDst` destinations
   instead of a hardcoded set of three. Alert sending is now best-effort — a
   failing alert send is logged and never fails the task — and Grafana/Loki
   log links are only embedded when Grafana is actually configured
