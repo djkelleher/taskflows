@@ -71,6 +71,7 @@ class DeadLetterConfig:
 
     target_arn: str | None = None  # SQS or SNS ARN
     auto_create: bool = False  # Auto-create DLQ if not provided
+    kms_key_arn: str | None = None  # KMS key for an encrypted DLQ target
 
 
 @dataclass

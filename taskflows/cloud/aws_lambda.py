@@ -137,6 +137,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
                 invoke_arn,
                 config.schedules or [],
                 qualifier=config.create_alias,
+                previous_qualifier=previous_alias,
             )
             self._configure_async_invocation(
                 config,
@@ -230,7 +231,10 @@ class AWSLambdaEnvironment(CloudEnvironment):
         sqs = self._client("sqs")
         queue_url = sqs.create_queue(
             QueueName=queue_name,
-            Attributes={"MessageRetentionPeriod": "1209600"},
+            Attributes={
+                "MessageRetentionPeriod": "1209600",
+                **({"KmsMasterKeyId": dlq.kms_key_arn} if dlq.kms_key_arn else {}),
+            },
             tags=config.tags or {},
         )["QueueUrl"]
         arn = sqs.get_queue_attributes(QueueUrl=queue_url, AttributeNames=["QueueArn"])[
@@ -295,22 +299,32 @@ class AWSLambdaEnvironment(CloudEnvironment):
             self.iam_client.detach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
         for policy_arn in policy_arns:
             self.iam_client.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
+        dlq_kms_key_arn = (
+            config.dead_letter_config.kms_key_arn if config.dead_letter_config and dlq_arn else None
+        )
         if dlq_arn:
+            statements: list[dict[str, Any]] = [
+                {
+                    "Effect": "Allow",
+                    "Action": "sqs:SendMessage" if ":sqs:" in dlq_arn else "sns:Publish",
+                    "Resource": dlq_arn,
+                }
+            ]
+            if dlq_kms_key_arn:
+                statements.append(
+                    {
+                        "Effect": "Allow",
+                        "Action": ["kms:Decrypt", "kms:GenerateDataKey"],
+                        "Resource": dlq_kms_key_arn,
+                    }
+                )
             self.iam_client.put_role_policy(
                 RoleName=role_name,
                 PolicyName="TaskflowsDeadLetterQueue",
                 PolicyDocument=json.dumps(
                     {
                         "Version": "2012-10-17",
-                        "Statement": [
-                            {
-                                "Effect": "Allow",
-                                "Action": "sqs:SendMessage"
-                                if ":sqs:" in dlq_arn
-                                else "sns:Publish",
-                                "Resource": dlq_arn,
-                            }
-                        ],
+                        "Statement": statements,
                     }
                 ),
             )
@@ -382,6 +396,8 @@ class AWSLambdaEnvironment(CloudEnvironment):
         config: CloudFunctionConfig,
         role_arn: str,
         dlq_arn: str | None,
+        *,
+        for_update: bool = False,
     ) -> dict[str, Any]:
         args: dict[str, Any] = {
             "FunctionName": config.function_name,
@@ -399,13 +415,23 @@ class AWSLambdaEnvironment(CloudEnvironment):
         vpc = self._vpc_config(config)
         if vpc:
             args["VpcConfig"] = vpc
+        elif for_update:
+            # Lambda treats omitted fields as "leave unchanged". Empty
+            # collections are required to detach a previous VPC or EFS mount.
+            args["VpcConfig"] = {"SecurityGroupIds": [], "SubnetIds": []}
         if dlq_arn:
             args["DeadLetterConfig"] = {"TargetArn": dlq_arn}
+        elif for_update:
+            args["DeadLetterConfig"] = {}
         lambda_kms_key_arn = self.config.lambda_kms_key_arn or self.config.kms_key_arn
         if lambda_kms_key_arn:
             args["KMSKeyArn"] = lambda_kms_key_arn
+        elif for_update:
+            args["KMSKeyArn"] = ""
         if config.file_system_configs:
             args["FileSystemConfigs"] = config.file_system_configs
+        elif for_update:
+            args["FileSystemConfigs"] = []
         return args
 
     def _create_or_update_function(
@@ -458,6 +484,10 @@ class AWSLambdaEnvironment(CloudEnvironment):
                     FunctionName=config.function_name,
                     CodeSigningConfigArn=config.code_signing_config_arn,
                 )
+            elif existing.get("Configuration", {}).get("CodeSigningConfigArn"):
+                self.lambda_client.delete_function_code_signing_config(
+                    FunctionName=config.function_name,
+                )
             code_response = self.lambda_client.update_function_code(
                 FunctionName=config.function_name,
                 Architectures=[config.architecture],
@@ -465,7 +495,9 @@ class AWSLambdaEnvironment(CloudEnvironment):
                 **code,
             )
             self._wait_for_update(config.function_name)
-            response = self.lambda_client.update_function_configuration(**common)
+            response = self.lambda_client.update_function_configuration(
+                **self._function_configuration(config, role_arn, dlq_arn, for_update=True)
+            )
             self._wait_for_update(config.function_name)
             function_arn = response.get("FunctionArn") or existing["Configuration"]["FunctionArn"]
             if config.enable_versioning:
@@ -552,13 +584,14 @@ class AWSLambdaEnvironment(CloudEnvironment):
         schedules: list[Any],
         *,
         qualifier: str | None,
+        previous_qualifier: str | None,
     ) -> list[str]:
         prefix = self._schedule_prefix(function_name)
         desired_names = {f"{prefix}{index}" for index in range(len(schedules))}
         existing_names = set(self._list_rule_names(prefix))
 
         for stale_name in existing_names - desired_names:
-            self._delete_rule(function_name, stale_name, qualifier=qualifier)
+            self._delete_rule(function_name, stale_name, qualifier=previous_qualifier)
 
         rule_arns = []
         for index, schedule in enumerate(schedules):
@@ -575,15 +608,16 @@ class AWSLambdaEnvironment(CloudEnvironment):
                 "FunctionName": function_name,
                 "StatementId": statement_id,
             }
+            old_permission_args = dict(permission_args)
+            if previous_qualifier:
+                old_permission_args["Qualifier"] = previous_qualifier
+            self._remove_permission(old_permission_args)
+            new_permission_args = dict(permission_args)
             if qualifier:
-                permission_args["Qualifier"] = qualifier
-            try:
-                self.lambda_client.remove_permission(**permission_args)
-            except ClientError as error:
-                if _error_code(error) != "ResourceNotFoundException":
-                    raise
+                new_permission_args["Qualifier"] = qualifier
+            self._remove_permission(new_permission_args)
             self.lambda_client.add_permission(
-                **permission_args,
+                **new_permission_args,
                 Action="lambda:InvokeFunction",
                 Principal="events.amazonaws.com",
                 SourceArn=rule_arn,
@@ -598,6 +632,13 @@ class AWSLambdaEnvironment(CloudEnvironment):
                 )
             rule_arns.append(rule_arn)
         return rule_arns
+
+    def _remove_permission(self, args: dict[str, Any]) -> None:
+        try:
+            self.lambda_client.remove_permission(**args)
+        except ClientError as error:
+            if _error_code(error) != "ResourceNotFoundException":
+                raise
 
     def _list_rule_names(self, prefix: str) -> list[str]:
         names: list[str] = []
@@ -635,11 +676,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
         }
         if qualifier:
             permission_args["Qualifier"] = qualifier
-        try:
-            self.lambda_client.remove_permission(**permission_args)
-        except ClientError as error:
-            if _error_code(error) != "ResourceNotFoundException":
-                raise
+        self._remove_permission(permission_args)
 
     def _clear_async_invocation(self, function_name: str, qualifier: str | None) -> None:
         args: dict[str, Any] = {"FunctionName": function_name}
@@ -760,9 +797,28 @@ class AWSLambdaEnvironment(CloudEnvironment):
 
     def _configure_alarms(self, config: CloudFunctionConfig) -> None:
         monitoring = config.monitoring
-        if not monitoring or not monitoring.enable_cloudwatch_alarms:
+        # ``None`` means the caller did not manage monitoring in this
+        # deployment. Do not create a CloudWatch client (and do not touch
+        # existing alarms) in that case; this keeps partial configuration
+        # updates non-destructive.
+        if monitoring is None:
             return
         cloudwatch = self._client("cloudwatch")
+        alarm_names = {
+            f"{config.function_name}-error-rate",
+            f"{config.function_name}-duration",
+        }
+        desired_names: set[str] = set()
+        if monitoring and monitoring.enable_cloudwatch_alarms:
+            if monitoring.error_rate_threshold is not None:
+                desired_names.add(f"{config.function_name}-error-rate")
+            if monitoring.duration_threshold_ms is not None:
+                desired_names.add(f"{config.function_name}-duration")
+        stale_names = alarm_names - desired_names
+        if stale_names:
+            cloudwatch.delete_alarms(AlarmNames=sorted(stale_names))
+        if not monitoring or not monitoring.enable_cloudwatch_alarms:
+            return
         actions = [monitoring.alarm_sns_topic_arn] if monitoring.alarm_sns_topic_arn else []
         if monitoring.error_rate_threshold is not None:
             cloudwatch.put_metric_alarm(
@@ -961,10 +1017,17 @@ class AWSLambdaEnvironment(CloudEnvironment):
                 **code,
             )
             self._wait_for_update(function_name)
+            function_arn = response.get("FunctionArn", function_name)
+            managed_alias = self._managed_alias(function_arn)
+            alias_arn = None
+            if managed_alias:
+                alias_arn = self._set_alias(function_name, managed_alias, response["Version"])
             return CloudDeploymentResult(
                 True,
-                response.get("FunctionArn", function_name),
+                function_arn,
+                endpoint=alias_arn,
                 version=response.get("Version"),
+                rollback_id=managed_alias,
                 metadata={"updated": "code", "package_location": package_location},
             )
         except Exception as error:
@@ -984,7 +1047,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
             dlq_arn = self._resolve_dlq(config)
             role_arn = self._get_execution_role_arn(config, dlq_arn)
             response = self.lambda_client.update_function_configuration(
-                **self._function_configuration(config, role_arn, dlq_arn)
+                **self._function_configuration(config, role_arn, dlq_arn, for_update=True)
             )
             self._wait_for_update(function_name)
             function_arn = response.get("FunctionArn", function_name)
@@ -1004,6 +1067,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
                 alias_arn or function_arn,
                 config.schedules or [],
                 qualifier=config.create_alias,
+                previous_qualifier=previous_alias,
             )
             self._configure_async_invocation(
                 config,

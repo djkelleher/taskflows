@@ -141,6 +141,10 @@ A full `deploy_function` call reconciles:
 - CloudWatch log retention and optional alarms;
 - optional Lambda layers, DLQ, VPC, X-Ray, and code-signing settings.
 
+For an encrypted DLQ, set `DeadLetterConfig.kms_key_arn`. Auto-created roles
+then receive the required KMS permissions; an externally supplied role must be
+granted the equivalent permissions by its owner.
+
 Provisioned concurrency requires an alias. This gives updates a stable target
 and prevents capacity from being left attached to immutable old versions. Alias
 and user-tag changes are reconciled only for resources recorded as Taskflows
