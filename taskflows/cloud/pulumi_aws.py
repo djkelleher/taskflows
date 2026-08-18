@@ -1,24 +1,27 @@
 """Production AWS Lambda deployment using Pulumi for infrastructure as code.
 
-This module provides a production-grade implementation of AWS Lambda deployment
+This module provides a production-oriented implementation of AWS Lambda deployment
 using Pulumi, enabling infrastructure as code, state management, and multi-cloud
 extensibility.
 
 Requirements:
-    pip install pulumi pulumi-aws pulumi-awsx
+    pip install "taskflows[pulumi]"
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 try:
     import pulumi
     import pulumi_aws as aws
     from pulumi import automation as auto
-    from pulumi import export, Output
+    from pulumi import export
 
     PULUMI_AVAILABLE = True
 except ImportError:
@@ -32,9 +35,7 @@ from .base import (
     CloudDeploymentResult,
     CloudEnvironment,
     CloudFunctionConfig,
-    DeadLetterConfig,
     LayerConfig,
-    MonitoringConfig,
 )
 from .utils import (
     create_lambda_deployment_package,
@@ -75,7 +76,7 @@ class PulumiAWSEnvironment(CloudEnvironment):
         project_name: str = "taskflows",
         stack_name: str = "dev",
         region: str = "us-east-1",
-        work_dir: Optional[Path] = None,
+        work_dir: Path | None = None,
         auto_create_stack: bool = True,
     ):
         """Initialize Pulumi AWS environment.
@@ -90,7 +91,7 @@ class PulumiAWSEnvironment(CloudEnvironment):
         if not PULUMI_AVAILABLE:
             raise ImportError(
                 "Pulumi is required for this deployment backend. "
-                "Install with: pip install pulumi pulumi-aws"
+                "Install with: pip install 'taskflows[pulumi]'"
             )
 
         self.project_name = project_name
@@ -102,7 +103,7 @@ class PulumiAWSEnvironment(CloudEnvironment):
         self._init_pulumi_project()
 
         # Track deployed resources
-        self._deployed_functions: Dict[str, Dict[str, Any]] = {}
+        self._deployed_functions: dict[str, dict[str, Any]] = {}
 
     def _init_pulumi_project(self):
         """Initialize Pulumi project structure."""
@@ -125,7 +126,7 @@ description: TaskFlows cloud deployment infrastructure
         self,
         function: Callable[[], None],
         config: CloudFunctionConfig,
-        dependencies: Optional[List[str]] = None,
+        dependencies: list[str] | None = None,
     ) -> CloudDeploymentResult:
         """Deploy function using Pulumi infrastructure as code."""
 
@@ -146,9 +147,7 @@ description: TaskFlows cloud deployment infrastructure
 
             # Create Pulumi program
             def pulumi_program():
-                return self._create_lambda_infrastructure(
-                    config, deployment_package, use_s3
-                )
+                return self._create_lambda_infrastructure(config, deployment_package, use_s3)
 
             # Execute Pulumi deployment
             stack = self._get_or_create_stack(pulumi_program)
@@ -193,7 +192,7 @@ description: TaskFlows cloud deployment infrastructure
         config: CloudFunctionConfig,
         deployment_package: bytes,
         use_s3: bool,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Create Lambda infrastructure using Pulumi.
 
         This is the Pulumi program that defines the infrastructure.
@@ -215,15 +214,20 @@ description: TaskFlows cloud deployment infrastructure
             dlq_arn = dlq.arn
             resources["dlq"] = dlq
 
+        # Persist the deployment archive for Pulumi's asset APIs.
+        package_hash = hashlib.sha256(deployment_package).hexdigest()[:16]
+        package_path = self.work_dir / f"{config.function_name}-{package_hash}.zip"
+        package_path.write_bytes(deployment_package)
+
         # Upload to S3 if package is large
         code_args = {}
         if use_s3:
-            bucket, s3_obj = self._upload_to_s3(config, deployment_package)
+            bucket, s3_obj = self._upload_to_s3(config, package_path)
             code_args = {"s3_bucket": bucket.id, "s3_key": s3_obj.key}
             resources["bucket"] = bucket
             resources["s3_object"] = s3_obj
         else:
-            code_args = {"archive": pulumi.AssetArchive({".": pulumi.BytesAsset(deployment_package)})}
+            code_args = {"code": pulumi.FileArchive(str(package_path))}
 
         # Create Lambda Layers if specified
         layer_arns = []
@@ -244,6 +248,7 @@ description: TaskFlows cloud deployment infrastructure
             "role": execution_role_arn,
             "timeout": config.timeout_seconds,
             "memory_size": config.memory_mb,
+            "publish": config.enable_versioning,
             **code_args,
         }
 
@@ -320,14 +325,18 @@ description: TaskFlows cloud deployment infrastructure
         role_name = config.role_name or f"{config.function_name}-role"
 
         # Trust policy for Lambda
-        assume_role_policy = json.dumps({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Action": "sts:AssumeRole",
-                "Effect": "Allow",
-                "Principal": {"Service": "lambda.amazonaws.com"},
-            }],
-        })
+        assume_role_policy = json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Action": "sts:AssumeRole",
+                        "Effect": "Allow",
+                        "Principal": {"Service": "lambda.amazonaws.com"},
+                    }
+                ],
+            }
+        )
 
         role = aws.iam.Role(
             f"{config.function_name}-role",
@@ -372,9 +381,7 @@ description: TaskFlows cloud deployment infrastructure
         )
         return dlq
 
-    def _upload_to_s3(
-        self, config: CloudFunctionConfig, deployment_package: bytes
-    ) -> tuple:
+    def _upload_to_s3(self, config: CloudFunctionConfig, package_path: Path) -> tuple:
         """Upload deployment package to S3."""
         # Create S3 bucket for deployments
         bucket = aws.s3.Bucket(
@@ -383,7 +390,7 @@ description: TaskFlows cloud deployment infrastructure
         )
 
         # Generate unique key
-        package_hash = hashlib.sha256(deployment_package).hexdigest()[:16]
+        package_hash = hashlib.sha256(package_path.read_bytes()).hexdigest()[:16]
         key = f"lambda/{config.function_name}/{package_hash}.zip"
 
         # Upload package
@@ -391,7 +398,7 @@ description: TaskFlows cloud deployment infrastructure
             f"{config.function_name}-package",
             bucket=bucket.id,
             key=key,
-            source=pulumi.BytesAsset(deployment_package),
+            source=pulumi.FileAsset(str(package_path)),
         )
 
         return bucket, s3_obj
@@ -403,11 +410,13 @@ description: TaskFlows cloud deployment infrastructure
         from .utils import create_lambda_layer_package
 
         layer_package = create_lambda_layer_package(layer_config.dependencies or [])
+        layer_path = self.work_dir / f"{layer_config.layer_name}-layer.zip"
+        layer_path.write_bytes(layer_package)
 
         layer = aws.lambda_.LayerVersion(
             layer_config.layer_name,
             layer_name=layer_config.layer_name,
-            code=pulumi.AssetArchive({".": pulumi.BytesAsset(layer_package)}),
+            code=pulumi.FileArchive(str(layer_path)),
             compatible_runtimes=layer_config.compatible_runtimes,
         )
 
@@ -415,7 +424,7 @@ description: TaskFlows cloud deployment infrastructure
 
     def _create_eventbridge_schedules(
         self, config: CloudFunctionConfig, lambda_function: aws.lambda_.Function
-    ) -> List[aws.cloudwatch.EventRule]:
+    ) -> list[aws.cloudwatch.EventRule]:
         """Create EventBridge rules for schedules."""
         rules = []
 
@@ -453,7 +462,7 @@ description: TaskFlows cloud deployment infrastructure
 
     def _create_cloudwatch_alarms(
         self, config: CloudFunctionConfig, lambda_function: aws.lambda_.Function
-    ) -> List[aws.cloudwatch.MetricAlarm]:
+    ) -> list[aws.cloudwatch.MetricAlarm]:
         """Create CloudWatch alarms for monitoring."""
         alarms = []
         monitoring = config.monitoring
@@ -471,8 +480,10 @@ description: TaskFlows cloud deployment infrastructure
                 statistic="Average",
                 threshold=monitoring.error_rate_threshold,
                 dimensions={"FunctionName": lambda_function.name},
-                alarm_description=f"Error rate > {monitoring.error_rate_threshold*100}%",
-                alarm_actions=[monitoring.alarm_sns_topic_arn] if monitoring.alarm_sns_topic_arn else [],
+                alarm_description=f"Error rate > {monitoring.error_rate_threshold * 100}%",
+                alarm_actions=[monitoring.alarm_sns_topic_arn]
+                if monitoring.alarm_sns_topic_arn
+                else [],
             )
             alarms.append(error_alarm)
 
@@ -490,7 +501,9 @@ description: TaskFlows cloud deployment infrastructure
                 threshold=monitoring.duration_threshold_ms,
                 dimensions={"FunctionName": lambda_function.name},
                 alarm_description=f"Duration > {monitoring.duration_threshold_ms}ms",
-                alarm_actions=[monitoring.alarm_sns_topic_arn] if monitoring.alarm_sns_topic_arn else [],
+                alarm_actions=[monitoring.alarm_sns_topic_arn]
+                if monitoring.alarm_sns_topic_arn
+                else [],
             )
             alarms.append(duration_alarm)
 
@@ -520,9 +533,9 @@ description: TaskFlows cloud deployment infrastructure
     def invoke_function(
         self,
         function_name: str,
-        payload: Optional[Dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
         invocation_type: str = "RequestResponse",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Invoke function using AWS SDK (not Pulumi)."""
         # Use boto3 for runtime operations
         import boto3
@@ -541,7 +554,9 @@ description: TaskFlows cloud deployment infrastructure
             response = lambda_client.invoke(**invoke_args)
             return {
                 "StatusCode": response["StatusCode"],
-                "Payload": json.loads(response["Payload"].read()) if "Payload" in response else None,
+                "Payload": json.loads(response["Payload"].read())
+                if "Payload" in response
+                else None,
             }
         except Exception as e:
             logger.error(f"Failed to invoke {function_name}: {e}")
@@ -564,12 +579,13 @@ description: TaskFlows cloud deployment infrastructure
         self,
         function_name: str,
         limit: int = 100,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-    ) -> List[str]:
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> list[str]:
         """Get logs using boto3."""
-        import boto3
         import time
+
+        import boto3
 
         logs_client = boto3.client("logs", region_name=self.region)
         log_group_name = f"/aws/lambda/{function_name}"
@@ -614,7 +630,7 @@ description: TaskFlows cloud deployment infrastructure
             logger.error(f"Failed to get logs for {function_name}: {e}")
             return [f"Error retrieving logs: {e}"]
 
-    def list_functions(self) -> List[Dict[str, Any]]:
+    def list_functions(self) -> list[dict[str, Any]]:
         """List deployed functions."""
         return [
             {
@@ -630,7 +646,7 @@ description: TaskFlows cloud deployment infrastructure
         self,
         function_name: str,
         function: Callable[[], None],
-        dependencies: Optional[List[str]] = None,
+        dependencies: list[str] | None = None,
     ) -> CloudDeploymentResult:
         """Update function code using Pulumi update."""
         # Re-deploy with new code

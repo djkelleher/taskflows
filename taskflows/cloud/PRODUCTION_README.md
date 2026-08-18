@@ -1,11 +1,11 @@
 ```markdown
 # TaskFlows Production Cloud Deployment
 
-Full production-ready implementation for deploying taskflows services to AWS Lambda and other cloud platforms.
+Beta, production-oriented implementation for deploying taskflows services to AWS Lambda.
 
 ## Overview
 
-This is the **production implementation** of cloud deployment for taskflows, featuring:
+This is the **beta AWS implementation** of cloud deployment for taskflows, featuring:
 
 - **Multiple Backends**: Pulumi (recommended) and boto3
 - **Production Features**: Monitoring, dead letter queues, auto-scaling, versioning
@@ -19,10 +19,11 @@ This is the **production implementation** of cloud deployment for taskflows, fea
 
 ```bash
 # Full cloud deployment support
-pip install -r requirements-cloud.txt
+pip install "taskflows[cloud]"
 
-# Or install individually
-pip install boto3 pulumi pulumi-aws cloudpickle
+# Or install a single backend
+pip install "taskflows[aws]"
+pip install "taskflows[pulumi]"
 ```
 
 ## Quick Start
@@ -38,12 +39,14 @@ manager = DeploymentManager(
     provider="aws",
     backend="pulumi",  # or "boto3"
     region="us-east-1",
-    environment="production"
+    environment="production",
 )
+
 
 # Deploy a function
 def my_task():
     print("Hello from Lambda!")
+
 
 result = manager.deploy_function(
     name="my-task",
@@ -51,7 +54,7 @@ result = manager.deploy_function(
     schedule="Mon-Fri 09:00",
     memory_mb=512,
     timeout_seconds=120,
-    enable_monitoring=True
+    enable_monitoring=True,
 )
 
 print(f"Deployed: {result.resource_id}")
@@ -67,15 +70,12 @@ from taskflows.cloud.manager import deploy_service_to_cloud
 service = Service(
     name="data-processor",
     start_command=lambda: process_data(),
-    start_schedule=Calendar(schedule="Mon-Fri 14:00")
+    start_schedule=Calendar(schedule="Mon-Fri 14:00"),
 )
 
 # Deploy to cloud
 result = deploy_service_to_cloud(
-    service,
-    provider="aws",
-    backend="pulumi",
-    environment="production"
+    service, provider="aws", backend="pulumi", environment="production"
 )
 ```
 
@@ -87,7 +87,7 @@ result = deploy_service_to_cloud(
 - Infrastructure as Code with state management
 - Preview changes before deployment
 - Automatic rollback on failures
-- Multi-cloud support (AWS, GCP, Azure, Kubernetes)
+- AWS support with provider abstractions for future backends
 - GitOps-friendly
 
 ```python
@@ -99,7 +99,7 @@ manager = DeploymentManager(
     backend=DeploymentBackend.PULUMI,
     region="us-east-1",
     project_name="my-app",
-    environment="production"
+    environment="production",
 )
 ```
 
@@ -114,8 +114,7 @@ manager = DeploymentManager(
 from taskflows.cloud import AWSLambdaEnvironment
 
 env = AWSLambdaEnvironment(
-    region="us-east-1",
-    execution_role_arn="arn:aws:iam::123456789012:role/lambda-role"
+    region="us-east-1", execution_role_arn="arn:aws:iam::123456789012:role/lambda-role"
 )
 ```
 
@@ -132,8 +131,8 @@ config = CloudFunctionConfig(
         enable_cloudwatch_alarms=True,
         error_rate_threshold=0.05,  # Alert if >5% errors
         duration_threshold_ms=10000,  # Alert if >10s duration
-        alarm_sns_topic_arn="arn:aws:sns:us-east-1:123456789012:alerts"
-    )
+        alarm_sns_topic_arn="arn:aws:sns:us-east-1:123456789012:alerts",
+    ),
 )
 ```
 
@@ -146,7 +145,7 @@ config = CloudFunctionConfig(
     function_name="important-task",
     dead_letter_config=DeadLetterConfig(
         auto_create=True,  # Auto-create SQS queue for failed invocations
-    )
+    ),
 )
 ```
 
@@ -159,7 +158,7 @@ from taskflows.cloud import LayerConfig
 layer = LayerConfig(
     layer_name="data-deps",
     dependencies=["pandas", "numpy", "requests"],
-    compatible_runtimes=["python3.11"]
+    compatible_runtimes=["python3.11"],
 )
 
 config = CloudFunctionConfig(
@@ -190,8 +189,8 @@ config = CloudFunctionConfig(
     function_name="flaky-task",
     retry_config=RetryConfig(
         max_retry_attempts=2,
-        max_event_age_seconds=3600  # Retry for up to 1 hour
-    )
+        max_event_age_seconds=3600,  # Retry for up to 1 hour
+    ),
 )
 ```
 
@@ -214,22 +213,14 @@ def deploy_to_all_environments(function, name):
             "memory_mb": 1024,
             "enable_monitoring": True,
             "provisioned_concurrency": 2,  # Keep warm
-        }
+        },
     }
 
     results = {}
     for env, config_overrides in environments.items():
-        manager = DeploymentManager(
-            provider="aws",
-            backend="pulumi",
-            environment=env
-        )
+        manager = DeploymentManager(provider="aws", backend="pulumi", environment=env)
 
-        result = manager.deploy_function(
-            name=name,
-            function=function,
-            **config_overrides
-        )
+        result = manager.deploy_function(name=name, function=function, **config_overrides)
 
         results[env] = result
 
@@ -269,7 +260,7 @@ dep_mgr = DependencyManager()
 # Build using Docker (matches Lambda runtime exactly)
 package = dep_mgr.build_deployment_package(
     requirements=["pandas", "numpy"],
-    use_docker=True  # Uses public.ecr.aws/lambda/python:3.11
+    use_docker=True,  # Uses public.ecr.aws/lambda/python:3.11
 )
 ```
 
@@ -278,8 +269,7 @@ package = dep_mgr.build_deployment_package(
 ```python
 # Create properly structured Lambda Layer
 layer_package = dep_mgr.create_layer_package(
-    requirements=["requests", "boto3"],
-    runtime="python3.11"
+    requirements=["requests", "boto3"], runtime="python3.11"
 )
 
 # Structure: python/lib/python3.11/site-packages/...
@@ -291,18 +281,10 @@ layer_package = dep_mgr.create_layer_package(
 
 ```python
 # Synchronous invocation
-response = manager.invoke(
-    "my-function",
-    payload={"key": "value"},
-    async_invoke=False
-)
+response = manager.invoke("my-function", payload={"key": "value"}, async_invoke=False)
 
 # Asynchronous invocation (fire and forget)
-manager.invoke(
-    "batch-processor",
-    payload={"batch_id": 123},
-    async_invoke=True
-)
+manager.invoke("batch-processor", payload={"batch_id": 123}, async_invoke=True)
 ```
 
 ### Get Logs
@@ -315,6 +297,7 @@ for log in logs:
 
 # Get logs in time range
 import time
+
 start = int(time.time() * 1000) - 3600000  # 1 hour ago
 logs = manager.get_logs("my-function", start_time=start)
 ```
@@ -337,7 +320,7 @@ print(f"Avg Duration: {metrics.get('avg_duration_ms')}ms")
 manager = DeploymentManager(
     provider="aws",
     backend=DeploymentBackend.PULUMI,  # Not boto3
-    environment="production"
+    environment="production",
 )
 ```
 
@@ -349,7 +332,7 @@ config = CloudFunctionConfig(
     function_name="prod-task",
     monitoring=MonitoringConfig(enable_cloudwatch_alarms=True),
     dead_letter_config=DeadLetterConfig(auto_create=True),
-    enable_versioning=True
+    enable_versioning=True,
 )
 ```
 
@@ -358,10 +341,7 @@ config = CloudFunctionConfig(
 ```python
 # Don't include pandas in every function
 # Use a shared layer instead
-layer = LayerConfig(
-    layer_name="data-processing",
-    dependencies=["pandas", "numpy", "scipy"]
-)
+layer = LayerConfig(layer_name="data-processing", dependencies=["pandas", "numpy", "scipy"])
 
 # All functions can use this layer
 config = CloudFunctionConfig(layers=[layer])
@@ -377,8 +357,8 @@ config = CloudFunctionConfig(
         "Environment": "Production",
         "CostCenter": "Engineering",
         "Owner": "data-team@company.com",
-        "ManagedBy": "TaskFlows"
-    }
+        "ManagedBy": "TaskFlows",
+    },
 )
 ```
 
@@ -389,8 +369,7 @@ dep_mgr = DependencyManager()
 
 # Ensures binary compatibility with Lambda
 package = dep_mgr.build_deployment_package(
-    requirements=["psycopg2-binary", "numpy"],
-    use_docker=True
+    requirements=["psycopg2-binary", "numpy"], use_docker=True
 )
 ```
 
@@ -431,10 +410,7 @@ config = CloudFunctionConfig(
 
 ```python
 # One layer, many functions = less storage cost
-layer = LayerConfig(
-    layer_name="common-deps",
-    dependencies=["requests", "boto3"]
-)
+layer = LayerConfig(layer_name="common-deps", dependencies=["requests", "boto3"])
 
 # All functions use same layer (stored once)
 ```
@@ -453,7 +429,7 @@ config = CloudFunctionConfig(
 ### Import Error: Pulumi
 
 ```bash
-pip install pulumi pulumi-aws
+pip install "taskflows[pulumi]"
 ```
 
 ### Docker Not Available
@@ -479,9 +455,7 @@ Ensure your AWS credentials have:
 
 ```python
 # Option 1: Use Layers
-config = CloudFunctionConfig(
-    layers=[LayerConfig(layer_name="deps", dependencies=["pandas"])]
-)
+config = CloudFunctionConfig(layers=[LayerConfig(layer_name="deps", dependencies=["pandas"])])
 
 # Option 2: Enable S3 deployment
 config = CloudFunctionConfig(

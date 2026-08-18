@@ -4,7 +4,7 @@
 
 ### 1. Install Dependencies
 ```bash
-pip install boto3
+pip install "taskflows[aws]"
 ```
 
 ### 2. Configure AWS Credentials
@@ -46,15 +46,17 @@ Copy the ARN - it looks like: `arn:aws:iam::123456789012:role/taskflows-lambda`
 from taskflows.cloud import AWSLambdaEnvironment, CloudFunctionConfig
 from taskflows.schedule import Calendar
 
+
 # Your task
 def daily_backup():
     print("Running daily backup...")
     # Your backup logic here
 
+
 # Deploy
 lambda_env = AWSLambdaEnvironment(
     region="us-east-1",
-    execution_role_arn="arn:aws:iam::123456789012:role/taskflows-lambda"  # Your ARN
+    execution_role_arn="arn:aws:iam::123456789012:role/taskflows-lambda",  # Your ARN
 )
 
 config = CloudFunctionConfig(
@@ -71,8 +73,10 @@ print("Deployed!" if result.success else f"Failed: {result.error}")
 ```python
 from taskflows.schedule import Calendar
 
+
 def send_report():
     print("Sending weekly report...")
+
 
 config = CloudFunctionConfig(
     function_name="weekday-report",
@@ -87,8 +91,10 @@ lambda_env.deploy_function(send_report, config)
 ```python
 from taskflows.schedule import Periodic
 
+
 def check_status():
     print("Checking system status...")
+
 
 config = CloudFunctionConfig(
     function_name="hourly-check",
@@ -103,16 +109,15 @@ lambda_env.deploy_function(check_status, config)
 ```python
 def process_data():
     import os
+
     bucket = os.environ.get("S3_BUCKET")
     print(f"Processing data from {bucket}...")
+
 
 config = CloudFunctionConfig(
     function_name="data-processor",
     schedules=[Calendar(schedule="Mon-Fri 14:00")],
-    environment_variables={
-        "S3_BUCKET": "my-data-bucket",
-        "ENVIRONMENT": "production"
-    },
+    environment_variables={"S3_BUCKET": "my-data-bucket", "ENVIRONMENT": "production"},
 )
 
 lambda_env.deploy_function(process_data, config)
@@ -124,9 +129,10 @@ lambda_env.deploy_function(process_data, config)
 def heavy_processing():
     print("Running CPU-intensive task...")
 
+
 config = CloudFunctionConfig(
     function_name="heavy-task",
-    memory_mb=2048,       # 2 GB RAM
+    memory_mb=2048,  # 2 GB RAM
     timeout_seconds=600,  # 10 minutes
     schedules=[Periodic(start_on="boot", period=21600, relative_to="finish")],  # Every 6 hours
 )
@@ -142,6 +148,7 @@ def fetch_and_process():
     import pandas as pd
     # Your logic using requests and pandas
 
+
 config = CloudFunctionConfig(
     function_name="fetch-process",
     schedules=[Calendar(schedule="Mon-Sun 00:00")],
@@ -150,7 +157,7 @@ config = CloudFunctionConfig(
 lambda_env.deploy_function(
     fetch_and_process,
     config,
-    dependencies=["requests", "pandas"]  # Will be packaged
+    dependencies=["requests", "pandas"],  # Will be packaged
 )
 ```
 
@@ -181,6 +188,7 @@ for func in functions:
 def daily_backup_v2():
     print("Running improved daily backup...")
 
+
 lambda_env.update_function_code("daily-backup", daily_backup_v2)
 ```
 
@@ -188,8 +196,8 @@ lambda_env.update_function_code("daily-backup", daily_backup_v2)
 ```python
 updated_config = CloudFunctionConfig(
     function_name="daily-backup",
-    memory_mb=512,      # Increase memory
-    timeout_seconds=300  # Increase timeout
+    memory_mb=512,  # Increase memory
+    timeout_seconds=300,  # Increase timeout
 )
 
 lambda_env.update_function_configuration("daily-backup", updated_config)
@@ -221,9 +229,9 @@ from taskflows.schedule import Calendar
 
 # Initialize environment (do this once)
 lambda_env = AWSLambdaEnvironment(
-    region="us-east-1",
-    execution_role_arn="arn:aws:iam::123456789012:role/taskflows-lambda"
+    region="us-east-1", execution_role_arn="arn:aws:iam::123456789012:role/taskflows-lambda"
 )
+
 
 # Define your task
 def my_scheduled_task():
@@ -231,6 +239,7 @@ def my_scheduled_task():
     print("Task is running!")
     # Your business logic here
     return {"status": "success"}
+
 
 # Configure deployment
 config = CloudFunctionConfig(
@@ -240,7 +249,7 @@ config = CloudFunctionConfig(
     timeout_seconds=60,
     schedules=[Calendar(schedule="Mon-Fri 09:00")],
     environment_variables={"ENV": "production"},
-    tags={"Project": "MyProject"}
+    tags={"Project": "MyProject"},
 )
 
 # Deploy
@@ -258,7 +267,7 @@ else:
 
 ### "boto3 is required"
 ```bash
-pip install boto3
+pip install "taskflows[aws]"
 ```
 
 ### "execution_role_arn must be provided"

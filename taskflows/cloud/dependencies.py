@@ -7,9 +7,9 @@ for consistent deployment packages.
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Set
 
 from ..common import logger
 
@@ -24,8 +24,8 @@ class DependencyManager:
 
     def build_deployment_package(
         self,
-        requirements: List[str],
-        include_files: Optional[List[Path]] = None,
+        requirements: list[str],
+        include_files: list[Path] | None = None,
         use_docker: bool = False,
     ) -> bytes:
         """Build a deployment package with all dependencies.
@@ -45,8 +45,8 @@ class DependencyManager:
 
     def _build_locally(
         self,
-        requirements: List[str],
-        include_files: Optional[List[Path]] = None,
+        requirements: list[str],
+        include_files: list[Path] | None = None,
     ) -> bytes:
         """Build package locally using pip."""
         import io
@@ -54,33 +54,24 @@ class DependencyManager:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            deps_dir = tmp_path / "python"
+            deps_dir = tmp_path / "package"
             deps_dir.mkdir()
 
             # Install dependencies
             if requirements:
                 logger.info(f"Installing dependencies: {requirements}")
-                subprocess.run(
-                    [
-                        "pip",
-                        "install",
-                        "--target",
-                        str(deps_dir),
-                        "--upgrade",
-                        *requirements,
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
+                self._install_requirements(requirements, deps_dir)
 
             # Create zip
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                 # Add dependencies
-                for root, dirs, files in os.walk(deps_dir):
+                for root, _dirs, files in os.walk(deps_dir):
                     for file in files:
                         file_path = Path(root) / file
-                        arcname = file_path.relative_to(tmp_path)
+                        if file == ".lock" or file_path.suffix == ".pyc":
+                            continue
+                        arcname = file_path.relative_to(deps_dir)
                         zip_file.write(file_path, arcname)
 
                 # Add additional files
@@ -93,8 +84,8 @@ class DependencyManager:
 
     def _build_with_docker(
         self,
-        requirements: List[str],
-        include_files: Optional[List[Path]] = None,
+        requirements: list[str],
+        include_files: list[Path] | None = None,
     ) -> bytes:
         """Build package using Docker for consistent environment.
 
@@ -154,7 +145,7 @@ RUN pip install --target /asset -r requirements.txt
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                     # Add dependencies
                     asset_dir = output_dir / "asset"
-                    for root, dirs, files in os.walk(asset_dir):
+                    for root, _dirs, files in os.walk(asset_dir):
                         for file in files:
                             file_path = Path(root) / file
                             arcname = file_path.relative_to(asset_dir)
@@ -174,7 +165,7 @@ RUN pip install --target /asset -r requirements.txt
 
     def create_layer_package(
         self,
-        requirements: List[str],
+        requirements: list[str],
         runtime: str = "python3.11",
     ) -> bytes:
         """Create a Lambda Layer package with proper structure.
@@ -201,23 +192,12 @@ RUN pip install --target /asset -r requirements.txt
             # Install dependencies
             if requirements:
                 logger.info(f"Building layer with: {requirements}")
-                subprocess.run(
-                    [
-                        "pip",
-                        "install",
-                        "--target",
-                        str(layer_dir),
-                        "--upgrade",
-                        *requirements,
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
+                self._install_requirements(requirements, layer_dir)
 
             # Create zip
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                for root, dirs, files in os.walk(tmp_path):
+                for root, _dirs, files in os.walk(tmp_path):
                     for file in files:
                         file_path = Path(root) / file
                         arcname = file_path.relative_to(tmp_path)
@@ -225,7 +205,7 @@ RUN pip install --target /asset -r requirements.txt
 
             return zip_buffer.getvalue()
 
-    def parse_requirements_file(self, requirements_file: Path) -> List[str]:
+    def parse_requirements_file(self, requirements_file: Path) -> list[str]:
         """Parse a requirements.txt file.
 
         Args:
@@ -246,7 +226,35 @@ RUN pip install --target /asset -r requirements.txt
 
         return requirements
 
-    def detect_imports(self, source_code: str) -> Set[str]:
+    @staticmethod
+    def _install_requirements(requirements: list[str], target: Path) -> None:
+        """Install requirements into ``target`` without shell interpolation."""
+        if shutil.which("uv"):
+            command = [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                sys.executable,
+                "--target",
+                str(target),
+                "--upgrade",
+                *requirements,
+            ]
+        else:
+            command = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--target",
+                str(target),
+                "--upgrade",
+                *requirements,
+            ]
+        subprocess.run(command, check=True, capture_output=True, text=True)
+
+    def detect_imports(self, source_code: str) -> set[str]:
         """Detect imported packages from source code.
 
         Args:
@@ -266,9 +274,8 @@ RUN pip install --target /asset -r requirements.txt
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         imports.add(alias.name.split(".")[0])
-                elif isinstance(node, ast.ImportFrom):
-                    if node.module:
-                        imports.add(node.module.split(".")[0])
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imports.add(node.module.split(".")[0])
         except SyntaxError:
             # Fallback to regex
             import_pattern = r"^\s*(?:import|from)\s+([a-zA-Z0-9_]+)"

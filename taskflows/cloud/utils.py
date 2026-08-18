@@ -1,11 +1,11 @@
 """Utility functions for cloud deployment."""
 
+import base64
 import io
-import json
 import re
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, List, Optional
 
 import cloudpickle
 
@@ -28,10 +28,9 @@ def schedule_to_eventbridge_expression(schedule: Schedule) -> str:
     """
     if isinstance(schedule, Calendar):
         return _calendar_to_cron(schedule)
-    elif isinstance(schedule, Periodic):
+    if isinstance(schedule, Periodic):
         return _periodic_to_rate(schedule)
-    else:
-        raise ValueError(f"Unknown schedule type: {type(schedule)}")
+    raise ValueError(f"Unknown schedule type: {type(schedule)}")
 
 
 def _calendar_to_cron(calendar: Calendar) -> str:
@@ -57,20 +56,26 @@ def _calendar_to_cron(calendar: Calendar) -> str:
 
     # Remove timezone if present (EventBridge cron is UTC-based)
     # In production, you'd want to convert the time to UTC based on the timezone
-    parts = schedule_str.split()
-
-    if len(parts) < 2:
+    match = re.fullmatch(
+        r"(?P<days>[A-Za-z]{3}(?:-[A-Za-z]{3})?(?:,[A-Za-z]{3})*)\s+"
+        r"(?P<hours>\d{1,2}):(?P<minutes>\d{2})(?::\d{2})?"
+        r"(?:\s+(?P<timezone>\S+))?",
+        schedule_str,
+    )
+    if match is None:
         raise ValueError(f"Invalid calendar schedule format: {schedule_str}")
 
-    day_of_week_str = parts[0]
-    time_str = parts[1]
-    timezone = parts[2] if len(parts) > 2 else None
-
-    # Parse time (HH:MM or HH:MM:SS)
-    time_parts = time_str.split(":")
-    hours = time_parts[0]
-    minutes = time_parts[1] if len(time_parts) > 1 else "0"
-    # EventBridge doesn't support seconds in cron, ignore if present
+    day_of_week_str = match.group("days")
+    hours = int(match.group("hours"))
+    minutes = int(match.group("minutes"))
+    timezone = match.group("timezone")
+    if hours > 23 or minutes > 59:
+        raise ValueError(f"Invalid calendar schedule time: {hours:02d}:{minutes:02d}")
+    valid_days = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
+    supplied_days = {day.upper() for day in re.split(r"[-,]", day_of_week_str)}
+    if not supplied_days <= valid_days:
+        invalid_days = ", ".join(sorted(supplied_days - valid_days))
+        raise ValueError(f"Invalid day of week in calendar schedule: {invalid_days}")
 
     # Convert day of week format
     # systemd: Mon-Fri, Mon,Wed,Fri
@@ -83,7 +88,7 @@ def _calendar_to_cron(calendar: Calendar) -> str:
 
     # Build cron expression
     # Format: cron(Minutes Hours Day-of-month Month Day-of-week Year)
-    cron_expr = f"cron({minutes} {hours} ? * {day_of_week} *)"
+    cron_expr = f"cron({minutes:02d} {hours:02d} ? * {day_of_week} *)"
 
     if timezone:
         logger.warning(
@@ -117,6 +122,11 @@ def _periodic_to_rate(periodic: Periodic) -> str:
         raise ValueError(
             f"EventBridge rate expressions require at least 1 minute, got {period_seconds}s"
         )
+    if period_seconds % 60:
+        raise ValueError(
+            "EventBridge rate expressions only support whole-minute intervals, "
+            f"got {period_seconds}s"
+        )
 
     if period_seconds % 86400 == 0:  # Days
         value = period_seconds // 86400
@@ -130,8 +140,8 @@ def _periodic_to_rate(periodic: Periodic) -> str:
 
     if periodic.relative_to == "start":
         logger.warning(
-            f"Periodic schedule with relative_to='start' cannot be exactly replicated in EventBridge. "
-            f"EventBridge will trigger at fixed intervals, not relative to task start time."
+            "Periodic schedule with relative_to='start' cannot be exactly replicated in EventBridge. "
+            "EventBridge will trigger at fixed intervals, not relative to task start time."
         )
 
     return f"rate({value} {unit})"
@@ -139,8 +149,8 @@ def _periodic_to_rate(periodic: Periodic) -> str:
 
 def create_lambda_deployment_package(
     function: Callable[[], None],
-    dependencies: Optional[List[str]] = None,
-    include_files: Optional[List[Path]] = None,
+    dependencies: list[str] | None = None,
+    include_files: list[Path] | None = None,
 ) -> bytes:
     """Create a Lambda deployment package (zip file) containing the function and dependencies.
 
@@ -168,7 +178,7 @@ import base64
 import cloudpickle
 
 # Pickled function (base64-encoded)
-PICKLED_FUNCTION = {base64.b64encode(pickled_func).decode('utf-8')!r}
+PICKLED_FUNCTION = {base64.b64encode(pickled_func).decode("utf-8")!r}
 
 def handler(event, context):
     """Lambda handler that deserializes and executes the pickled function."""
@@ -185,13 +195,29 @@ def handler(event, context):
         # Add handler to zip
         zip_file.writestr("index.py", handler_code)
 
-        # Add requirements.txt for dependencies
+        # Bundle requested dependencies at the archive root; Lambda does not
+        # install a requirements.txt file when a function is uploaded.
         if dependencies:
-            requirements = "\n".join(dependencies)
-            # Always include cloudpickle
-            if "cloudpickle" not in dependencies:
-                requirements += "\ncloudpickle"
-            zip_file.writestr("requirements.txt", requirements)
+            from .dependencies import DependencyManager
+
+            requirements = list(dependencies)
+            if not any(
+                re.match(r"^cloudpickle(?:\W|$)", item, re.IGNORECASE) for item in requirements
+            ):
+                requirements.append("cloudpickle")
+            dependency_package = DependencyManager().build_deployment_package(requirements)
+            with zipfile.ZipFile(io.BytesIO(dependency_package)) as dependency_zip:
+                for member in dependency_zip.infolist():
+                    if not member.is_dir():
+                        zip_file.writestr(member, dependency_zip.read(member.filename))
+        else:
+            # cloudpickle is always needed by index.py. Copy the installed,
+            # pure-Python package without invoking a package manager.
+            package_dir = Path(cloudpickle.__file__).parent
+            for package_file in package_dir.rglob("*"):
+                if package_file.is_file() and "__pycache__" not in package_file.parts:
+                    archive_path = Path(package_dir.name) / package_file.relative_to(package_dir)
+                    zip_file.write(package_file, archive_path.as_posix())
 
         # Add any additional files
         if include_files:
@@ -202,7 +228,7 @@ def handler(event, context):
     return zip_buffer.getvalue()
 
 
-def create_lambda_layer_package(dependencies: List[str]) -> bytes:
+def create_lambda_layer_package(dependencies: list[str]) -> bytes:
     """Create a Lambda layer containing Python dependencies.
 
     This is useful for sharing dependencies across multiple Lambda functions.
@@ -227,7 +253,7 @@ def create_lambda_layer_package(dependencies: List[str]) -> bytes:
     return zip_buffer.getvalue()
 
 
-def extract_dependencies_from_function(function: Callable) -> List[str]:
+def extract_dependencies_from_function(function: Callable) -> list[str]:
     """Attempt to extract import dependencies from a function's source code.
 
     Args:
@@ -293,14 +319,10 @@ def validate_lambda_constraints(
     """
     # Lambda limits (as of 2024)
     if timeout < 1 or timeout > 900:
-        raise ValueError(
-            f"Lambda timeout must be between 1 and 900 seconds, got {timeout}"
-        )
+        raise ValueError(f"Lambda timeout must be between 1 and 900 seconds, got {timeout}")
 
     if memory_mb < 128 or memory_mb > 10240:
-        raise ValueError(
-            f"Lambda memory must be between 128 and 10240 MB, got {memory_mb}"
-        )
+        raise ValueError(f"Lambda memory must be between 128 and 10240 MB, got {memory_mb}")
 
     # Memory must be in 1 MB increments (Lambda requirement)
     if memory_mb % 1 != 0:

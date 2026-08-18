@@ -4,7 +4,7 @@ This example demonstrates how to use the AWS Lambda cloud deployment module
 to deploy scheduled tasks to AWS Lambda with EventBridge triggers.
 
 Prerequisites:
-    1. Install boto3: pip install boto3
+    1. Install boto3: pip install "taskflows[aws]"
     2. Configure AWS credentials (aws configure or environment variables)
     3. Create an IAM role for Lambda execution with trust policy:
        {
@@ -106,7 +106,7 @@ def main():
     )
 
     if result.success:
-        print(f"✓ Deployed successfully!")
+        print("✓ Deployed successfully!")
         print(f"  Function ARN: {result.resource_id}")
         print(f"  Package size: {result.metadata['package_size_mb']} MB")
         print(f"  Schedules: {len(result.metadata['schedule_rules'])} rule(s)")
@@ -143,7 +143,7 @@ def main():
     )
 
     if result.success:
-        print(f"✓ Deployed successfully!")
+        print("✓ Deployed successfully!")
         print(f"  Function ARN: {result.resource_id}")
     else:
         print(f"✗ Deployment failed: {result.error}")
@@ -174,7 +174,7 @@ def main():
     )
 
     if result.success:
-        print(f"✓ Deployed successfully!")
+        print("✓ Deployed successfully!")
         print(f"  Function ARN: {result.resource_id}")
         print(f"  Schedules: {len(result.metadata['schedule_rules'])} rule(s)")
     else:
@@ -237,7 +237,7 @@ def main():
     )
 
     if update_result.success:
-        print(f"✓ Code updated successfully!")
+        print("✓ Code updated successfully!")
     else:
         print(f"✗ Update failed: {update_result.error}")
 
@@ -262,7 +262,7 @@ def main():
     )
 
     if config_update_result.success:
-        print(f"✓ Configuration updated successfully!")
+        print("✓ Configuration updated successfully!")
     else:
         print(f"✗ Update failed: {config_update_result.error}")
 
@@ -288,8 +288,8 @@ def advanced_example_with_service_integration():
     This demonstrates how you could extend the Service class to support
     cloud deployment alongside the existing systemd deployment.
     """
-    from taskflows.service import Service
     from taskflows.schedule import Calendar
+    from taskflows.service import Service
 
     # Define a service using existing taskflows API
     service = Service(
@@ -310,13 +310,16 @@ def advanced_example_with_service_integration():
     # else:
     #     service.create()  # Deploy to systemd as usual
 
-    print("Advanced integration example (conceptual)")
+    print(f"Advanced integration example for {service.name} (conceptual)")
 
 
 if __name__ == "__main__":
     # Check for boto3 before running examples
     try:
-        import boto3
+        import importlib.util
+
+        if importlib.util.find_spec("boto3") is None:
+            raise ImportError("boto3")
 
         main()
 
@@ -325,7 +328,7 @@ if __name__ == "__main__":
 
     except ImportError:
         print("Error: boto3 is not installed.")
-        print("Install it with: pip install boto3")
+        print("Install it with: pip install 'taskflows[aws]'")
         print("\nAlso ensure you have AWS credentials configured:")
         print("  - Run 'aws configure' to set up credentials")
         print("  - Or set environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")

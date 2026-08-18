@@ -1,6 +1,8 @@
 # Taskflows Cloud Deployment Module
 
-This module provides cloud deployment capabilities for taskflows, allowing you to deploy scheduled tasks to cloud platforms like AWS Lambda, GCP Cloud Functions, and Azure Functions.
+This beta module provides AWS Lambda deployment for taskflows. Its abstraction
+keeps room for future GCP, Azure, and Kubernetes implementations, but those
+providers are not implemented yet.
 
 ## Features
 
@@ -12,7 +14,7 @@ This module provides cloud deployment capabilities for taskflows, allowing you t
 
 ## Currently Supported Providers
 
-### AWS Lambda (Fully Implemented)
+### AWS Lambda (Beta)
 
 - Function deployment with automatic dependency packaging
 - EventBridge scheduling for Calendar and Periodic schedules
@@ -24,7 +26,7 @@ This module provides cloud deployment capabilities for taskflows, allowing you t
 
 ```bash
 # For AWS Lambda support
-pip install boto3
+pip install "taskflows[aws]"
 
 # For GCP Cloud Functions (future)
 # pip install google-cloud-functions
@@ -41,15 +43,16 @@ pip install boto3
 from taskflows.cloud import AWSLambdaEnvironment, CloudFunctionConfig
 from taskflows.schedule import Calendar, Periodic
 
+
 # Define your task
 def daily_backup():
     print("Running daily backup...")
     # Your backup logic here
 
+
 # Configure AWS Lambda environment
 lambda_env = AWSLambdaEnvironment(
-    region="us-east-1",
-    execution_role_arn="arn:aws:iam::123456789012:role/lambda-role"
+    region="us-east-1", execution_role_arn="arn:aws:iam::123456789012:role/lambda-role"
 )
 
 # Configure the function deployment
@@ -61,17 +64,12 @@ config = CloudFunctionConfig(
     schedules=[
         Calendar(schedule="Mon-Fri 02:00")  # Every weekday at 2 AM UTC
     ],
-    environment_variables={
-        "BACKUP_BUCKET": "my-backup-bucket",
-        "ENVIRONMENT": "production"
-    }
+    environment_variables={"BACKUP_BUCKET": "my-backup-bucket", "ENVIRONMENT": "production"},
 )
 
 # Deploy to AWS Lambda
 result = lambda_env.deploy_function(
-    function=daily_backup,
-    config=config,
-    dependencies=["boto3", "requests"]
+    function=daily_backup, config=config, dependencies=["boto3", "requests"]
 )
 
 if result.success:
@@ -85,8 +83,7 @@ else:
 ```python
 # Manually trigger the function
 response = lambda_env.invoke_function(
-    function_name="my-daily-backup",
-    payload={"manual_trigger": True}
+    function_name="my-daily-backup", payload={"manual_trigger": True}
 )
 
 print(response)
@@ -95,10 +92,7 @@ print(response)
 ### 3. Retrieve Logs
 
 ```python
-logs = lambda_env.get_function_logs(
-    function_name="my-daily-backup",
-    limit=50
-)
+logs = lambda_env.get_function_logs(function_name="my-daily-backup", limit=50)
 
 for log_line in logs:
     print(log_line)
@@ -111,10 +105,8 @@ def daily_backup_v2():
     print("Running daily backup v2 with improvements!")
     # Updated logic
 
-lambda_env.update_function_code(
-    function_name="my-daily-backup",
-    function=daily_backup_v2
-)
+
+lambda_env.update_function_code(function_name="my-daily-backup", function=daily_backup_v2)
 ```
 
 ### 5. Delete Function
@@ -218,8 +210,8 @@ aws_config = AWSLambdaConfig(
     region="us-east-1",
     execution_role_arn="arn:aws:iam::123456789012:role/lambda-role",
     deployment_bucket="my-deployment-bucket",  # For large packages
-    kms_key_arn="arn:aws:kms:...",            # Encryption
-    vpc_config={...}                           # Default VPC config
+    kms_key_arn="arn:aws:kms:...",  # Encryption
+    vpc_config={...},  # Default VPC config
 )
 
 lambda_env = AWSLambdaEnvironment(aws_config=aws_config)
@@ -288,7 +280,7 @@ from taskflows.cloud import AWSLambdaEnvironment, CloudFunctionConfig
 service = Service(
     name="my-service",
     start_command=lambda: print("Running task"),
-    start_schedule=Calendar(schedule="Mon-Fri 09:00")
+    start_schedule=Calendar(schedule="Mon-Fri 09:00"),
 )
 
 # Option 1: Deploy to systemd (existing behavior)
@@ -296,10 +288,7 @@ service.create()
 
 # Option 2: Deploy to AWS Lambda (new capability)
 lambda_env = AWSLambdaEnvironment(...)
-config = CloudFunctionConfig(
-    function_name=service.name,
-    schedules=[service.start_schedule]
-)
+config = CloudFunctionConfig(function_name=service.name, schedules=[service.start_schedule])
 lambda_env.deploy_function(service.start_command, config)
 ```
 
@@ -320,7 +309,7 @@ See `examples/aws_lambda_deployment_example.py` for comprehensive examples inclu
 ### "boto3 is required"
 
 ```bash
-pip install boto3
+pip install "taskflows[aws]"
 ```
 
 ### "execution_role_arn must be provided"

@@ -1,6 +1,6 @@
 [project]
 name = "taskflows"
-version = "0.19.2"
+version = "0.20.0"
 description = "Tasks and systemd services with scheduling, resource constraints, alerts, and observability"
 authors = [
     {name = "Dan Kelleher",email = "kelleherjdan@gmail.com"}
@@ -64,8 +64,18 @@ server = [
 grafana = [
     "grafanalib>=0.7.1,<0.8.0",
 ]
+aws = [
+    "boto3>=1.34.0,<2.0.0",
+]
+pulumi = [
+    "pulumi>=3.100.0,<4.0.0",
+    "pulumi-aws>=6.20.0,<8.0.0",
+]
+cloud = [
+    "taskflows[aws,pulumi]",
+]
 all = [
-    "taskflows[server,grafana]",
+    "taskflows[server,grafana,cloud]",
 ]
 
 [project.scripts]

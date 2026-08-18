@@ -1,10 +1,10 @@
 """Production AWS Lambda Deployment Examples.
 
-This example demonstrates production-ready deployment of taskflows services
+This example demonstrates production-oriented deployment of taskflows services
 to AWS Lambda using both Pulumi (recommended) and boto3 backends.
 
 Prerequisites:
-    pip install boto3 pulumi pulumi-aws
+    pip install "taskflows[cloud]"
     aws configure
     # Create IAM role (see QUICK_START.md)
 """
@@ -21,10 +21,10 @@ from taskflows.cloud.manager import DeploymentManager, deploy_service_to_cloud
 from taskflows.schedule import Calendar, Periodic
 from taskflows.service import Service
 
-
 # ============================================================================
 # Example 1: Production Deployment with Full Monitoring
 # ============================================================================
+
 
 def example_production_deployment():
     """Deploy a function with full production features."""
@@ -105,7 +105,7 @@ def example_production_deployment():
     )
 
     if result.success:
-        print(f"✓ Deployed successfully!")
+        print("✓ Deployed successfully!")
         print(f"  ARN: {result.resource_id}")
         print(f"  Version: {result.version}")
         print(f"  Metadata: {result.metadata}")
@@ -116,6 +116,7 @@ def example_production_deployment():
 # ============================================================================
 # Example 2: Using Lambda Layers for Shared Dependencies
 # ============================================================================
+
 
 def example_with_layers():
     """Deploy function using Lambda Layers for dependencies."""
@@ -132,7 +133,6 @@ def example_with_layers():
     def data_processor():
         """Process data using pandas and requests."""
         import pandas as pd
-        import requests
 
         # Your processing logic
         print("Processing data with pandas...")
@@ -168,6 +168,7 @@ def example_with_layers():
 # ============================================================================
 # Example 3: Deploying Existing taskflows Service
 # ============================================================================
+
 
 def example_deploy_existing_service():
     """Deploy an existing taskflows Service to the cloud."""
@@ -216,6 +217,7 @@ def example_deploy_existing_service():
 # ============================================================================
 # Example 4: Multi-Function Deployment
 # ============================================================================
+
 
 def example_multi_function_deployment():
     """Deploy multiple related functions together."""
@@ -273,6 +275,7 @@ def example_multi_function_deployment():
 # Example 5: Development vs Production Environments
 # ============================================================================
 
+
 def example_multi_environment_deployment():
     """Deploy to multiple environments (dev, staging, prod)."""
     print("\n" + "=" * 70)
@@ -281,6 +284,7 @@ def example_multi_environment_deployment():
 
     def my_task():
         import os
+
         env = os.environ.get("ENVIRONMENT", "unknown")
         print(f"Running in {env} environment")
 
@@ -325,6 +329,7 @@ def example_multi_environment_deployment():
 # ============================================================================
 # Example 6: Runtime Operations (Invoke, Logs, Metrics)
 # ============================================================================
+
 
 def example_runtime_operations():
     """Perform runtime operations on deployed functions."""
@@ -374,6 +379,7 @@ def example_runtime_operations():
 # Example 7: Rollback and Version Management
 # ============================================================================
 
+
 def example_rollback():
     """Demonstrate rollback capabilities."""
     print("\n" + "=" * 70)
@@ -407,6 +413,7 @@ def example_rollback():
 # Main Example Runner
 # ============================================================================
 
+
 def main():
     """Run all examples."""
     print("\n" + "=" * 70)
@@ -431,6 +438,7 @@ def main():
         except Exception as e:
             print(f"✗ Error in {name}: {e}")
             import traceback
+
             traceback.print_exc()
 
     print("\n" + "=" * 70)
@@ -441,12 +449,16 @@ def main():
 if __name__ == "__main__":
     # Check dependencies
     try:
-        import boto3
-        import pulumi
+        import importlib.util
+
+        if importlib.util.find_spec("boto3") is None:
+            raise ImportError("boto3")
+        if importlib.util.find_spec("pulumi") is None:
+            raise ImportError("pulumi")
 
         main()
 
     except ImportError as e:
         print(f"Missing dependency: {e}")
         print("\nInstall required packages:")
-        print("  pip install boto3 pulumi pulumi-aws")
+        print("  pip install 'taskflows[cloud]'")

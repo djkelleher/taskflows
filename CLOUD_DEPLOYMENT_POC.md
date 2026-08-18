@@ -131,16 +131,17 @@ Comprehensive test suite (21 tests, all passing) covering:
 from taskflows.cloud import AWSLambdaEnvironment, CloudFunctionConfig
 from taskflows.schedule import Calendar, Periodic
 
+
 # Define your task
 def daily_report():
     print("Generating daily report...")
     # Your logic here
     return {"status": "success"}
 
+
 # Initialize AWS Lambda environment
 lambda_env = AWSLambdaEnvironment(
-    region="us-east-1",
-    execution_role_arn="arn:aws:iam::123456789012:role/lambda-execution-role"
+    region="us-east-1", execution_role_arn="arn:aws:iam::123456789012:role/lambda-execution-role"
 )
 
 # Configure deployment
@@ -152,17 +153,15 @@ config = CloudFunctionConfig(
     schedules=[
         Calendar(schedule="Mon-Fri 09:00")  # Weekdays at 9 AM UTC
     ],
-    environment_variables={
-        "ENVIRONMENT": "production"
-    },
-    tags={"Project": "TaskFlows"}
+    environment_variables={"ENVIRONMENT": "production"},
+    tags={"Project": "TaskFlows"},
 )
 
 # Deploy to AWS Lambda
 result = lambda_env.deploy_function(
     function=daily_report,
     config=config,
-    dependencies=["boto3", "requests"]  # Optional dependencies
+    dependencies=["boto3", "requests"],  # Optional dependencies
 )
 
 if result.success:
@@ -181,10 +180,12 @@ logs = lambda_env.get_function_logs("my-daily-report", limit=50)
 for log in logs:
     print(log)
 
+
 # Update code
 def daily_report_v2():
     print("Generating enhanced daily report...")
     return {"status": "success", "version": "2.0"}
+
 
 lambda_env.update_function_code("my-daily-report", daily_report_v2)
 ```
@@ -256,7 +257,7 @@ if deploy_to_cloud:
 
 ### 1. Install boto3
 ```bash
-pip install boto3
+pip install "taskflows[aws]"
 ```
 
 ### 2. Configure AWS Credentials
@@ -384,10 +385,12 @@ To add support for a new cloud provider:
    ```python
    from .base import CloudEnvironment, CloudDeploymentResult
 
+
    class GCPCloudFunctionsEnvironment(CloudEnvironment):
        def deploy_function(self, function, config, dependencies=None):
            # Implementation for GCP
            pass
+
        # ... implement other abstract methods
    ```
 
@@ -416,7 +419,7 @@ This proof-of-concept demonstrates that **taskflows is excellently positioned fo
 
 ✅ **Extensible Design**: Abstract base classes make adding new providers straightforward
 
-✅ **Production Ready**: Complete AWS Lambda implementation with error handling, logging, and configuration validation
+✅ **AWS Beta**: Lambda implementation with error handling, logging, and configuration validation
 
 ✅ **Tested**: Comprehensive test suite validates schedule translation logic
 
@@ -429,7 +432,7 @@ The module can now be extended to support GCP Cloud Functions, Azure Functions, 
 For questions or to report issues with the cloud deployment module:
 1. Check the [cloud/README.md](taskflows/cloud/README.md) for detailed documentation
 2. Review examples in `examples/aws_lambda_deployment_example.py`
-3. Run tests to verify your environment: `pytest tests/test_cloud_schedule_translation.py`
+3. Run tests to verify your environment: `pytest tests/test_cloud.py tests/test_cloud_schedule_translation.py`
 
 ---
 

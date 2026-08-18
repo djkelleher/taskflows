@@ -4,8 +4,8 @@ This module provides a high-level interface for deploying taskflows services
 to cloud platforms, with support for multiple backends (Pulumi, boto3, etc.).
 """
 
-from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 from ..schedule import Schedule
 from ..service import Service
@@ -16,7 +16,6 @@ from .base import (
     DeploymentBackend,
     MonitoringConfig,
 )
-from ..common import logger
 
 
 class DeploymentManager:
@@ -46,8 +45,8 @@ class DeploymentManager:
 
     def __init__(
         self,
-        provider: Union[CloudProvider, str] = CloudProvider.AWS,
-        backend: Union[DeploymentBackend, str] = DeploymentBackend.PULUMI,
+        provider: CloudProvider | str = CloudProvider.AWS,
+        backend: DeploymentBackend | str = DeploymentBackend.PULUMI,
         region: str = "us-east-1",
         project_name: str = "taskflows",
         environment: str = "production",
@@ -107,11 +106,11 @@ class DeploymentManager:
         self,
         name: str,
         function: Callable[[], None],
-        schedule: Optional[Union[str, Schedule, List[Schedule]]] = None,
+        schedule: str | Schedule | list[Schedule] | None = None,
         memory_mb: int = 256,
         timeout_seconds: int = 60,
-        environment_variables: Optional[Dict[str, str]] = None,
-        dependencies: Optional[List[str]] = None,
+        environment_variables: dict[str, str] | None = None,
+        dependencies: list[str] | None = None,
         enable_monitoring: bool = True,
         **config_kwargs,
     ) -> CloudDeploymentResult:
@@ -142,9 +141,9 @@ class DeploymentManager:
             environment_variables=environment_variables,
             schedules=schedules,
             deployment_environment=self.environment,
-            monitoring=MonitoringConfig(
-                enable_cloudwatch_alarms=enable_monitoring
-            ) if enable_monitoring else None,
+            monitoring=MonitoringConfig(enable_cloudwatch_alarms=enable_monitoring)
+            if enable_monitoring
+            else None,
             tags={
                 "Project": self.project_name,
                 "Environment": self.environment,
@@ -158,7 +157,7 @@ class DeploymentManager:
     def deploy_service(
         self,
         service: Service,
-        dependencies: Optional[List[str]] = None,
+        dependencies: list[str] | None = None,
         **config_overrides,
     ) -> CloudDeploymentResult:
         """Deploy a taskflows Service to the cloud.
@@ -174,7 +173,7 @@ class DeploymentManager:
         # Extract configuration from Service
         schedules = []
         if service.start_schedule:
-            if isinstance(service.start_schedule, list):
+            if isinstance(service.start_schedule, Sequence):
                 schedules.extend(service.start_schedule)
             else:
                 schedules.append(service.start_schedule)
@@ -202,6 +201,7 @@ class DeploymentManager:
             # If start_command is a string, wrap it
             def command_wrapper():
                 import subprocess
+
                 subprocess.run(service.start_command, shell=True, check=True)
 
             function = command_wrapper
@@ -210,9 +210,9 @@ class DeploymentManager:
 
     def deploy_multiple(
         self,
-        functions: List[Dict],
+        functions: list[dict],
         parallel: bool = False,
-    ) -> List[CloudDeploymentResult]:
+    ) -> list[CloudDeploymentResult]:
         """Deploy multiple functions.
 
         Args:
@@ -222,22 +222,24 @@ class DeploymentManager:
         Returns:
             List of CloudDeploymentResults
         """
-        results = []
 
-        for func_config in functions:
+        def deploy(item: dict) -> CloudDeploymentResult:
+            func_config = dict(item)
             name = func_config.pop("name")
             function = func_config.pop("function")
-            result = self.deploy_function(name=name, function=function, **func_config)
-            results.append(result)
+            return self.deploy_function(name=name, function=function, **func_config)
 
-        return results
+        if parallel:
+            with ThreadPoolExecutor() as executor:
+                return list(executor.map(deploy, functions))
+        return [deploy(item) for item in functions]
 
     def invoke(
         self,
         function_name: str,
-        payload: Optional[Dict] = None,
+        payload: dict | None = None,
         async_invoke: bool = False,
-    ) -> Dict:
+    ) -> dict:
         """Invoke a deployed function.
 
         Args:
@@ -255,9 +257,9 @@ class DeploymentManager:
         self,
         function_name: str,
         limit: int = 100,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-    ) -> List[str]:
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> list[str]:
         """Get function logs.
 
         Args:
@@ -269,9 +271,7 @@ class DeploymentManager:
         Returns:
             List of log lines
         """
-        return self._environment.get_function_logs(
-            function_name, limit, start_time, end_time
-        )
+        return self._environment.get_function_logs(function_name, limit, start_time, end_time)
 
     def delete(self, function_name: str) -> bool:
         """Delete a deployed function.
@@ -284,7 +284,7 @@ class DeploymentManager:
         """
         return self._environment.delete_function(function_name)
 
-    def list_functions(self) -> List[Dict]:
+    def list_functions(self) -> list[dict]:
         """List all deployed functions.
 
         Returns:
@@ -295,7 +295,7 @@ class DeploymentManager:
     def rollback(
         self,
         function_name: str,
-        version: Optional[str] = None,
+        version: str | None = None,
     ) -> CloudDeploymentResult:
         """Rollback a function to a previous version.
 
@@ -311,9 +311,9 @@ class DeploymentManager:
     def get_metrics(
         self,
         function_name: str,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-    ) -> Dict:
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> dict:
         """Get function metrics.
 
         Args:
@@ -326,9 +326,7 @@ class DeploymentManager:
         """
         return self._environment.get_function_metrics(function_name, start_time, end_time)
 
-    def _parse_schedule(
-        self, schedule: Union[str, Schedule, List[Schedule]]
-    ) -> List[Schedule]:
+    def _parse_schedule(self, schedule: str | Schedule | list[Schedule]) -> list[Schedule]:
         """Parse schedule from various formats.
 
         Args:
@@ -352,8 +350,8 @@ class DeploymentManager:
 
 def deploy_service_to_cloud(
     service: Service,
-    provider: Union[CloudProvider, str] = CloudProvider.AWS,
-    backend: Union[DeploymentBackend, str] = DeploymentBackend.PULUMI,
+    provider: CloudProvider | str = CloudProvider.AWS,
+    backend: DeploymentBackend | str = DeploymentBackend.PULUMI,
     region: str = "us-east-1",
     environment: str = "production",
     **config_overrides,

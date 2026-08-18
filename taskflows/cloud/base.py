@@ -1,23 +1,26 @@
 """Base abstractions for cloud deployment."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any
 
-from ..schedule import Calendar, Periodic, Schedule
+from ..schedule import Schedule
 
 
 class DeploymentBackend(Enum):
     """Deployment backend type."""
+
     PULUMI = "pulumi"  # Infrastructure as Code via Pulumi
-    BOTO3 = "boto3"    # Direct AWS SDK calls
+    BOTO3 = "boto3"  # Direct AWS SDK calls
     TERRAFORM = "terraform"  # Future support
 
 
 class CloudProvider(Enum):
     """Supported cloud providers."""
+
     AWS = "aws"
     GCP = "gcp"
     AZURE = "azure"
@@ -30,30 +33,32 @@ class CloudDeploymentResult:
 
     success: bool
     resource_id: str  # ARN, function name, or other cloud resource identifier
-    endpoint: Optional[str] = None  # URL or invocation endpoint if applicable
-    metadata: Optional[Dict[str, Any]] = None  # Additional deployment metadata
-    error: Optional[str] = None  # Error message if deployment failed
-    warnings: List[str] = field(default_factory=list)  # Non-fatal warnings
-    version: Optional[str] = None  # Deployed version/revision
-    rollback_id: Optional[str] = None  # ID for rollback if needed
+    endpoint: str | None = None  # URL or invocation endpoint if applicable
+    metadata: dict[str, Any] | None = None  # Additional deployment metadata
+    error: str | None = None  # Error message if deployment failed
+    warnings: list[str] = field(default_factory=list)  # Non-fatal warnings
+    version: str | None = None  # Deployed version/revision
+    rollback_id: str | None = None  # ID for rollback if needed
 
 
 @dataclass
 class LayerConfig:
     """Configuration for Lambda Layers or equivalent."""
-    layer_arn: Optional[str] = None  # Existing layer ARN
-    layer_name: Optional[str] = None  # Create new layer with this name
-    dependencies: Optional[List[str]] = None  # pip packages for new layer
-    compatible_runtimes: List[str] = field(default_factory=lambda: ["python3.11"])
+
+    layer_arn: str | None = None  # Existing layer ARN
+    layer_name: str | None = None  # Create new layer with this name
+    dependencies: list[str] | None = None  # pip packages for new layer
+    compatible_runtimes: list[str] = field(default_factory=lambda: ["python3.11"])
 
 
 @dataclass
 class MonitoringConfig:
     """Monitoring and alerting configuration."""
+
     enable_cloudwatch_alarms: bool = False
     error_rate_threshold: float = 0.05  # 5% error rate triggers alarm
-    duration_threshold_ms: Optional[int] = None  # Alert if function takes longer
-    alarm_sns_topic_arn: Optional[str] = None  # SNS topic for alerts
+    duration_threshold_ms: int | None = None  # Alert if function takes longer
+    alarm_sns_topic_arn: str | None = None  # SNS topic for alerts
     enable_detailed_metrics: bool = False
     metric_namespace: str = "TaskFlows"
 
@@ -61,13 +66,15 @@ class MonitoringConfig:
 @dataclass
 class DeadLetterConfig:
     """Dead Letter Queue configuration for failed invocations."""
-    target_arn: Optional[str] = None  # SQS or SNS ARN
+
+    target_arn: str | None = None  # SQS or SNS ARN
     auto_create: bool = False  # Auto-create DLQ if not provided
 
 
 @dataclass
 class RetryConfig:
     """Retry configuration for async invocations."""
+
     max_retry_attempts: int = 2  # 0-2 for Lambda
     max_event_age_seconds: int = 3600  # 60-21600 seconds
 
@@ -82,7 +89,7 @@ class CloudFunctionConfig:
 
     # Function identification
     function_name: str
-    description: Optional[str] = None
+    description: str | None = None
 
     # Runtime configuration
     runtime: str = "python3.11"
@@ -92,52 +99,52 @@ class CloudFunctionConfig:
     ephemeral_storage_mb: int = 512  # /tmp storage (AWS: 512-10240)
 
     # Environment and variables
-    environment_variables: Optional[Dict[str, str]] = None
-    secrets: Optional[Dict[str, str]] = None  # Secret name -> env var name mapping
+    environment_variables: dict[str, str] | None = None
+    secrets: dict[str, str] | None = None  # Secret name -> env var name mapping
 
     # Scheduling
-    schedules: Optional[List[Schedule]] = None
+    schedules: list[Schedule] | None = None
 
     # IAM and permissions
-    execution_role_arn: Optional[str] = None
-    role_name: Optional[str] = None
+    execution_role_arn: str | None = None
+    role_name: str | None = None
     auto_create_role: bool = True  # Auto-create execution role if not provided
-    additional_iam_policies: Optional[List[str]] = None  # Policy ARNs to attach
+    additional_iam_policies: list[str] | None = None  # Policy ARNs to attach
 
     # Networking
-    vpc_config: Optional[Dict[str, Any]] = None
-    security_group_ids: Optional[List[str]] = None
-    subnet_ids: Optional[List[str]] = None
+    vpc_config: dict[str, Any] | None = None
+    security_group_ids: list[str] | None = None
+    subnet_ids: list[str] | None = None
 
     # Logging and monitoring
     log_retention_days: int = 7
     enable_xray_tracing: bool = False
-    monitoring: Optional[MonitoringConfig] = None
+    monitoring: MonitoringConfig | None = None
 
     # Concurrency
-    reserved_concurrent_executions: Optional[int] = None
-    provisioned_concurrency: Optional[int] = None  # Keep N instances warm
+    reserved_concurrent_executions: int | None = None
+    provisioned_concurrency: int | None = None  # Keep N instances warm
 
     # Layers and dependencies
-    layers: Optional[List[LayerConfig]] = None
+    layers: list[LayerConfig] | None = None
     use_s3_for_large_packages: bool = True  # Auto-upload to S3 if >50MB
 
     # Error handling
-    dead_letter_config: Optional[DeadLetterConfig] = None
-    retry_config: Optional[RetryConfig] = None
+    dead_letter_config: DeadLetterConfig | None = None
+    retry_config: RetryConfig | None = None
 
     # Deployment configuration
     deployment_environment: str = "production"  # dev, staging, production
     enable_versioning: bool = True  # Create version on each deployment
-    create_alias: Optional[str] = None  # Create alias (e.g., "live", "latest")
+    create_alias: str | None = None  # Create alias (e.g., "live", "latest")
 
     # Tags
-    tags: Optional[Dict[str, str]] = None
+    tags: dict[str, str] | None = None
 
     # Advanced
     architecture: str = "x86_64"  # x86_64 or arm64
-    code_signing_config_arn: Optional[str] = None
-    file_system_configs: Optional[List[Dict[str, str]]] = None  # EFS mounts
+    code_signing_config_arn: str | None = None
+    file_system_configs: list[dict[str, str]] | None = None  # EFS mounts
 
 
 class CloudEnvironment(ABC):
@@ -152,7 +159,7 @@ class CloudEnvironment(ABC):
         self,
         function: Callable[[], None],
         config: CloudFunctionConfig,
-        dependencies: Optional[List[str]] = None,
+        dependencies: list[str] | None = None,
     ) -> CloudDeploymentResult:
         """Deploy a Python function to the cloud platform.
 
@@ -170,9 +177,9 @@ class CloudEnvironment(ABC):
     def invoke_function(
         self,
         function_name: str,
-        payload: Optional[Dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
         invocation_type: str = "RequestResponse",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Invoke a deployed cloud function.
 
         Args:
@@ -202,9 +209,9 @@ class CloudEnvironment(ABC):
         self,
         function_name: str,
         limit: int = 100,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-    ) -> List[str]:
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> list[str]:
         """Retrieve logs for a deployed function.
 
         Args:
@@ -219,7 +226,7 @@ class CloudEnvironment(ABC):
         pass
 
     @abstractmethod
-    def list_functions(self) -> List[Dict[str, Any]]:
+    def list_functions(self) -> list[dict[str, Any]]:
         """List all deployed functions.
 
         Returns:
@@ -232,7 +239,7 @@ class CloudEnvironment(ABC):
         self,
         function_name: str,
         function: Callable[[], None],
-        dependencies: Optional[List[str]] = None,
+        dependencies: list[str] | None = None,
     ) -> CloudDeploymentResult:
         """Update the code of an existing function.
 
@@ -266,8 +273,8 @@ class CloudEnvironment(ABC):
     def rollback_function(
         self,
         function_name: str,
-        version: Optional[str] = None,
-        rollback_id: Optional[str] = None,
+        version: str | None = None,
+        rollback_id: str | None = None,
     ) -> CloudDeploymentResult:
         """Rollback function to a previous version.
 
@@ -284,9 +291,9 @@ class CloudEnvironment(ABC):
     def get_function_metrics(
         self,
         function_name: str,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> dict[str, Any]:
         """Get metrics for a deployed function.
 
         Args:
@@ -302,7 +309,7 @@ class CloudEnvironment(ABC):
     def create_layer(
         self,
         layer_config: LayerConfig,
-        requirements_file: Optional[Path] = None,
+        requirements_file: Path | None = None,
     ) -> str:
         """Create a reusable layer with dependencies.
 
@@ -315,7 +322,7 @@ class CloudEnvironment(ABC):
         """
         raise NotImplementedError("Layers not implemented for this provider")
 
-    def list_versions(self, function_name: str) -> List[Dict[str, Any]]:
+    def list_versions(self, function_name: str) -> list[dict[str, Any]]:
         """List all versions of a function.
 
         Args:

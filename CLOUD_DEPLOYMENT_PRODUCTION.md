@@ -1,11 +1,11 @@
 ```markdown
 # TaskFlows Production Cloud Deployment - Complete Implementation
 
-Full production-ready implementation for deploying taskflows services to AWS Lambda with Pulumi support and multi-cloud extensibility.
+Beta, production-oriented implementation for deploying taskflows services to AWS Lambda with Pulumi support.
 
 ## Overview
 
-This is a **complete production implementation** replacing the proof-of-concept. Key features:
+This is a **beta AWS implementation** that expands the proof-of-concept. Key features:
 
 ✅ **Multiple Deployment Backends**
 - Pulumi (Infrastructure as Code, recommended for production)
@@ -69,7 +69,7 @@ This is a **complete production implementation** replacing the proof-of-concept.
 
 | File | Purpose |
 |------|---------|
-| `requirements-cloud.txt` | Production dependencies |
+| `pyproject.toml` cloud extra | Production dependencies |
 
 ## Key Components
 
@@ -127,7 +127,7 @@ from taskflows.cloud import PulumiAWSEnvironment
 env = PulumiAWSEnvironment(
     project_name="my-app",
     stack_name="production",  # or "dev", "staging"
-    region="us-east-1"
+    region="us-east-1",
 )
 
 result = env.deploy_function(my_function, config)
@@ -161,7 +161,7 @@ manager = DeploymentManager(
     provider="aws",
     backend="pulumi",  # or "boto3"
     region="us-east-1",
-    environment="production"
+    environment="production",
 )
 
 # Simple deployment
@@ -169,7 +169,7 @@ result = manager.deploy_function(
     name="my-task",
     function=lambda: print("Hello"),
     schedule="Mon-Fri 09:00",
-    enable_monitoring=True
+    enable_monitoring=True,
 )
 
 # Deploy existing Service
@@ -200,13 +200,12 @@ dep_mgr = DependencyManager()
 # Build using Docker (matches Lambda environment exactly)
 package = dep_mgr.build_deployment_package(
     requirements=["pandas", "numpy"],
-    use_docker=True  # Uses public.ecr.aws/lambda/python:3.11
+    use_docker=True,  # Uses public.ecr.aws/lambda/python:3.11
 )
 
 # Create Lambda Layer
 layer_package = dep_mgr.create_layer_package(
-    requirements=["requests", "boto3"],
-    runtime="python3.11"
+    requirements=["requests", "boto3"], runtime="python3.11"
 )
 ```
 
@@ -231,15 +230,12 @@ service = Service(
     start_command=process_data,
     start_schedule=Calendar(schedule="Mon-Fri 14:00"),
     timeout=120,
-    env={"BUCKET": "my-data"}
+    env={"BUCKET": "my-data"},
 )
 
 # Deploy to cloud with one call
 result = deploy_service_to_cloud(
-    service,
-    provider="aws",
-    backend="pulumi",
-    environment="production"
+    service, provider="aws", backend="pulumi", environment="production"
 )
 ```
 
@@ -254,8 +250,8 @@ config = CloudFunctionConfig(
         enable_cloudwatch_alarms=True,
         error_rate_threshold=0.05,  # 5% error rate triggers alarm
         duration_threshold_ms=10000,  # >10s triggers alarm
-        alarm_sns_topic_arn="arn:aws:sns:us-east-1:123456789012:alerts"
-    )
+        alarm_sns_topic_arn="arn:aws:sns:us-east-1:123456789012:alerts",
+    ),
 )
 ```
 
@@ -271,7 +267,7 @@ config = CloudFunctionConfig(
     function_name="important-task",
     dead_letter_config=DeadLetterConfig(
         auto_create=True,  # Pulumi creates SQS queue
-    )
+    ),
 )
 ```
 
@@ -284,14 +280,11 @@ config = CloudFunctionConfig(
 layer = LayerConfig(
     layer_name="data-processing-deps",
     dependencies=["pandas", "numpy", "scipy"],
-    compatible_runtimes=["python3.11"]
+    compatible_runtimes=["python3.11"],
 )
 
 # Multiple functions can use the same layer
-config = CloudFunctionConfig(
-    function_name="processor-1",
-    layers=[layer]
-)
+config = CloudFunctionConfig(function_name="processor-1", layers=[layer])
 ```
 
 **Benefits:**
@@ -325,9 +318,7 @@ manager.rollback("api-handler", version="5")
 config = CloudFunctionConfig(
     function_name="my-task",
     auto_create_role=True,  # Pulumi creates execution role
-    additional_iam_policies=[
-        "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
-    ]
+    additional_iam_policies=["arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"],
 )
 ```
 
@@ -342,7 +333,7 @@ config = CloudFunctionConfig(
 ```python
 config = CloudFunctionConfig(
     function_name="heavy-deps",
-    use_s3_for_large_packages=True  # Auto-uploads to S3 if >50MB
+    use_s3_for_large_packages=True,  # Auto-uploads to S3 if >50MB
 )
 ```
 
@@ -360,15 +351,14 @@ from taskflows.cloud.manager import DeploymentManager
 from taskflows.cloud import MonitoringConfig, DeadLetterConfig
 
 manager = DeploymentManager(
-    provider="aws",
-    backend="pulumi",
-    region="us-east-1",
-    environment="production"
+    provider="aws", backend="pulumi", region="us-east-1", environment="production"
 )
+
 
 def daily_report():
     # Your task logic
     pass
+
 
 result = manager.deploy_function(
     name="daily-report",
@@ -387,10 +377,7 @@ result = manager.deploy_function(
 def deploy_to_all_envs(function):
     for env in ["dev", "staging", "production"]:
         manager = DeploymentManager(
-            provider="aws",
-            backend="pulumi",
-            environment=env,
-            region="us-east-1"
+            provider="aws", backend="pulumi", environment=env, region="us-east-1"
         )
 
         result = manager.deploy_function(
@@ -398,7 +385,7 @@ def deploy_to_all_envs(function):
             function=function,
             schedule="Mon-Fri 09:00",
             memory_mb=256 if env == "dev" else 512,
-            enable_monitoring=(env == "production")
+            enable_monitoring=(env == "production"),
         )
 
         print(f"{env}: {result.success}")
@@ -410,10 +397,7 @@ def deploy_to_all_envs(function):
 from taskflows.cloud import LayerConfig
 
 # Create shared layer
-data_layer = LayerConfig(
-    layer_name="data-processing",
-    dependencies=["pandas", "numpy", "scipy"]
-)
+data_layer = LayerConfig(layer_name="data-processing", dependencies=["pandas", "numpy", "scipy"])
 
 # Deploy multiple functions using the layer
 for func_name in ["ingest", "transform", "export"]:
@@ -421,7 +405,7 @@ for func_name in ["ingest", "transform", "export"]:
         name=func_name,
         function=globals()[func_name],
         layers=[data_layer],  # All use same layer
-        dependencies=[]  # No need to include pandas/numpy in function
+        dependencies=[],  # No need to include pandas/numpy in function
     )
 ```
 
@@ -450,10 +434,10 @@ for func_name in ["ingest", "transform", "export"]:
 cd /path/to/taskflows
 
 # Install cloud dependencies
-pip install -r requirements-cloud.txt
+pip install "taskflows[cloud]"
 
 # Or install individually
-pip install boto3 pulumi pulumi-aws cloudpickle
+pip install "taskflows[cloud]"
 
 # Configure AWS
 aws configure
@@ -470,21 +454,20 @@ aws configure
 from taskflows.cloud.manager import DeploymentManager
 
 manager = DeploymentManager(
-    provider="aws",
-    backend="pulumi",
-    region="us-east-1",
-    environment="production"
+    provider="aws", backend="pulumi", region="us-east-1", environment="production"
 )
+
 
 def my_task():
     print("Hello from Lambda!")
+
 
 result = manager.deploy_function(
     name="my-task",
     function=my_task,
     schedule="Mon-Fri 09:00",
     memory_mb=256,
-    enable_monitoring=True
+    enable_monitoring=True,
 )
 
 print(f"Deployed: {result.resource_id}")
@@ -519,7 +502,7 @@ taskflows/
 │   ├── production_aws_deployment.py # Production examples (450 lines)
 │   ├── aws_lambda_deployment_example.py  # POC examples (370 lines)
 │   └── QUICK_START.md              # Quick reference
-├── requirements-cloud.txt           # Cloud dependencies
+├── pyproject.toml                    # Cloud dependency extras
 ├── CLOUD_DEPLOYMENT_POC.md         # POC summary
 └── CLOUD_DEPLOYMENT_PRODUCTION.md  # This file
 
@@ -530,7 +513,7 @@ Total: ~4,000 lines of code + documentation
 
 ### To Use Now
 
-1. **Install dependencies**: `pip install -r requirements-cloud.txt`
+1. **Install dependencies**: `pip install "taskflows[cloud]"`
 2. **Configure AWS**: `aws configure`
 3. **Run examples**: `python examples/production_aws_deployment.py`
 4. **Deploy your services**: Use `DeploymentManager` or `deploy_service_to_cloud()`
@@ -574,14 +557,14 @@ This production implementation provides:
 - **2,772 lines** of production code
 - **820 lines** of examples
 - **~1,000 lines** of documentation
-- **21 passing tests**
+- **36 focused cloud tests**
 
-The implementation is **ready for production use** with AWS Lambda and can be extended to other cloud providers using the established patterns.
+The implementation is ready for **beta evaluation** with AWS Lambda and can be extended to other cloud providers using the established patterns. Validate it in a non-production AWS account before production use.
 
 ---
 
 **Created**: 2025-10-27
-**Status**: Production Ready
+**Status**: Beta — local packaging and mock-provider tests pass; live AWS verification is required
 **Backends**: Pulumi (recommended), boto3
-**Cloud Providers**: AWS (complete), GCP/Azure (framework ready)
+**Cloud Providers**: AWS (beta); GCP/Azure provider values are reserved but not implemented
 ```

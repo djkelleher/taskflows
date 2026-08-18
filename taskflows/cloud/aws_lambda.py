@@ -2,8 +2,9 @@
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 try:
     import boto3
@@ -30,13 +31,15 @@ class AWSLambdaConfig:
 
     region: str = "us-east-1"
     # IAM role ARN for Lambda execution (required)
-    execution_role_arn: Optional[str] = None
+    execution_role_arn: str | None = None
     # S3 bucket for storing deployment packages (optional, for large packages)
-    deployment_bucket: Optional[str] = None
+    deployment_bucket: str | None = None
     # KMS key for encryption (optional)
-    kms_key_arn: Optional[str] = None
+    kms_key_arn: str | None = None
     # VPC configuration
-    vpc_config: Optional[Dict[str, List[str]]] = None  # {"SubnetIds": [...], "SecurityGroupIds": [...]}
+    vpc_config: dict[str, list[str]] | None = (
+        None  # {"SubnetIds": [...], "SecurityGroupIds": [...]}
+    )
 
 
 class AWSLambdaEnvironment(CloudEnvironment):
@@ -69,7 +72,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
         >>> print(result.resource_id)  # Lambda function ARN
     """
 
-    def __init__(self, aws_config: Optional[AWSLambdaConfig] = None, **kwargs):
+    def __init__(self, aws_config: AWSLambdaConfig | None = None, **kwargs):
         """Initialize AWS Lambda environment.
 
         Args:
@@ -79,7 +82,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
         if not BOTO3_AVAILABLE:
             raise ImportError(
                 "boto3 is required for AWS Lambda deployment. "
-                "Install it with: pip install boto3"
+                "Install it with: pip install 'taskflows[aws]'"
             )
 
         if aws_config is None:
@@ -95,7 +98,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
         self,
         function: Callable[[], None],
         config: CloudFunctionConfig,
-        dependencies: Optional[List[str]] = None,
+        dependencies: list[str] | None = None,
     ) -> CloudDeploymentResult:
         """Deploy a function to AWS Lambda with optional EventBridge scheduling.
 
@@ -132,9 +135,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
 
             # Create or update Lambda function
             logger.info(f"Deploying function {config.function_name} to Lambda")
-            function_arn = self._create_or_update_function(
-                config, deployment_package, role_arn
-            )
+            function_arn = self._create_or_update_function(config, deployment_package, role_arn)
 
             # Set up EventBridge schedules if provided
             rule_arns = []
@@ -254,8 +255,8 @@ class AWSLambdaEnvironment(CloudEnvironment):
         return response["FunctionArn"]
 
     def _create_eventbridge_schedules(
-        self, function_name: str, function_arn: str, schedules: List
-    ) -> List[str]:
+        self, function_name: str, function_arn: str, schedules: list
+    ) -> list[str]:
         """Create EventBridge rules for schedules."""
         rule_arns = []
 
@@ -307,9 +308,9 @@ class AWSLambdaEnvironment(CloudEnvironment):
     def invoke_function(
         self,
         function_name: str,
-        payload: Optional[Dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
         invocation_type: str = "RequestResponse",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Invoke a Lambda function.
 
         Args:
@@ -390,9 +391,9 @@ class AWSLambdaEnvironment(CloudEnvironment):
         self,
         function_name: str,
         limit: int = 100,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-    ) -> List[str]:
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> list[str]:
         """Retrieve CloudWatch logs for a Lambda function."""
         log_group_name = f"/aws/lambda/{function_name}"
 
@@ -440,7 +441,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
             logger.error(f"Failed to get logs for {function_name}: {e}")
             return [f"Error retrieving logs: {e}"]
 
-    def list_functions(self) -> List[Dict[str, Any]]:
+    def list_functions(self) -> list[dict[str, Any]]:
         """List all Lambda functions in the region."""
         try:
             response = self.lambda_client.list_functions()
@@ -468,7 +469,7 @@ class AWSLambdaEnvironment(CloudEnvironment):
         self,
         function_name: str,
         function: Callable[[], None],
-        dependencies: Optional[List[str]] = None,
+        dependencies: list[str] | None = None,
     ) -> CloudDeploymentResult:
         """Update Lambda function code."""
         try:

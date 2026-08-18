@@ -7,12 +7,12 @@ AWS EventBridge cron() and rate() expressions.
 
 import pytest
 
-from taskflows.schedule import Calendar, Periodic
 from taskflows.cloud.utils import (
-    schedule_to_eventbridge_expression,
     _calendar_to_cron,
     _periodic_to_rate,
+    schedule_to_eventbridge_expression,
 )
+from taskflows.schedule import Calendar, Periodic
 
 
 class TestCalendarToCron:
@@ -119,6 +119,7 @@ class TestScheduleToEventBridge:
 
     def test_unknown_schedule_type_raises_error(self):
         """Test that unknown schedule types raise an error."""
+
         # Create a mock schedule object that isn't Calendar or Periodic
         class UnknownSchedule:
             pass
