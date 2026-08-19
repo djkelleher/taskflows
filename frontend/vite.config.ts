@@ -34,6 +34,8 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    sourcemap: true,
+    // The release workflow copies this directory into the Python wheel. Avoid
+    // shipping source maps unless a deployment explicitly requests them.
+    sourcemap: process.env.VITE_SOURCEMAP === "true",
   },
 });
