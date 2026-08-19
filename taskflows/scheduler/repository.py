@@ -16,7 +16,7 @@ from taskflows.common import ensure_data_dir, services_data_dir
 
 from .models import ScheduledTask, ScheduleSpec, parse_datetime, utc_now
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -25,6 +25,21 @@ def _iso(value: datetime | None) -> str | None:
 
 def _dt(value: str | None) -> datetime | None:
     return parse_datetime(value) if value else None
+
+
+def _pid_is_running(pid: int | None) -> bool:
+    """Return whether a recorded runner process still exists."""
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class SchedulerRepository:
@@ -88,6 +103,7 @@ class SchedulerRepository:
                     stdout_path TEXT,
                     stderr_path TEXT,
                     error TEXT,
+                    runner_pid INTEGER,
                     FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE SET NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_runs_task_started
@@ -124,6 +140,7 @@ class SchedulerRepository:
                         stdout_path TEXT,
                         stderr_path TEXT,
                         error TEXT,
+                        runner_pid INTEGER,
                         FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE SET NULL
                     );
                     """
@@ -137,10 +154,10 @@ class SchedulerRepository:
                 db.execute(
                     f"""INSERT INTO task_runs
                         (id, task_id, task_name, scheduled_for, started_at, finished_at,
-                         status, exit_code, stdout_path, stderr_path, error)
+                         status, exit_code, stdout_path, stderr_path, error, runner_pid)
                         SELECT r.id, r.task_id, {name_expression}, r.scheduled_for,
                                r.started_at, r.finished_at, r.status, r.exit_code,
-                               r.stdout_path, r.stderr_path, r.error
+                               r.stdout_path, r.stderr_path, r.error, NULL
                         FROM task_runs_v1 r
                         LEFT JOIN scheduled_tasks t ON t.id=r.task_id"""
                 )
@@ -150,6 +167,9 @@ class SchedulerRepository:
                 )
                 db.execute("CREATE INDEX idx_task_runs_status ON task_runs(status)")
                 db.execute("PRAGMA foreign_keys=ON")
+            run_columns = {row[1] for row in db.execute("PRAGMA table_info(task_runs)")}
+            if "runner_pid" not in run_columns:
+                db.execute("ALTER TABLE task_runs ADD COLUMN runner_pid INTEGER")
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if os.name != "nt":
             os.chmod(self.database_path, 0o600)
@@ -175,20 +195,33 @@ class SchedulerRepository:
         )
 
     def add(self, task: ScheduledTask, *, replace_existing: bool = False) -> ScheduledTask:
-        existing = self.get_by_name(task.name)
-        if existing and not replace_existing:
-            raise ValueError(f"a scheduled task named {task.name!r} already exists")
         now = utc_now()
-        task_id = existing.id if existing else task.id
-        revision = (existing.revision + 1) if existing else max(task.revision, 1)
-        with self.connect() as db:
-            db.execute(
-                """
+        values = (
+            task.id,
+            task.name,
+            json.dumps(list(task.command)),
+            task.schedule.to_json(),
+            int(task.enabled),
+            task.timeout,
+            task.cwd,
+            json.dumps(dict(task.environment), sort_keys=True),
+            task.misfire_grace_time,
+            int(task.coalesce),
+            task.max_instances,
+            _iso(task.created_at),
+            _iso(now),
+            max(task.revision, 1),
+            None,
+        )
+        insert = """
                 INSERT INTO scheduled_tasks (
                     id, name, command_json, schedule_json, enabled, timeout, cwd,
                     environment_json, misfire_grace_time, coalesce, max_instances,
                     created_at, updated_at, revision, next_run_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+        if replace_existing:
+            insert += """
                 ON CONFLICT(name) DO UPDATE SET
                     command_json=excluded.command_json,
                     schedule_json=excluded.schedule_json,
@@ -200,29 +233,21 @@ class SchedulerRepository:
                     coalesce=excluded.coalesce,
                     max_instances=excluded.max_instances,
                     updated_at=excluded.updated_at,
-                    revision=excluded.revision,
+                    revision=scheduled_tasks.revision+1,
                     next_run_at=NULL
-                """,
-                (
-                    task_id,
-                    task.name,
-                    json.dumps(list(task.command)),
-                    task.schedule.to_json(),
-                    int(task.enabled),
-                    task.timeout,
-                    task.cwd,
-                    json.dumps(dict(task.environment), sort_keys=True),
-                    task.misfire_grace_time,
-                    int(task.coalesce),
-                    task.max_instances,
-                    _iso(existing.created_at if existing else task.created_at),
-                    _iso(now),
-                    revision,
-                    None,
-                ),
-            )
-        result = self.get(task_id)
-        assert result is not None
+                """
+        try:
+            with self.connect() as db:
+                db.execute(insert, values)
+                row = db.execute(
+                    "SELECT * FROM scheduled_tasks WHERE name=?", (task.name,)
+                ).fetchone()
+                assert row is not None
+                result = self._task_from_row(row)
+        except sqlite3.IntegrityError as exc:
+            if "scheduled_tasks.name" in str(exc):
+                raise ValueError(f"a scheduled task named {task.name!r} already exists") from exc
+            raise ValueError(f"a scheduled task with id {task.id!r} already exists") from exc
         return result
 
     def get(self, task_id: str) -> ScheduledTask | None:
@@ -253,17 +278,24 @@ class SchedulerRepository:
         tasks = [self._task_from_row(row) for row in rows]
         return [task for task in tasks if not match or fnmatch(task.name, match)]
 
-    def set_enabled(self, identifier: str, enabled: bool) -> ScheduledTask:
+    def set_enabled(
+        self, identifier: str, enabled: bool, *, expected_revision: int | None = None
+    ) -> ScheduledTask:
         task = self.resolve(identifier)
+        revision_clause = " AND revision=?" if expected_revision is not None else ""
+        params: list[Any] = [int(enabled), _iso(utc_now()), task.id, int(enabled)]
+        if expected_revision is not None:
+            params.append(expected_revision)
         with self.connect() as db:
             db.execute(
-                """UPDATE scheduled_tasks
+                f"""UPDATE scheduled_tasks
                    SET enabled=?, updated_at=?, revision=revision+1, next_run_at=NULL
-                   WHERE id=?""",
-                (int(enabled), _iso(utc_now()), task.id),
+                   WHERE id=? AND enabled<>?{revision_clause}""",
+                params,
             )
         result = self.get(task.id)
-        assert result is not None
+        if result is None:
+            raise KeyError(f"scheduled task not found: {identifier}")
         return result
 
     def delete(self, identifier: str) -> bool:
@@ -286,29 +318,52 @@ class SchedulerRepository:
                 values,
             )
 
-    def begin_run(self, task: ScheduledTask, scheduled_for: datetime | None) -> str | None:
-        """Atomically reserve a run slot, respecting per-task overlap limits."""
+    def begin_run(
+        self,
+        task: ScheduledTask,
+        scheduled_for: datetime | None,
+        *,
+        allow_disabled: bool = True,
+    ) -> str | None:
+        """Atomically reserve a current-definition run slot."""
         run_id = str(uuid4())
         now = utc_now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            current = db.execute(
+                "SELECT name, enabled, revision, max_instances FROM scheduled_tasks WHERE id=?",
+                (task.id,),
+            ).fetchone()
+            if (
+                current is None
+                or current["revision"] != task.revision
+                or (not allow_disabled and not bool(current["enabled"]))
+            ):
+                return None
             running = db.execute(
                 "SELECT COUNT(*) FROM task_runs WHERE task_id=? AND status='running'",
                 (task.id,),
             ).fetchone()[0]
-            if running >= task.max_instances:
+            if running >= current["max_instances"]:
                 db.execute(
                     """INSERT INTO task_runs
                        (id, task_id, task_name, scheduled_for, started_at, finished_at, status, error)
                        VALUES (?, ?, ?, ?, ?, ?, 'skipped', 'maximum concurrent instances reached')""",
-                    (run_id, task.id, task.name, _iso(scheduled_for), _iso(now), _iso(now)),
+                    (run_id, task.id, current["name"], _iso(scheduled_for), _iso(now), _iso(now)),
                 )
                 return None
             db.execute(
                 """INSERT INTO task_runs
-                   (id, task_id, task_name, scheduled_for, started_at, status)
-                   VALUES (?, ?, ?, ?, ?, 'running')""",
-                (run_id, task.id, task.name, _iso(scheduled_for), _iso(now)),
+                   (id, task_id, task_name, scheduled_for, started_at, status, runner_pid)
+                   VALUES (?, ?, ?, ?, ?, 'running', ?)""",
+                (
+                    run_id,
+                    task.id,
+                    current["name"],
+                    _iso(scheduled_for),
+                    _iso(now),
+                    os.getpid(),
+                ),
             )
         return run_id
 
@@ -337,9 +392,14 @@ class SchedulerRepository:
                 ),
             )
 
-    def record_missed(self, task: ScheduledTask, scheduled_for: datetime, reason: str) -> None:
+    def record_missed(self, task: ScheduledTask, scheduled_for: datetime, reason: str) -> bool:
         now = utc_now()
         with self.connect() as db:
+            current = db.execute(
+                "SELECT revision FROM scheduled_tasks WHERE id=?", (task.id,)
+            ).fetchone()
+            if current is None or current["revision"] != task.revision:
+                return False
             db.execute(
                 """INSERT INTO task_runs
                    (id, task_id, task_name, scheduled_for, started_at, finished_at, status, error)
@@ -354,17 +414,23 @@ class SchedulerRepository:
                     reason,
                 ),
             )
+        return True
 
     def mark_interrupted_runs(self) -> int:
         now = _iso(utc_now())
         with self.connect() as db:
-            cursor = db.execute(
-                """UPDATE task_runs SET status='interrupted', finished_at=?,
-                   error=COALESCE(error, 'scheduler stopped before run completed')
-                   WHERE status='running'""",
-                (now,),
-            )
-        return cursor.rowcount
+            running = db.execute(
+                "SELECT id, runner_pid FROM task_runs WHERE status='running'"
+            ).fetchall()
+            stale_ids = [row["id"] for row in running if not _pid_is_running(row["runner_pid"])]
+            if stale_ids:
+                db.executemany(
+                    """UPDATE task_runs SET status='interrupted', finished_at=?,
+                       error=COALESCE(error, 'runner stopped before run completed')
+                       WHERE id=? AND status='running'""",
+                    [(now, run_id) for run_id in stale_ids],
+                )
+        return len(stale_ids)
 
     def history(
         self, identifier: str | None = None, *, limit: int = 100
@@ -372,9 +438,15 @@ class SchedulerRepository:
         params: list[Any] = []
         where = ""
         if identifier:
-            task = self.resolve(identifier)
-            where = "WHERE r.task_id=?"
-            params.append(task.id)
+            task = self.get(identifier)
+            if task is not None:
+                where = "WHERE r.task_id=?"
+                params.append(task.id)
+            else:
+                # Name queries span recreated tasks because history intentionally
+                # outlives each individual task definition. IDs remain precise.
+                where = "WHERE r.task_name=?"
+                params.append(identifier)
         params.append(limit)
         with self.connect() as db:
             rows = db.execute(

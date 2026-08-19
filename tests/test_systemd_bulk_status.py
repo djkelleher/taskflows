@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from dbus_next.errors import DBusError
 
 from taskflows.admin import core
 from taskflows.alerts.components import Table
@@ -70,6 +71,63 @@ async def test_schedule_info_fetches_properties_by_interface(monkeypatch):
     assert result["Last Start"] == datetime.fromtimestamp(1, tz=UTC)
     assert result["Last Finish"] == datetime.fromtimestamp(2, tz=UTC)
     assert result["Next Start"] == datetime.fromtimestamp(3, tz=UTC)
+
+
+@pytest.mark.asyncio
+async def test_schedule_info_allows_service_without_timer(monkeypatch):
+    class Properties:
+        async def call_get_all(self, interface):
+            assert interface == "org.freedesktop.systemd1.Unit"
+            return {"ActiveEnterTimestamp": SimpleNamespace(value=1_000_000)}
+
+    class Manager:
+        async def call_load_unit(self, name):
+            if name.endswith(".timer"):
+                raise DBusError("org.freedesktop.systemd1.NoSuchUnit", "missing")
+            return "/service"
+
+    class Proxy:
+        def get_interface(self, name):
+            assert name == "org.freedesktop.DBus.Properties"
+            return Properties()
+
+    monkeypatch.setattr(units, "systemd_manager", lambda: asyncio.sleep(0, result=Manager()))
+    monkeypatch.setattr(units, "session_dbus", lambda: asyncio.sleep(0, result=object()))
+    monkeypatch.setattr(units, "_get_unit_proxy", lambda *_: asyncio.sleep(0, result=Proxy()))
+
+    result = await units.get_schedule_info("example")
+
+    assert result["Last Start"] == datetime.fromtimestamp(1, tz=UTC)
+    assert result["Next Start"] is None
+    assert result["Timers Calendar"] == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_info_preserves_auxiliary_unit_prefix(monkeypatch):
+    loaded = []
+
+    class Manager:
+        async def call_load_unit(self, name):
+            loaded.append(name)
+            if name.endswith(".timer"):
+                raise DBusError("org.freedesktop.systemd1.NoSuchUnit", "missing")
+            return "/service"
+
+    class Properties:
+        async def call_get_all(self, _interface):
+            return {}
+
+    class Proxy:
+        def get_interface(self, _name):
+            return Properties()
+
+    monkeypatch.setattr(units, "systemd_manager", lambda: asyncio.sleep(0, result=Manager()))
+    monkeypatch.setattr(units, "session_dbus", lambda: asyncio.sleep(0, result=object()))
+    monkeypatch.setattr(units, "_get_unit_proxy", lambda *_: asyncio.sleep(0, result=Proxy()))
+
+    await units.get_schedule_info("stop-taskflows-job.service")
+
+    assert loaded == ["stop-taskflows-job.service", "stop-taskflows-job.timer"]
 
 
 @pytest.mark.asyncio
@@ -151,6 +209,51 @@ async def test_default_status_uses_bulk_summary_without_schedule_queries(monkeyp
     assert schedule_queries == 0
     assert response["status"][0]["load_state"] == "not-loaded"
     assert "Last Start" not in response["status"][0]
+
+
+@pytest.mark.asyncio
+async def test_status_keeps_auxiliary_services_distinct_and_ignores_orphan_timers(monkeypatch):
+    async def file_states(**_kwargs):
+        return {
+            "/tmp/taskflows-job.service": "enabled",
+            "/tmp/stop-taskflows-job.service": "enabled",
+            "/tmp/restart-taskflows-job.service": "enabled",
+            "/tmp/taskflows-stop-legit.service": "enabled",
+            "/tmp/taskflows-job.timer": "enabled",
+            "/tmp/taskflows-orphan.timer": "enabled",
+        }
+
+    async def runtime_units(**_kwargs):
+        return [
+            {
+                "unit_name": name,
+                "description": name,
+                "load_state": "loaded",
+                "active_state": "inactive",
+                "sub_state": "dead",
+            }
+            for name in (
+                "taskflows-job.service",
+                "stop-taskflows-job.service",
+                "restart-taskflows-job.service",
+                "taskflows-stop-legit.service",
+            )
+        ]
+
+    monkeypatch.setattr(core, "get_unit_file_states", file_states)
+    monkeypatch.setattr(core, "get_units", runtime_units)
+
+    response = await core.status(all=True, as_json=True)
+
+    assert {row["Service"] for row in response["status"]} == {
+        "job",
+        "stop-taskflows-job",
+        "restart-taskflows-job",
+        "stop-legit",
+    }
+
+    default_response = await core.status(as_json=True)
+    assert {row["Service"] for row in default_response["status"]} == {"job", "stop-legit"}
 
 
 @pytest.mark.asyncio

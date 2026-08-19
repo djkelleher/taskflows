@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -44,7 +45,8 @@ class ScheduleSpec:
         if self.kind == "date":
             parse_datetime(str(self.value))
         elif self.kind == "interval":
-            if isinstance(self.value, bool) or float(self.value) <= 0:
+            interval = float(self.value)
+            if isinstance(self.value, bool) or not math.isfinite(interval) or interval <= 0:
                 raise ValueError("interval must be greater than zero seconds")
             if self.start_at is not None:
                 parse_datetime(self.start_at)
@@ -140,24 +142,41 @@ class ScheduledTask:
     next_run_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        if not self.id or not self.name.strip():
-            raise ValueError("task id and name cannot be empty")
+        if not self.id or not self.name.strip() or "\x00" in self.name:
+            raise ValueError("task id and name cannot be empty or contain NUL bytes")
         if not self.command or any(not isinstance(part, str) or not part for part in self.command):
             raise ValueError("command must contain at least one non-empty argument")
         if any("\x00" in part for part in self.command):
             raise ValueError("command arguments cannot contain NUL bytes")
-        if self.timeout is not None and self.timeout <= 0:
-            raise ValueError("timeout must be greater than zero")
-        if self.misfire_grace_time is not None and self.misfire_grace_time <= 0:
-            raise ValueError("misfire_grace_time must be positive or None")
-        if self.max_instances < 1:
-            raise ValueError("max_instances must be at least one")
-        if self.cwd is not None and not str(self.cwd).strip():
-            raise ValueError("cwd cannot be empty")
-        if any(
-            not isinstance(k, str) or not isinstance(v, str) for k, v in self.environment.items()
+        if self.timeout is not None and (
+            isinstance(self.timeout, bool) or not math.isfinite(self.timeout) or self.timeout <= 0
         ):
-            raise TypeError("environment keys and values must be strings")
+            raise ValueError("timeout must be greater than zero")
+        if self.misfire_grace_time is not None and (
+            isinstance(self.misfire_grace_time, bool)
+            or not isinstance(self.misfire_grace_time, int)
+            or self.misfire_grace_time <= 0
+        ):
+            raise ValueError("misfire_grace_time must be positive or None")
+        if (
+            isinstance(self.max_instances, bool)
+            or not isinstance(self.max_instances, int)
+            or self.max_instances < 1
+        ):
+            raise ValueError("max_instances must be at least one")
+        if (
+            isinstance(self.revision, bool)
+            or not isinstance(self.revision, int)
+            or self.revision < 1
+        ):
+            raise ValueError("revision must be at least one")
+        if self.cwd is not None and (not str(self.cwd).strip() or "\x00" in str(self.cwd)):
+            raise ValueError("cwd cannot be empty or contain NUL bytes")
+        for key, value in self.environment.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise TypeError("environment keys and values must be strings")
+            if not key or "=" in key or "\x00" in key or "\x00" in value:
+                raise ValueError("environment variables must have valid, NUL-free names and values")
 
     @classmethod
     def create(

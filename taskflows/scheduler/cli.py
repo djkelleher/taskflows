@@ -226,7 +226,8 @@ def daemon_status(as_json: bool) -> None:
     state = _repository().daemon_state()
     if state:
         heartbeat = parse_datetime(state["heartbeat_at"])
-        state["healthy"] = (datetime.now(UTC) - heartbeat.astimezone(UTC)).total_seconds() < 5
+        age = (datetime.now(UTC) - heartbeat.astimezone(UTC)).total_seconds()
+        state["healthy"] = 0 <= age < 5
     else:
         state = {"healthy": False}
     if as_json:

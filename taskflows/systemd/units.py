@@ -86,27 +86,33 @@ def service_logs(service_name: str, n_lines: int = 1000):
 async def get_schedule_info(unit: str):
     """Get the schedule information for a unit."""
     unit_stem = Path(unit).stem
-    if not unit_stem.startswith(_SYSTEMD_FILE_PREFIX):
+    accepted_prefixes = (
+        _SYSTEMD_FILE_PREFIX,
+        f"stop-{_SYSTEMD_FILE_PREFIX}",
+        f"restart-{_SYSTEMD_FILE_PREFIX}",
+    )
+    if not unit_stem.startswith(accepted_prefixes):
         unit_stem = f"{_SYSTEMD_FILE_PREFIX}{unit_stem}"
     manager = await systemd_manager()
     bus = await session_dbus()
 
-    # Service and timer paths are independent manager lookups.
-    service_path, timer_path = await asyncio.gather(
-        manager.call_load_unit(f"{unit_stem}.service"),
-        manager.call_load_unit(f"{unit_stem}.timer"),
-    )
-    service_proxy = await _get_unit_proxy(bus, service_path)
-    service_props = service_proxy.get_interface("org.freedesktop.DBus.Properties")
-    timer_proxy = await _get_unit_proxy(bus, timer_path)
-    timer_props = timer_proxy.get_interface("org.freedesktop.DBus.Properties")
+    async def properties(suffix: str, interface: str, *, required: bool):
+        try:
+            path = await manager.call_load_unit(f"{unit_stem}.{suffix}")
+            proxy = await _get_unit_proxy(bus, path)
+            return await proxy.get_interface("org.freedesktop.DBus.Properties").call_get_all(
+                interface
+            )
+        except DBusError as exc:
+            if not required and exc.type.endswith(".NoSuchUnit"):
+                return {}
+            raise
 
-    # Fetch both interfaces concurrently and each interface in one operation.
-    # The previous implementation made five serial Properties.Get calls and
-    # two introspection calls for every service shown by `tf status`.
+    # Fetch each interface in one operation. A timer is optional: long-running
+    # services without one must still be inspectable with `tf status --details`.
     service_values, timer_values = await asyncio.gather(
-        service_props.call_get_all("org.freedesktop.systemd1.Unit"),
-        timer_props.call_get_all("org.freedesktop.systemd1.Timer"),
+        properties("service", "org.freedesktop.systemd1.Unit", required=True),
+        properties("timer", "org.freedesktop.systemd1.Timer", required=False),
     )
     schedule = {
         "Last Start": service_values.get("ActiveEnterTimestamp", 0),
@@ -122,7 +128,7 @@ async def get_schedule_info(unit: str):
             if not timestamp:
                 return None
             return datetime.fromtimestamp(timestamp / 1_000_000, tz=UTC)
-        except (ValueError, TypeError):
+        except (OverflowError, ValueError, TypeError):
             # "year 586524 is out of range" or type error
             return None
 

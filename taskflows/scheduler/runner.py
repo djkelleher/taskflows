@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import threading
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,20 +24,26 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
     if os.name == "nt":
         # CREATE_NEW_PROCESS_GROUP does not include grandchildren when killed
         # directly. taskkill /T is the native process-tree operation.
-        result = subprocess.run(
-            ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
-        if result.returncode != 0 and process.poll() is None:
+        try:
+            result = subprocess.run(
+                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            result = None
+        if (result is None or result.returncode != 0) and process.poll() is None:
             process.kill()
         return
     try:
         os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
         process.wait(timeout=5)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        if process.poll() is None:
+    except subprocess.TimeoutExpired:
+        with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
 
 
@@ -78,7 +85,7 @@ def execute_scheduled_task(
         return None
 
     planned_at = parse_datetime(scheduled_for) if scheduled_for else utc_now()
-    run_id = repository.begin_run(task, planned_at)
+    run_id = repository.begin_run(task, planned_at, allow_disabled=allow_disabled)
     if run_id is None:
         logger.warning(f"Scheduled task {task.name} reached max_instances={task.max_instances}")
         return None
@@ -87,7 +94,7 @@ def execute_scheduled_task(
     # recreate a DateTrigger after APScheduler removes it.
     # A manual `schedule run` must not consume a future one-time schedule.
     if task.schedule.kind == "date" and task.enabled and not allow_disabled:
-        repository.set_enabled(task.id, False)
+        repository.set_enabled(task.id, False, expected_revision=task.revision)
 
     log_dir = repository.database_path.parent / "runs" / task.id
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -149,6 +156,14 @@ def execute_scheduled_task(
         )
         return exit_code
     except Exception as exc:
+        if process is not None and process.poll() is None:
+            try:
+                _terminate_process_tree(process)
+            except Exception as termination_error:
+                logger.warning(
+                    f"Could not terminate failed scheduled process {process.pid}: "
+                    f"{termination_error}"
+                )
         repository.finish_run(
             run_id,
             status="failed",
