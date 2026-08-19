@@ -319,6 +319,9 @@ def test_runner_captures_output_environment_and_working_directory(tmp_path):
     assert run["status"] == "succeeded"
     assert Path(run["stdout_path"]).read_text() == "stdout\n"
     assert Path(run["stderr_path"]).read_text() == "stderr\n"
+    if os.name != "nt":
+        assert Path(run["stdout_path"]).stat().st_mode & 0o777 == 0o600
+        assert Path(run["stderr_path"]).stat().st_mode & 0o777 == 0o600
 
 
 def test_runner_enforces_timeout(tmp_path):

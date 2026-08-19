@@ -4,10 +4,11 @@ import os
 import signal
 import subprocess
 import threading
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from taskflows.common import logger
 
@@ -16,6 +17,29 @@ from .repository import SchedulerRepository
 
 _active_processes: dict[str, subprocess.Popen[Any]] = {}
 _active_lock = threading.RLock()
+
+
+@contextmanager
+def _open_run_log(path: Path) -> Iterator[BinaryIO]:
+    """Create a run log with owner-only permissions on POSIX systems."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+    if os.name != "nt":
+        # Run IDs are generated internally, but refusing symlinks prevents a
+        # compromised writable data directory from redirecting captured output.
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    stream: BinaryIO | None = None
+    try:
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        stream = os.fdopen(descriptor, "wb")
+        descriptor = -1
+        yield stream
+    finally:
+        if stream is not None:
+            stream.close()
+        elif descriptor >= 0:
+            os.close(descriptor)
 
 
 def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
@@ -137,7 +161,7 @@ def execute_scheduled_task(
         else:
             popen_kwargs["start_new_session"] = True
 
-        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        with _open_run_log(stdout_path) as stdout, _open_run_log(stderr_path) as stderr:
             process = subprocess.Popen(
                 list(task.command), stdout=stdout, stderr=stderr, **popen_kwargs
             )
