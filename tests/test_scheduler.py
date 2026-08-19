@@ -9,7 +9,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from click.testing import CliRunner
 
 from taskflows.admin.api import (
@@ -517,6 +517,25 @@ def test_stale_scheduler_event_does_not_disable_replacement(tmp_path):
 
     daemon._on_scheduler_event(SimpleNamespace(job_id=job_id, code=EVENT_JOB_EXECUTED))
     assert job_id not in daemon._submitted_date_jobs
+
+
+def test_one_time_scheduler_error_consumes_definition(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "error-once",
+            ["echo", "never"],
+            ScheduleSpec.once(utc_now() + timedelta(days=1)),
+        )
+    )
+    daemon = SchedulerDaemon(repository.database_path)
+    job_id = daemon._job_id(task.id)
+    daemon._known_revisions[job_id] = task.revision
+    daemon._known_date_revisions[job_id] = task.revision
+
+    daemon._on_scheduler_event(SimpleNamespace(job_id=job_id, code=EVENT_JOB_ERROR))
+
+    assert repository.resolve(task.id).enabled is False
 
 
 def test_schedule_cli_add_list_and_run(tmp_path, monkeypatch):
