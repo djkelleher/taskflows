@@ -25,7 +25,7 @@ from taskflows.scheduler import installer
 from taskflows.scheduler import repository as repository_module
 from taskflows.scheduler.daemon import DaemonAlreadyRunning, SchedulerDaemon, _SingletonLock
 from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, utc_now
-from taskflows.scheduler.repository import SchedulerRepository
+from taskflows.scheduler.repository import SchedulerRepository, _pid_is_running
 from taskflows.scheduler.runner import execute_scheduled_task, run_now
 
 
@@ -247,6 +247,18 @@ def test_interrupted_run_cleanup_preserves_live_manual_runner(tmp_path):
         db.execute("UPDATE task_runs SET runner_pid=NULL WHERE id=?", (run_id,))
     assert repository.mark_interrupted_runs() == 1
     assert repository.history(task.id)[0]["status"] == "interrupted"
+
+
+def test_windows_runner_liveness_does_not_use_destructive_os_kill(monkeypatch):
+    monkeypatch.setattr(repository_module.os, "name", "nt")
+    monkeypatch.setattr(repository_module, "_windows_pid_is_running", lambda pid: True)
+    monkeypatch.setattr(
+        repository_module.os,
+        "kill",
+        lambda *_args: pytest.fail("os.kill must not be used for Windows liveness checks"),
+    )
+
+    assert _pid_is_running(1234) is True
 
 
 def test_repository_migrates_v1_run_history_without_losing_rows(tmp_path):
