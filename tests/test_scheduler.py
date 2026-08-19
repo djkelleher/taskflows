@@ -1,3 +1,4 @@
+import math
 import plistlib
 import sqlite3
 import sys
@@ -48,6 +49,9 @@ def test_schedule_specs_are_portable_and_validated():
         ScheduleSpec.cron("0 9 *")
     with pytest.raises(ValueError, match="greater than zero"):
         ScheduleSpec.interval(0)
+    for invalid in (math.nan, math.inf, -math.inf):
+        with pytest.raises(ValueError, match="finite number"):
+            ScheduleSpec.interval(invalid)
     with pytest.raises(ValueError, match="unknown IANA time zone"):
         ScheduleSpec.cron("0 9 * * *", timezone="Not/AZone")
 
@@ -81,6 +85,37 @@ def test_repository_crud_revision_and_history_survives_delete(tmp_path):
     history = repository.history()
     assert history[0]["task_name"] == "backup"
     assert history[0]["task_id"] is None
+    assert repository.history("backup")[0]["task_name"] == "backup"
+    with pytest.raises(KeyError, match="not found"):
+        repository.history("missing")
+
+
+def test_repository_replace_flag_is_respected_at_insert_time(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    first = ScheduledTask.create("race", ["echo", "first"], ScheduleSpec.interval(60))
+    second = ScheduledTask.create("race", ["echo", "second"], ScheduleSpec.interval(60))
+    repository.add(first)
+
+    # Simulate a stale/racing preflight lookup. The INSERT must still refuse
+    # to overwrite the existing definition unless replacement was requested.
+    monkeypatch.setattr(repository, "get_by_name", lambda _name: None)
+    with pytest.raises(ValueError, match="already exists"):
+        repository.add(second)
+
+    assert SchedulerRepository(repository.database_path).resolve("race").command == (
+        "echo",
+        "first",
+    )
+
+
+def test_task_rejects_non_finite_timeout():
+    with pytest.raises(ValueError, match="finite number"):
+        ScheduledTask.create(
+            "invalid-timeout",
+            ["echo", "ok"],
+            ScheduleSpec.interval(60),
+            timeout=math.nan,
+        )
 
 
 def test_repository_prevents_overlapping_manual_runs(tmp_path):

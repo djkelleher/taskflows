@@ -365,7 +365,11 @@ async def status(
             for file_path, enabled_status in all_unit_states.items():
                 if not file_path.endswith(".timer"):
                     continue
-                units_meta[Path(file_path).stem]["Timer\nEnabled"] = enabled_status
+                stem = Path(file_path).stem
+                # An orphan timer is not a service and must not create a fake
+                # row (or trigger a failing service property lookup).
+                if stem in units_meta:
+                    units_meta[stem]["Timer\nEnabled"] = enabled_status
 
             if details:
                 # Load and inspect units concurrently. get_schedule_info loads
@@ -390,7 +394,11 @@ async def status(
 
             # Add public service names.
             for unit_name, unit_data in units_meta.items():
-                unit_data["Service"] = extract_service_name(unit_name)
+                auxiliary_prefix = next(
+                    (prefix for prefix in ("stop-", "restart-") if unit_name.startswith(prefix)),
+                    "",
+                )
+                unit_data["Service"] = auxiliary_prefix + extract_service_name(unit_name)
                 unit_data.setdefault("load_state", "not-loaded")
                 unit_data.setdefault("active_state", "inactive")
                 unit_data.setdefault("sub_state", "dead")

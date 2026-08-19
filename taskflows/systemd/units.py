@@ -86,28 +86,34 @@ def service_logs(service_name: str, n_lines: int = 1000):
 async def get_schedule_info(unit: str):
     """Get the schedule information for a unit."""
     unit_stem = Path(unit).stem
-    if not unit_stem.startswith(_SYSTEMD_FILE_PREFIX):
+    prefixed = unit_stem.startswith(_SYSTEMD_FILE_PREFIX) or unit_stem.startswith(
+        (f"stop-{_SYSTEMD_FILE_PREFIX}", f"restart-{_SYSTEMD_FILE_PREFIX}")
+    )
+    if not prefixed:
         unit_stem = f"{_SYSTEMD_FILE_PREFIX}{unit_stem}"
     manager = await systemd_manager()
     bus = await session_dbus()
 
-    # Service and timer paths are independent manager lookups.
-    service_path, timer_path = await asyncio.gather(
-        manager.call_load_unit(f"{unit_stem}.service"),
-        manager.call_load_unit(f"{unit_stem}.timer"),
-    )
-    service_proxy = await _get_unit_proxy(bus, service_path)
-    service_props = service_proxy.get_interface("org.freedesktop.DBus.Properties")
-    timer_proxy = await _get_unit_proxy(bus, timer_path)
-    timer_props = timer_proxy.get_interface("org.freedesktop.DBus.Properties")
+    async def service_properties():
+        service_path = await manager.call_load_unit(f"{unit_stem}.service")
+        service_proxy = await _get_unit_proxy(bus, service_path)
+        properties = service_proxy.get_interface("org.freedesktop.DBus.Properties")
+        return await properties.call_get_all("org.freedesktop.systemd1.Unit")
 
-    # Fetch both interfaces concurrently and each interface in one operation.
-    # The previous implementation made five serial Properties.Get calls and
-    # two introspection calls for every service shown by `tf status`.
-    service_values, timer_values = await asyncio.gather(
-        service_props.call_get_all("org.freedesktop.systemd1.Unit"),
-        timer_props.call_get_all("org.freedesktop.systemd1.Timer"),
-    )
+    async def timer_properties():
+        # Long-running services need not have a matching timer. Missing timer
+        # metadata must not make `status --details` fail for the entire service
+        # list, while service lookup failures should still be surfaced.
+        try:
+            timer_path = await manager.call_load_unit(f"{unit_stem}.timer")
+            timer_proxy = await _get_unit_proxy(bus, timer_path)
+            properties = timer_proxy.get_interface("org.freedesktop.DBus.Properties")
+            return await properties.call_get_all("org.freedesktop.systemd1.Timer")
+        except DBusError as exc:
+            logger.debug(f"No timer metadata for {unit_stem}: {exc}")
+            return {}
+
+    service_values, timer_values = await asyncio.gather(service_properties(), timer_properties())
     schedule = {
         "Last Start": service_values.get("ActiveEnterTimestamp", 0),
         "Last Finish": service_values.get("ActiveExitTimestamp", 0),

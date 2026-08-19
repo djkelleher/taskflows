@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -44,8 +45,12 @@ class ScheduleSpec:
         if self.kind == "date":
             parse_datetime(str(self.value))
         elif self.kind == "interval":
-            if isinstance(self.value, bool) or float(self.value) <= 0:
-                raise ValueError("interval must be greater than zero seconds")
+            try:
+                interval = float(self.value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("interval must be a finite number greater than zero") from exc
+            if isinstance(self.value, bool) or not math.isfinite(interval) or interval <= 0:
+                raise ValueError("interval must be a finite number greater than zero")
             if self.start_at is not None:
                 parse_datetime(self.start_at)
         elif self.kind == "cron":
@@ -146,8 +151,10 @@ class ScheduledTask:
             raise ValueError("command must contain at least one non-empty argument")
         if any("\x00" in part for part in self.command):
             raise ValueError("command arguments cannot contain NUL bytes")
-        if self.timeout is not None and self.timeout <= 0:
-            raise ValueError("timeout must be greater than zero")
+        if self.timeout is not None and (
+            isinstance(self.timeout, bool) or not math.isfinite(self.timeout) or self.timeout <= 0
+        ):
+            raise ValueError("timeout must be a finite number greater than zero")
         if self.misfire_grace_time is not None and self.misfire_grace_time <= 0:
             raise ValueError("misfire_grace_time must be positive or None")
         if self.max_instances < 1:

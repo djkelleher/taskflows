@@ -182,7 +182,7 @@ class SchedulerRepository:
         task_id = existing.id if existing else task.id
         revision = (existing.revision + 1) if existing else max(task.revision, 1)
         with self.connect() as db:
-            db.execute(
+            statement = (
                 """
                 INSERT INTO scheduled_tasks (
                     id, name, command_json, schedule_json, enabled, timeout, cwd,
@@ -200,28 +200,52 @@ class SchedulerRepository:
                     coalesce=excluded.coalesce,
                     max_instances=excluded.max_instances,
                     updated_at=excluded.updated_at,
-                    revision=excluded.revision,
+                    revision=scheduled_tasks.revision+1,
                     next_run_at=NULL
-                """,
-                (
-                    task_id,
-                    task.name,
-                    json.dumps(list(task.command)),
-                    task.schedule.to_json(),
-                    int(task.enabled),
-                    task.timeout,
-                    task.cwd,
-                    json.dumps(dict(task.environment), sort_keys=True),
-                    task.misfire_grace_time,
-                    int(task.coalesce),
-                    task.max_instances,
-                    _iso(existing.created_at if existing else task.created_at),
-                    _iso(now),
-                    revision,
-                    None,
-                ),
+                """
+                if replace_existing
+                else """
+                INSERT INTO scheduled_tasks (
+                    id, name, command_json, schedule_json, enabled, timeout, cwd,
+                    environment_json, misfire_grace_time, coalesce, max_instances,
+                    created_at, updated_at, revision, next_run_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
             )
-        result = self.get(task_id)
+            try:
+                db.execute(
+                    statement,
+                    (
+                        task_id,
+                        task.name,
+                        json.dumps(list(task.command)),
+                        task.schedule.to_json(),
+                        int(task.enabled),
+                        task.timeout,
+                        task.cwd,
+                        json.dumps(dict(task.environment), sort_keys=True),
+                        task.misfire_grace_time,
+                        int(task.coalesce),
+                        task.max_instances,
+                        _iso(existing.created_at if existing else task.created_at),
+                        _iso(now),
+                        revision,
+                        None,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                # Keep the no-replace contract under concurrent writers. The
+                # earlier lookup is useful for revisions but cannot by itself
+                # make the insert atomic.
+                if not replace_existing:
+                    raise ValueError(
+                        f"a scheduled task named {task.name!r} already exists"
+                    ) from exc
+                raise
+        # Resolve by the unique name: if another writer inserted the same name
+        # between our preflight read and an explicit replacement, SQLite keeps
+        # that row's id while applying the update.
+        result = self.get_by_name(task.name)
         assert result is not None
         return result
 
@@ -372,9 +396,16 @@ class SchedulerRepository:
         params: list[Any] = []
         where = ""
         if identifier:
-            task = self.resolve(identifier)
-            where = "WHERE r.task_id=?"
-            params.append(task.id)
+            task = self.get(identifier) or self.get_by_name(identifier)
+            if task is not None:
+                where = "WHERE r.task_id=?"
+                params.append(task.id)
+            else:
+                # Run history intentionally survives definition deletion. It
+                # must therefore remain addressable by the persisted task name
+                # after its foreign key is set to NULL on deletion.
+                where = "WHERE r.task_name=? OR r.task_id=?"
+                params.extend((identifier, identifier))
         params.append(limit)
         with self.connect() as db:
             rows = db.execute(
@@ -382,6 +413,8 @@ class SchedulerRepository:
                     {where} ORDER BY COALESCE(r.started_at, r.scheduled_for) DESC LIMIT ?""",
                 params,
             ).fetchall()
+        if identifier and not rows:
+            raise KeyError(f"scheduled task not found: {identifier}")
         return [dict(row) for row in rows]
 
     def heartbeat(self, *, pid: int, hostname: str, started_at: datetime) -> None:
