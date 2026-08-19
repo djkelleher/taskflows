@@ -4,7 +4,7 @@ import io
 import json
 import zipfile
 from pathlib import Path
-from unittest.mock import ANY, MagicMock
+from unittest.mock import ANY, MagicMock, call
 
 import pytest
 from botocore.exceptions import ClientError
@@ -114,6 +114,10 @@ def test_boto_backend_deploys_with_mocked_aws_clients():
     update = clients["lambda"].update_function_configuration.call_args.kwargs
     assert "Tags" not in update
     assert update["Handler"] == "index.handler"
+    assert update["VpcConfig"] == {"SecurityGroupIds": [], "SubnetIds": []}
+    assert update["DeadLetterConfig"] == {}
+    assert update["FileSystemConfigs"] == []
+    assert update["KMSKeyArn"] == ""
 
 
 def test_boto_backend_creates_and_publishes_a_new_function():
@@ -169,6 +173,53 @@ def test_boto_backend_reconciles_alias_schedule_retry_and_empty_payload():
         MaximumEventAgeInSeconds=600,
     )
     assert clients["events"].put_targets.call_args.kwargs["Targets"][0]["Arn"].endswith(":live")
+
+
+def test_boto_backend_replaces_unqualified_schedule_permission_when_alias_is_added():
+    environment, clients = boto_environment()
+    prefix = environment._schedule_prefix("demo")
+    clients["events"].list_rules.return_value = {"Rules": [{"Name": f"{prefix}0"}]}
+
+    result = environment.deploy_function(
+        packaged_function,
+        CloudFunctionConfig(
+            function_name="demo",
+            auto_create_role=False,
+            create_alias="live",
+            schedules=[Calendar(schedule="Mon 09:00")],
+        ),
+    )
+
+    assert result.success
+    statement_id = f"{prefix}0-invoke"
+    assert (
+        call(FunctionName="demo", StatementId=statement_id)
+        in clients["lambda"].remove_permission.call_args_list
+    )
+    assert (
+        call(FunctionName="demo", StatementId=statement_id, Qualifier="live")
+        in clients["lambda"].remove_permission.call_args_list
+    )
+
+
+def test_boto_backend_removes_managed_alarms_when_monitoring_is_disabled():
+    environment, clients = boto_environment()
+    clients["cloudwatch"] = MagicMock()
+    environment._clients["cloudwatch"] = clients["cloudwatch"]
+
+    result = environment.deploy_function(
+        packaged_function,
+        CloudFunctionConfig(
+            function_name="demo",
+            auto_create_role=False,
+            monitoring=MonitoringConfig(enable_cloudwatch_alarms=False),
+        ),
+    )
+
+    assert result.success
+    clients["cloudwatch"].delete_alarms.assert_called_once_with(
+        AlarmNames=["demo-duration", "demo-error-rate"]
+    )
 
 
 def test_boto_backend_removes_stale_managed_schedules():
@@ -282,6 +333,57 @@ def test_boto_backend_auto_creates_execution_role():
     assert result.success
     clients["iam"].create_role.assert_called_once()
     clients["iam"].attach_role_policy.assert_called()
+
+
+def test_boto_backend_grants_kms_permissions_for_encrypted_dlq():
+    environment, clients = boto_environment()
+    environment.config.execution_role_arn = None
+    clients["iam"].get_role.side_effect = client_error("NoSuchEntity")
+    clients["iam"].create_role.return_value = {"Role": {"Arn": "arn:aws:iam::123:role/demo-role"}}
+
+    result = environment.deploy_function(
+        packaged_function,
+        CloudFunctionConfig(
+            function_name="demo",
+            dead_letter_config=DeadLetterConfig(
+                target_arn="arn:aws:sqs:us-east-1:123:dead-letter",
+                kms_key_arn="arn:aws:kms:us-east-1:123:key/key-id",
+            ),
+        ),
+    )
+
+    assert result.success
+    policy = json.loads(clients["iam"].put_role_policy.call_args.kwargs["PolicyDocument"])
+    assert policy["Statement"][1] == {
+        "Effect": "Allow",
+        "Action": ["kms:Decrypt", "kms:GenerateDataKey"],
+        "Resource": "arn:aws:kms:us-east-1:123:key/key-id",
+    }
+
+
+def test_boto_backend_code_update_moves_managed_alias():
+    environment, clients = boto_environment()
+    clients["lambda"].get_function_configuration.return_value = {
+        "Runtime": "python3.11",
+        "Architectures": ["x86_64"],
+    }
+    clients["lambda"].update_function_code.return_value = {
+        "FunctionArn": "arn:aws:lambda:us-east-1:123:function:demo",
+        "Version": "3",
+    }
+    clients["lambda"].list_tags.return_value = {"Tags": {"taskflows:managed-alias": "live"}}
+    clients["lambda"].update_alias.side_effect = None
+    clients["lambda"].update_alias.return_value = {
+        "AliasArn": "arn:aws:lambda:us-east-1:123:function:demo:live"
+    }
+
+    result = environment.update_function_code("demo", packaged_function)
+
+    assert result.success
+    assert result.endpoint.endswith(":live")
+    clients["lambda"].update_alias.assert_called_once_with(
+        FunctionName="demo", Name="live", FunctionVersion="3"
+    )
 
 
 def test_boto_backend_uses_s3_for_large_package(monkeypatch):

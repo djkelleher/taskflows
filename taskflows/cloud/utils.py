@@ -83,6 +83,10 @@ def validate_aws_lambda_config(config: CloudFunctionConfig) -> None:
         ):
             raise ValueError("duration_threshold_ms must be positive")
     dlq = config.dead_letter_config
+    if dlq and dlq.auto_create and dlq.target_arn:
+        raise ValueError("dead-letter config must set either target_arn or auto_create, not both")
+    if dlq and dlq.kms_key_arn and not (dlq.target_arn or dlq.auto_create):
+        raise ValueError("dead-letter kms_key_arn requires a target_arn or auto_create=True")
     if dlq and dlq.target_arn:
         match = re.fullmatch(
             r"arn:[^:]+:(?P<service>sqs|sns):[^:]*:[^:]+:(?P<name>.+)",

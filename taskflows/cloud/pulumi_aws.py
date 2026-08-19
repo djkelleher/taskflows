@@ -77,6 +77,7 @@ class PulumiAWSEnvironment(CloudEnvironment):
         region: str = "us-east-1",
         work_dir: Path | None = None,
         auto_create_stack: bool = True,
+        lambda_kms_key_arn: str | None = None,
     ):
         """Initialize Pulumi AWS environment.
 
@@ -99,6 +100,7 @@ class PulumiAWSEnvironment(CloudEnvironment):
         self.work_dir = work_dir or Path.home() / ".taskflows" / "pulumi" / project_name
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.auto_create_stack = auto_create_stack
+        self.lambda_kms_key_arn = lambda_kms_key_arn
 
         # Create project structure
         self._init_pulumi_project()
@@ -158,8 +160,12 @@ description: TaskFlows cloud deployment infrastructure
             validate_lambda_package(deployment_package)
             package_size_mb = len(deployment_package) / (1024 * 1024)
 
-            # Determine deployment method
-            use_s3 = config.use_s3_for_large_packages and package_size_mb > 50
+            # FileArchive uses Lambda's direct upload path, which has the same
+            # 50 MB compressed limit as the boto3 backend.
+            package_is_large = len(deployment_package) > 50 * 1024 * 1024
+            if package_is_large and not config.use_s3_for_large_packages:
+                raise ValueError("deployment package exceeds Lambda's 50 MB direct-upload limit")
+            use_s3 = package_is_large
 
             # Create Pulumi program
             def pulumi_program():
@@ -343,6 +349,12 @@ description: TaskFlows cloud deployment infrastructure
         if config.architecture != "x86_64":
             lambda_args["architectures"] = [config.architecture]
 
+        if getattr(self, "lambda_kms_key_arn", None):
+            lambda_args["kms_key_arn"] = self.lambda_kms_key_arn
+
+        if config.code_signing_config_arn:
+            lambda_args["code_signing_config_arn"] = config.code_signing_config_arn
+
         if config.tags:
             lambda_args["tags"] = config.tags
 
@@ -452,7 +464,7 @@ description: TaskFlows cloud deployment infrastructure
         )
 
         # Attach VPC execution policy if in VPC
-        if config.vpc_config:
+        if config.vpc_config or (config.security_group_ids and config.subnet_ids):
             aws.iam.RolePolicyAttachment(
                 f"{config.function_name}-vpc-execution",
                 role=role.name,
@@ -469,23 +481,32 @@ description: TaskFlows cloud deployment infrastructure
                 )
 
         if dlq_arn:
+            statements: list[dict[str, Any]] = [
+                {
+                    "Effect": "Allow",
+                    "Action": (
+                        "sns:Publish"
+                        if isinstance(dlq_arn, str) and ":sns:" in dlq_arn
+                        else "sqs:SendMessage"
+                    ),
+                    "Resource": dlq_arn,
+                }
+            ]
+            if config.dead_letter_config and config.dead_letter_config.kms_key_arn:
+                statements.append(
+                    {
+                        "Effect": "Allow",
+                        "Action": ["kms:Decrypt", "kms:GenerateDataKey"],
+                        "Resource": config.dead_letter_config.kms_key_arn,
+                    }
+                )
             aws.iam.RolePolicy(
                 f"{config.function_name}-dlq-policy",
                 role=role.name,
                 policy=pulumi.Output.json_dumps(
                     {
                         "Version": "2012-10-17",
-                        "Statement": [
-                            {
-                                "Effect": "Allow",
-                                "Action": (
-                                    "sns:Publish"
-                                    if isinstance(dlq_arn, str) and ":sns:" in dlq_arn
-                                    else "sqs:SendMessage"
-                                ),
-                                "Resource": dlq_arn,
-                            }
-                        ],
+                        "Statement": statements,
                     }
                 ),
             )
@@ -498,6 +519,9 @@ description: TaskFlows cloud deployment infrastructure
             f"{config.function_name}-dlq",
             name=f"{config.function_name}-dlq",
             message_retention_seconds=1209600,  # 14 days
+            kms_master_key_id=(
+                config.dead_letter_config.kms_key_arn if config.dead_letter_config else None
+            ),
             tags=config.tags,
         )
         return dlq
