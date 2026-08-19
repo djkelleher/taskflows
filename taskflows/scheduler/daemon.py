@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import platform
 import signal
@@ -106,6 +107,7 @@ class SchedulerDaemon:
         self._submitted_date_jobs: set[str] = set()
         self._submitted_lock = threading.RLock()
         self._known_date_revisions: dict[str, int] = {}
+        self._known_revisions: dict[str, int] = {}
         database_url = f"sqlite:///{self.database_path.as_posix()}"
         self.scheduler = BackgroundScheduler(
             jobstores={
@@ -134,17 +136,26 @@ class SchedulerDaemon:
     def _on_scheduler_event(self, event: JobExecutionEvent) -> None:
         if not event.job_id.startswith(JOB_PREFIX):
             return
+        with self._submitted_lock:
+            known_revision = self._known_revisions.get(event.job_id)
+            is_known_date = event.job_id in self._known_date_revisions
+            if event.code == EVENT_JOB_SUBMITTED and is_known_date:
+                self._submitted_date_jobs.add(event.job_id)
+            elif event.code in (EVENT_JOB_EXECUTED, EVENT_JOB_ERROR):
+                # Completion must release the one-shot guard even when the task
+                # was deleted or replaced while its old revision was running.
+                self._submitted_date_jobs.discard(event.job_id)
         task = self.repository.get(event.job_id.removeprefix(JOB_PREFIX))
         if task is None:
             return
+        # Events can arrive after the registry definition was replaced but
+        # before reconciliation updates APScheduler. Never attribute an old
+        # job's event to (or disable) the new definition.
+        if known_revision is not None and task.revision != known_revision:
+            return
         if event.code == EVENT_JOB_SUBMITTED:
-            if task.schedule.kind == "date":
-                with self._submitted_lock:
-                    self._submitted_date_jobs.add(event.job_id)
             return
         if event.code in (EVENT_JOB_EXECUTED, EVENT_JOB_ERROR):
-            with self._submitted_lock:
-                self._submitted_date_jobs.discard(event.job_id)
             return
         scheduled_times = getattr(event, "scheduled_run_times", None) or [
             getattr(event, "scheduled_run_time", utc_now())
@@ -157,7 +168,7 @@ class SchedulerDaemon:
         for scheduled_time in scheduled_times:
             self.repository.record_missed(task, scheduled_time, reason)
         if task.schedule.kind == "date":
-            self.repository.set_enabled(task.id, False)
+            self.repository.set_enabled(task.id, False, expected_revision=task.revision)
 
     def start(self) -> None:
         if self._started:
@@ -166,9 +177,16 @@ class SchedulerDaemon:
         # Pausing is important: persisted jobs must not fire before stale or
         # deleted Taskflows definitions have been reconciled.
         self.scheduler.start(paused=True)
-        self.reconcile()
-        self.scheduler.resume()
         self._started = True
+        try:
+            self.reconcile()
+            self.scheduler.resume()
+        except Exception:
+            # Do not leave APScheduler's worker/background threads alive when
+            # initial reconciliation fails (for example, on corrupt state).
+            self.scheduler.shutdown(wait=False)
+            self._started = False
+            raise
 
     def _add_or_update(self, task: ScheduledTask, existing: Any = None) -> Any:
         job_id = self._job_id(task.id)
@@ -185,9 +203,12 @@ class SchedulerDaemon:
                 return existing
         existing_revision = existing.kwargs.get("revision") if existing else None
         if existing is not None and existing_revision == task.revision:
-            if task.schedule.kind == "date":
-                with self._submitted_lock:
+            with self._submitted_lock:
+                self._known_revisions[job_id] = task.revision
+                if task.schedule.kind == "date":
                     self._known_date_revisions[job_id] = task.revision
+                else:
+                    self._known_date_revisions.pop(job_id, None)
             return existing
 
         if task.schedule.kind == "date":
@@ -197,7 +218,7 @@ class SchedulerDaemon:
                 late_by = (utc_now() - run_at.astimezone(UTC)).total_seconds()
                 if late_by > grace:
                     self.repository.record_missed(task, run_at, "misfire grace time exceeded")
-                    self.repository.set_enabled(task.id, False)
+                    self.repository.set_enabled(task.id, False, expected_revision=task.revision)
                     if existing:
                         self.scheduler.remove_job(job_id)
                     return None
@@ -217,9 +238,12 @@ class SchedulerDaemon:
             misfire_grace_time=task.misfire_grace_time,
             max_instances=task.max_instances,
         )
-        if task.schedule.kind == "date":
-            with self._submitted_lock:
+        with self._submitted_lock:
+            self._known_revisions[job_id] = task.revision
+            if task.schedule.kind == "date":
                 self._known_date_revisions[job_id] = task.revision
+            else:
+                self._known_date_revisions.pop(job_id, None)
         return job
 
     def reconcile(self) -> None:
@@ -230,6 +254,9 @@ class SchedulerDaemon:
             if job.id.startswith(JOB_PREFIX) and job.id not in desired_ids:
                 self.scheduler.remove_job(job.id)
                 jobs.pop(job.id, None)
+                with self._submitted_lock:
+                    self._known_revisions.pop(job.id, None)
+                    self._known_date_revisions.pop(job.id, None)
         for task in tasks:
             if task.enabled:
                 job_id = self._job_id(task.id)
@@ -253,8 +280,8 @@ class SchedulerDaemon:
         lock_path = self.database_path.with_suffix(".lock")
         with _SingletonLock(lock_path):
             self.start()
-            self.heartbeat()
             try:
+                self.heartbeat()
                 while not self.stop_event.wait(self.reconcile_interval):
                     self.reconcile()
                     self.heartbeat()
@@ -271,8 +298,11 @@ class SchedulerDaemon:
         self._started = False
 
 
-def main() -> None:
-    daemon = SchedulerDaemon()
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Run the Taskflows portable scheduler daemon")
+    parser.add_argument("--database", help="Path to the scheduler SQLite registry")
+    arguments = parser.parse_args(argv)
+    daemon = SchedulerDaemon(arguments.database)
     if threading.current_thread() is threading.main_thread():
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, daemon.request_stop)

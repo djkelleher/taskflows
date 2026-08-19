@@ -140,13 +140,16 @@ def logql_string(value: str) -> str:
 
 
 def sort_service_names(services: Iterable[str]) -> list[str]:
-    """Naturally order names while keeping raw stop units beside their service.
+    """Naturally order names while keeping auxiliary units beside their service.
 
     The previous nearest-neighbour LCS sort was quadratic and dominated
     `tf list`/`tf status` at a few hundred services. This key-based ordering is
     deterministic and O(n log n).
     """
-    stop_prefix = f"stop-{_SYSTEMD_FILE_PREFIX}"
+    auxiliary_prefixes = (
+        f"stop-{_SYSTEMD_FILE_PREFIX}",
+        f"restart-{_SYSTEMD_FILE_PREFIX}",
+    )
 
     def natural_key(value: str) -> tuple[tuple[bool, int | str], ...]:
         return tuple(
@@ -156,9 +159,14 @@ def sort_service_names(services: Iterable[str]) -> list[str]:
         )
 
     def key(value: str):
-        is_stop = value.startswith(stop_prefix)
-        base = value.removeprefix(stop_prefix) if is_stop else value
-        return natural_key(base), is_stop, natural_key(value)
+        auxiliary_rank = 0
+        base = value
+        for rank, prefix in enumerate(auxiliary_prefixes, start=1):
+            if value.startswith(prefix):
+                auxiliary_rank = rank
+                base = value.removeprefix(prefix)
+                break
+        return natural_key(base), auxiliary_rank, natural_key(value)
 
     return sorted(services, key=key)
 

@@ -14,8 +14,13 @@ def test_logql_string_escapes_quotes_and_backslashes():
 def test_sort_service_names_keeps_first_service_stop_pair():
     service = "etl"
     stop_service = f"stop-{_SYSTEMD_FILE_PREFIX}{service}"
+    restart_service = f"restart-{_SYSTEMD_FILE_PREFIX}{service}"
 
-    assert sort_service_names([service, stop_service]) == [service, stop_service]
+    assert sort_service_names([restart_service, service, stop_service]) == [
+        service,
+        stop_service,
+        restart_service,
+    ]
 
 
 def test_sort_service_names_preserves_unmatched_stop_services():

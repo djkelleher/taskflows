@@ -17,6 +17,7 @@ from dynamic_imports import find_instances
 from taskflows.alerts.components import Component, Map, Table, Text
 from taskflows.alerts.utils import as_code_block
 from taskflows.common import (
+    _SYSTEMD_FILE_PREFIX,
     config,
     load_service_files,
     logger,
@@ -366,8 +367,8 @@ async def status(
                 if not file_path.endswith(".timer"):
                     continue
                 stem = Path(file_path).stem
-                # An orphan timer is not a service and must not create a fake
-                # row (or trigger a failing service property lookup).
+                # Orphan timers are not services and must not create fake rows
+                # or trigger a failing service-property lookup in detail mode.
                 if stem in units_meta:
                     units_meta[stem]["Timer\nEnabled"] = enabled_status
 
@@ -379,7 +380,13 @@ async def status(
 
                 async def schedule_info(unit_name: str):
                     async with semaphore:
-                        return unit_name, await get_schedule_info(unit_name)
+                        try:
+                            return unit_name, await get_schedule_info(unit_name)
+                        except Exception as exc:
+                            logger.warning(
+                                f"Could not read schedule details for {unit_name}: {exc}"
+                            )
+                            return unit_name, {}
 
                 detail_rows = await asyncio.gather(
                     *(schedule_info(unit_name) for unit_name in units_meta)
@@ -394,11 +401,16 @@ async def status(
 
             # Add public service names.
             for unit_name, unit_data in units_meta.items():
-                auxiliary_prefix = next(
-                    (prefix for prefix in ("stop-", "restart-") if unit_name.startswith(prefix)),
-                    "",
+                stem = Path(unit_name).stem
+                auxiliary = stem.startswith(
+                    (f"stop-{_SYSTEMD_FILE_PREFIX}", f"restart-{_SYSTEMD_FILE_PREFIX}")
                 )
-                unit_data["Service"] = auxiliary_prefix + extract_service_name(unit_name)
+                # Keep auxiliary unit names intact. Shortening them to
+                # ``stop-<name>`` collides with a legitimate service whose
+                # public name itself begins with ``stop-``.
+                public_name = stem if auxiliary else extract_service_name(stem)
+                unit_data["Service"] = public_name
+                unit_data["_auxiliary"] = auxiliary
                 unit_data.setdefault("load_state", "not-loaded")
                 unit_data.setdefault("active_state", "inactive")
                 unit_data.setdefault("sub_state", "dead")
@@ -418,7 +430,7 @@ async def status(
                     continue
 
                 # Filter out stop-* and restart-* services unless all flag is set
-                if not all and srv_name.startswith(("stop-", "restart-")):
+                if not all and row["_auxiliary"]:
                     continue
 
                 if details:

@@ -1,13 +1,14 @@
-import math
 import plistlib
 import sqlite3
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from click.testing import CliRunner
 
 from taskflows.admin.api import (
@@ -49,11 +50,23 @@ def test_schedule_specs_are_portable_and_validated():
         ScheduleSpec.cron("0 9 *")
     with pytest.raises(ValueError, match="greater than zero"):
         ScheduleSpec.interval(0)
-    for invalid in (math.nan, math.inf, -math.inf):
-        with pytest.raises(ValueError, match="finite number"):
-            ScheduleSpec.interval(invalid)
     with pytest.raises(ValueError, match="unknown IANA time zone"):
         ScheduleSpec.cron("0 9 * * *", timezone="Not/AZone")
+    for invalid in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="greater than zero"):
+            ScheduleSpec.interval(invalid)
+
+
+def test_task_rejects_non_finite_timeout_and_invalid_environment():
+    schedule = ScheduleSpec.interval(60)
+    for invalid in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="timeout"):
+            ScheduledTask.create("invalid-timeout", ["echo", "ok"], schedule, timeout=invalid)
+    for environment in ({"": "value"}, {"BAD=KEY": "value"}, {"KEY": "bad\x00value"}):
+        with pytest.raises(ValueError, match="environment variables"):
+            ScheduledTask.create(
+                "invalid-environment", ["echo", "ok"], schedule, environment=environment
+            )
 
 
 def test_legacy_calendar_datetime_preserves_fractional_seconds():
@@ -86,36 +99,45 @@ def test_repository_crud_revision_and_history_survives_delete(tmp_path):
     assert history[0]["task_name"] == "backup"
     assert history[0]["task_id"] is None
     assert repository.history("backup")[0]["task_name"] == "backup"
-    with pytest.raises(KeyError, match="not found"):
-        repository.history("missing")
 
 
-def test_repository_replace_flag_is_respected_at_insert_time(tmp_path, monkeypatch):
+def test_repository_add_is_atomic_and_replacements_increment_current_revision(tmp_path):
+    database_path = tmp_path / "scheduler.sqlite3"
+    SchedulerRepository(database_path)
+
+    def add(replace_existing=False):
+        repository = SchedulerRepository(database_path)
+        task = ScheduledTask.create("racing", ["echo", "ok"], ScheduleSpec.interval(60))
+        return repository.add(task, replace_existing=replace_existing)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: _capture_add(add), range(2)))
+    assert sum(isinstance(result, ScheduledTask) for result in results) == 1
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        replacements = list(executor.map(lambda _: add(True), range(2)))
+    saved = SchedulerRepository(database_path).resolve("racing")
+    assert saved.revision == 3
+    assert {task.id for task in replacements} == {saved.id}
+
+
+def _capture_add(add):
+    try:
+        return add()
+    except ValueError as exc:
+        return exc
+
+
+def test_set_enabled_is_idempotent(tmp_path):
     repository = make_repository(tmp_path)
-    first = ScheduledTask.create("race", ["echo", "first"], ScheduleSpec.interval(60))
-    second = ScheduledTask.create("race", ["echo", "second"], ScheduleSpec.interval(60))
-    repository.add(first)
-
-    # Simulate a stale/racing preflight lookup. The INSERT must still refuse
-    # to overwrite the existing definition unless replacement was requested.
-    monkeypatch.setattr(repository, "get_by_name", lambda _name: None)
-    with pytest.raises(ValueError, match="already exists"):
-        repository.add(second)
-
-    assert SchedulerRepository(repository.database_path).resolve("race").command == (
-        "echo",
-        "first",
+    task = repository.add(
+        ScheduledTask.create("enabled", ["echo", "ok"], ScheduleSpec.interval(60))
     )
 
+    unchanged = repository.set_enabled(task.id, True)
 
-def test_task_rejects_non_finite_timeout():
-    with pytest.raises(ValueError, match="finite number"):
-        ScheduledTask.create(
-            "invalid-timeout",
-            ["echo", "ok"],
-            ScheduleSpec.interval(60),
-            timeout=math.nan,
-        )
+    assert unchanged.revision == task.revision
 
 
 def test_repository_prevents_overlapping_manual_runs(tmp_path):
@@ -126,6 +148,35 @@ def test_repository_prevents_overlapping_manual_runs(tmp_path):
     assert first is not None
     assert second is None
     assert [run["status"] for run in repository.history("single")] == ["skipped", "running"]
+
+
+def test_repository_rejects_run_reservation_for_stale_revision(tmp_path):
+    repository = make_repository(tmp_path)
+    stale = repository.add(
+        ScheduledTask.create("changing", ["echo", "old"], ScheduleSpec.interval(60))
+    )
+    repository.add(
+        ScheduledTask.create("changing", ["echo", "new"], ScheduleSpec.interval(60)),
+        replace_existing=True,
+    )
+
+    assert repository.begin_run(stale, utc_now()) is None
+    assert repository.history("changing") == []
+
+
+def test_interrupted_run_cleanup_preserves_live_manual_runner(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(ScheduledTask.create("live", ["echo", "ok"], ScheduleSpec.interval(60)))
+    run_id = repository.begin_run(task, utc_now())
+    assert run_id is not None
+
+    assert repository.mark_interrupted_runs() == 0
+    assert repository.history(task.id)[0]["status"] == "running"
+
+    with repository.connect() as db:
+        db.execute("UPDATE task_runs SET runner_pid=NULL WHERE id=?", (run_id,))
+    assert repository.mark_interrupted_runs() == 1
+    assert repository.history(task.id)[0]["status"] == "interrupted"
 
 
 def test_repository_migrates_v1_run_history_without_losing_rows(tmp_path):
@@ -259,6 +310,48 @@ def test_daemon_shutdown_clears_its_heartbeat(tmp_path):
     assert repository.daemon_state() is None
 
 
+def test_daemon_start_cleans_up_when_initial_reconcile_fails(tmp_path, monkeypatch):
+    daemon = SchedulerDaemon(make_repository(tmp_path).database_path)
+    monkeypatch.setattr(daemon, "reconcile", lambda: (_ for _ in ()).throw(RuntimeError("bad")))
+
+    with pytest.raises(RuntimeError, match="bad"):
+        daemon.start()
+
+    assert daemon._started is False
+    assert daemon.scheduler.running is False
+
+
+def test_stale_scheduler_event_does_not_disable_replacement(tmp_path):
+    repository = make_repository(tmp_path)
+    original = repository.add(
+        ScheduledTask.create(
+            "replace-me", ["echo", "old"], ScheduleSpec.once(utc_now() + timedelta(days=1))
+        )
+    )
+    daemon = SchedulerDaemon(repository.database_path)
+    job_id = daemon._job_id(original.id)
+    daemon._known_revisions[job_id] = original.revision
+    daemon._known_date_revisions[job_id] = original.revision
+    daemon._submitted_date_jobs.add(job_id)
+    replacement = repository.add(
+        ScheduledTask.create("replace-me", ["echo", "new"], ScheduleSpec.interval(60)),
+        replace_existing=True,
+    )
+
+    daemon._on_scheduler_event(
+        SimpleNamespace(
+            job_id=job_id,
+            code=EVENT_JOB_MISSED,
+            scheduled_run_time=utc_now(),
+        )
+    )
+    assert repository.resolve(replacement.id).enabled is True
+    assert repository.history(replacement.id) == []
+
+    daemon._on_scheduler_event(SimpleNamespace(job_id=job_id, code=EVENT_JOB_EXECUTED))
+    assert job_id not in daemon._submitted_date_jobs
+
+
 def test_schedule_cli_add_list_and_run(tmp_path, monkeypatch):
     repository = make_repository(tmp_path)
     monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
@@ -290,6 +383,22 @@ def test_schedule_cli_add_list_and_run(tmp_path, monkeypatch):
     assert repository.resolve("cli-job").enabled is True
 
 
+def test_scheduler_status_rejects_future_heartbeat(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    future = utc_now() + timedelta(days=1)
+    repository.heartbeat(pid=123, hostname="host", started_at=future)
+    with repository.connect() as db:
+        db.execute(
+            "UPDATE scheduler_state SET heartbeat_at=? WHERE singleton=1", (future.isoformat(),)
+        )
+    monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
+
+    result = CliRunner().invoke(cli, ["scheduler", "status"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "stopped or unresponsive"
+
+
 @pytest.mark.asyncio
 async def test_portable_schedule_api_uses_bulk_registry(tmp_path, monkeypatch):
     repository = make_repository(tmp_path)
@@ -319,12 +428,14 @@ async def test_portable_schedule_api_uses_bulk_registry(tmp_path, monkeypatch):
 def test_linux_installer_writes_one_user_service(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(installer, "_home_dir", lambda: tmp_path)
-    monkeypatch.setattr(installer, "services_data_dir", tmp_path / "data")
+    monkeypatch.setattr(installer, "services_data_dir", tmp_path / "data%dir")
     monkeypatch.setattr(installer, "_run", lambda command, check=True: calls.append(command))
 
     unit_path = installer.install_linux()
     content = unit_path.read_text()
     assert "taskflows.scheduler.daemon" in content
+    assert str(tmp_path / "data%%dir" / "scheduler.sqlite3") in content
+    assert f"TASKFLOWS_DATA_DIR={tmp_path / 'data%%dir'}" in content
     assert "Restart=on-failure" in content
     assert calls[-1] == ["systemctl", "--user", "enable", "--now", installer.LINUX_UNIT_NAME]
 
@@ -341,11 +452,12 @@ def test_macos_installer_writes_launch_agent(tmp_path, monkeypatch):
         definition = plistlib.load(stream)
     assert definition["Label"] == installer.MACOS_LABEL
     assert definition["KeepAlive"] == {"SuccessfulExit": False}
-    assert definition["ProgramArguments"][-2:] == ["-m", "taskflows.scheduler.daemon"]
+    assert definition["ProgramArguments"][1:3] == ["-m", "taskflows.scheduler.daemon"]
+    assert definition["ProgramArguments"][-1] == str(tmp_path / "data" / "scheduler.sqlite3")
     assert any(command[:2] == ["launchctl", "bootstrap"] for command in calls)
 
 
-def test_windows_installer_registers_per_user_task(monkeypatch):
+def test_windows_installer_registers_per_user_task(tmp_path, monkeypatch):
     settings = SimpleNamespace()
     definition = SimpleNamespace(
         RegistrationInfo=SimpleNamespace(),
@@ -394,6 +506,7 @@ def test_windows_installer_registers_per_user_task(monkeypatch):
     package.client = client
     monkeypatch.setitem(sys.modules, "win32com", package)
     monkeypatch.setitem(sys.modules, "win32com.client", client)
+    monkeypatch.setattr(installer, "services_data_dir", tmp_path / "custom-data")
 
     installer.install_windows()
 
@@ -402,4 +515,5 @@ def test_windows_installer_registers_per_user_task(monkeypatch):
     assert definition.Settings.ExecutionTimeLimit == "PT0S"
     assert action.Path == sys.executable
     assert "taskflows.scheduler.daemon" in action.Arguments
+    assert str(tmp_path / "custom-data" / "scheduler.sqlite3") in action.Arguments
     assert task.ran

@@ -86,34 +86,34 @@ def service_logs(service_name: str, n_lines: int = 1000):
 async def get_schedule_info(unit: str):
     """Get the schedule information for a unit."""
     unit_stem = Path(unit).stem
-    prefixed = unit_stem.startswith(_SYSTEMD_FILE_PREFIX) or unit_stem.startswith(
-        (f"stop-{_SYSTEMD_FILE_PREFIX}", f"restart-{_SYSTEMD_FILE_PREFIX}")
+    accepted_prefixes = (
+        _SYSTEMD_FILE_PREFIX,
+        f"stop-{_SYSTEMD_FILE_PREFIX}",
+        f"restart-{_SYSTEMD_FILE_PREFIX}",
     )
-    if not prefixed:
+    if not unit_stem.startswith(accepted_prefixes):
         unit_stem = f"{_SYSTEMD_FILE_PREFIX}{unit_stem}"
     manager = await systemd_manager()
     bus = await session_dbus()
 
-    async def service_properties():
-        service_path = await manager.call_load_unit(f"{unit_stem}.service")
-        service_proxy = await _get_unit_proxy(bus, service_path)
-        properties = service_proxy.get_interface("org.freedesktop.DBus.Properties")
-        return await properties.call_get_all("org.freedesktop.systemd1.Unit")
-
-    async def timer_properties():
-        # Long-running services need not have a matching timer. Missing timer
-        # metadata must not make `status --details` fail for the entire service
-        # list, while service lookup failures should still be surfaced.
+    async def properties(suffix: str, interface: str, *, required: bool):
         try:
-            timer_path = await manager.call_load_unit(f"{unit_stem}.timer")
-            timer_proxy = await _get_unit_proxy(bus, timer_path)
-            properties = timer_proxy.get_interface("org.freedesktop.DBus.Properties")
-            return await properties.call_get_all("org.freedesktop.systemd1.Timer")
+            path = await manager.call_load_unit(f"{unit_stem}.{suffix}")
+            proxy = await _get_unit_proxy(bus, path)
+            return await proxy.get_interface("org.freedesktop.DBus.Properties").call_get_all(
+                interface
+            )
         except DBusError as exc:
-            logger.debug(f"No timer metadata for {unit_stem}: {exc}")
-            return {}
+            if not required and exc.type.endswith(".NoSuchUnit"):
+                return {}
+            raise
 
-    service_values, timer_values = await asyncio.gather(service_properties(), timer_properties())
+    # Fetch each interface in one operation. A timer is optional: long-running
+    # services without one must still be inspectable with `tf status --details`.
+    service_values, timer_values = await asyncio.gather(
+        properties("service", "org.freedesktop.systemd1.Unit", required=True),
+        properties("timer", "org.freedesktop.systemd1.Timer", required=False),
+    )
     schedule = {
         "Last Start": service_values.get("ActiveEnterTimestamp", 0),
         "Last Finish": service_values.get("ActiveExitTimestamp", 0),
@@ -128,7 +128,7 @@ async def get_schedule_info(unit: str):
             if not timestamp:
                 return None
             return datetime.fromtimestamp(timestamp / 1_000_000, tz=UTC)
-        except (ValueError, TypeError):
+        except (OverflowError, ValueError, TypeError):
             # "year 586524 is out of range" or type error
             return None
 

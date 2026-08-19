@@ -20,7 +20,14 @@ def _home_dir() -> Path:
 
 
 def _daemon_command() -> list[str]:
-    return [sys.executable, "-m", "taskflows.scheduler.daemon"]
+    database_path = (services_data_dir / "scheduler.sqlite3").resolve()
+    return [
+        sys.executable,
+        "-m",
+        "taskflows.scheduler.daemon",
+        "--database",
+        str(database_path),
+    ]
 
 
 def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -35,9 +42,13 @@ def install_linux() -> Path:
     unit_dir = _home_dir() / ".config" / "systemd" / "user"
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit_path = unit_dir / LINUX_UNIT_NAME
-    command = shlex.join(_daemon_command())
+    # systemd expands percent specifiers even in quoted command/environment
+    # values, so literal path components must double them.
+    command = shlex.join(part.replace("%", "%%") for part in _daemon_command())
     data_dir = services_data_dir.resolve()
-    environment_assignment = str(data_dir).replace("\\", "\\\\").replace('"', '\\"')
+    environment_assignment = (
+        str(data_dir).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+    )
     content = f"""[Unit]
 Description=Taskflows portable scheduler
 After=default.target
@@ -129,8 +140,9 @@ def install_windows() -> None:
 
     definition.Triggers.Create(9)  # TASK_TRIGGER_LOGON
     action = definition.Actions.Create(0)  # TASK_ACTION_EXEC
-    action.Path = sys.executable
-    action.Arguments = subprocess.list2cmdline(["-m", "taskflows.scheduler.daemon"])
+    command = _daemon_command()
+    action.Path = command[0]
+    action.Arguments = subprocess.list2cmdline(command[1:])
     action.WorkingDirectory = str(_home_dir())
     # TASK_CREATE_OR_UPDATE, current interactive user, no stored password.
     folder.RegisterTaskDefinition(WINDOWS_TASK_NAME, definition, 6, "", "", 3)
