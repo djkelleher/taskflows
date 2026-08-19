@@ -38,6 +38,28 @@ jobs:
       - name: Run unit tests
         run: uv run --no-sources pytest -m "not integration" --timeout=120
 
+  portable-scheduler:
+    name: Portable scheduler (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install scheduler and API test dependencies
+        run: uv sync --no-sources --extra server
+      - name: Exercise persistence, dispatch, process control, CLI, and installers
+        run: >-
+          uv run --no-sources pytest
+          tests/test_scheduler.py
+          tests/test_entrypoints.py
+          tests/test_import_hygiene.py
+          --timeout=120
+
   install-smoke:
     runs-on: ubuntu-latest
     steps:

@@ -1,6 +1,6 @@
 # taskflows
 
-A Python library for task management, service scheduling, and alerting. Convert functions into managed tasks with logging, alerts, and retries. Create systemd services that run on flexible schedules with resource constraints.
+A Python library for cross-platform scheduled tasks, Linux service management, and alerting. Run short-lived commands on Windows, macOS, or Linux with one portable scheduler daemon; use systemd services when Linux-specific supervision and resource controls are needed.
 
 ## Table of Contents
 
@@ -8,6 +8,7 @@ A Python library for task management, service scheduling, and alerting. Convert 
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Tasks](#tasks)
+  - [Portable Scheduled Commands](#portable-scheduled-commands)
   - [Task Decorator](#task-decorator)
   - [Programmatic Task Execution](#programmatic-task-execution)
   - [Alerts](#alerts)
@@ -50,6 +51,12 @@ A Python library for task management, service scheduling, and alerting. Convert 
   - Configurable restart policies
   - Resource constraints (CPU, memory, I/O)
 
+- **Portable scheduling** on Linux, macOS, and Windows:
+  - One-time, interval, and five-field cron schedules
+  - Persistent schedules and missed-run handling
+  - Process-tree timeouts, overlap limits, and captured output
+  - SQLite-backed bulk status and run history
+
 - **Environments**: Run services in:
   - Conda/Mamba virtual environments
   - Docker containers with full configuration
@@ -76,6 +83,9 @@ sudo apt install dbus libdbus-1-dev
 # Enable user services to run without login
 loginctl enable-linger
 ```
+
+The prerequisites above apply only to Linux `Service` objects. Portable
+scheduled commands do not require systemd.
 
 ## Quick Start
 
@@ -124,6 +134,42 @@ experimental. Read the [supported contract and limitations](docs/cloud.md)
 before deploying; the feature has not yet completed a live AWS certification.
 
 ## Tasks
+
+### Portable Scheduled Commands
+
+For short-lived commands, install one scheduler daemon and add tasks to the
+portable registry:
+
+```bash
+# Installs a systemd user service, macOS LaunchAgent, or per-user Windows task.
+tf scheduler install
+
+# One-time execution. Timestamps must include an offset or Z.
+tf schedule add cleanup --at 2026-08-20T02:00:00Z -- python cleanup.py
+
+# Every five minutes.
+tf schedule add refresh --interval 300 --timeout 120 -- python refresh.py
+
+# Weekdays at 09:00 New York time.
+tf schedule add report --cron '0 9 * * mon-fri' \
+  --timezone America/New_York -- python report.py
+
+tf schedule list
+tf schedule history report
+tf schedule run report
+tf schedule disable report
+```
+
+The Taskflows SQLite registry is authoritative. APScheduler maintains its own
+persistent dispatch state in that database and is reconciled from Taskflows
+definitions. Only task IDs are placed in scheduler jobs; commands and
+environment values remain in the Taskflows registry. Run stdout and stderr are
+written under `~/.taskflows/data/runs/`.
+
+Use portable schedules for bounded jobs. Continue to use `Service` for
+long-running Linux daemons, cgroups, watchdogs, and systemd dependency graphs.
+See [portable scheduling](docs/portable-scheduling.md) for reliability and
+platform details.
 
 ### Task Decorator
 

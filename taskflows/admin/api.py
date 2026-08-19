@@ -47,6 +47,7 @@ from taskflows.admin.core import (
     status as service_status,
 )
 from taskflows.admin.grafana_proxy import router as grafana_router
+from taskflows.admin.models import PortableScheduleRequest
 from taskflows.admin.security import (
     create_csrf_token_data,
     get_csrf_token_data,
@@ -59,6 +60,9 @@ from taskflows.admin.security import (
 from taskflows.admin.utils import with_hostname
 from taskflows.common import Config, logger
 from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
+from taskflows.scheduler.models import ScheduledTask, ScheduleSpec
+from taskflows.scheduler.repository import SchedulerRepository
+from taskflows.scheduler.runner import run_now as run_scheduled_now
 from taskflows.service import RestartPolicy, Service, Venv
 
 config = Config()
@@ -539,8 +543,11 @@ async def status_endpoint(
     match: str | None = Query(None),
     running: bool = Query(False),
     all: bool = Query(False),
+    details: bool = Query(False),
 ):
-    return await service_status(match=match, running=running, all=all, as_json=True)
+    return await service_status(
+        match=match, running=running, all=all, details=details, as_json=True
+    )
 
 
 @app.get("/logs/{service_name}")
@@ -632,6 +639,121 @@ async def remove_endpoint(match: str = Body(..., embed=True)):
     return await remove(match=match, as_json=True)
 
 
+def _portable_task_data(task: ScheduledTask) -> dict:
+    """Public schedule representation; deliberately excludes environment values."""
+    return {
+        "id": task.id,
+        "name": task.name,
+        "command": list(task.command),
+        "schedule": {
+            "kind": task.schedule.kind,
+            "value": task.schedule.value,
+            "timezone": task.schedule.timezone,
+            "start_at": task.schedule.start_at,
+        },
+        "enabled": task.enabled,
+        "timeout": task.timeout,
+        "cwd": task.cwd,
+        "misfire_grace_time": task.misfire_grace_time,
+        "coalesce": task.coalesce,
+        "max_instances": task.max_instances,
+        "next_run_at": task.next_run_at.isoformat() if task.next_run_at else None,
+    }
+
+
+@app.get("/api/schedules")
+async def list_portable_schedules(match: str | None = Query(None)):
+    tasks = await asyncio.to_thread(SchedulerRepository().list, match=match)
+    return {"schedules": [_portable_task_data(task) for task in tasks]}
+
+
+@app.post("/api/schedules", status_code=status.HTTP_201_CREATED)
+async def create_portable_schedule(request: PortableScheduleRequest):
+    selected = sum(
+        value is not None for value in (request.run_at, request.interval_seconds, request.cron)
+    )
+    if selected != 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="provide exactly one of run_at, interval_seconds, or cron",
+        )
+    try:
+        if request.run_at is not None:
+            schedule = ScheduleSpec.once(request.run_at)
+        elif request.interval_seconds is not None:
+            schedule = ScheduleSpec.interval(request.interval_seconds, timezone=request.timezone)
+        else:
+            schedule = ScheduleSpec.cron(request.cron or "", timezone=request.timezone)
+        task = ScheduledTask.create(
+            request.name,
+            request.command,
+            schedule,
+            enabled=request.enabled,
+            timeout=request.timeout,
+            cwd=request.cwd,
+            environment=request.environment,
+            misfire_grace_time=request.misfire_grace_time,
+            coalesce=request.coalesce,
+            max_instances=request.max_instances,
+        )
+        saved = await asyncio.to_thread(
+            SchedulerRepository().add,
+            task,
+            replace_existing=request.replace_existing,
+        )
+    except ValueError as exc:
+        code = (
+            status.HTTP_409_CONFLICT
+            if "already exists" in str(exc)
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return _portable_task_data(saved)
+
+
+@app.patch("/api/schedules/{identifier}/enabled")
+async def set_portable_schedule_enabled(identifier: str, enabled: bool = Body(..., embed=True)):
+    try:
+        task = await asyncio.to_thread(SchedulerRepository().set_enabled, identifier, enabled)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _portable_task_data(task)
+
+
+@app.delete("/api/schedules/{identifier}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_portable_schedule(identifier: str):
+    try:
+        await asyncio.to_thread(SchedulerRepository().delete, identifier)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@app.post("/api/schedules/{identifier}/run")
+async def run_portable_schedule(identifier: str):
+    repository = SchedulerRepository()
+    try:
+        exit_code = await asyncio.to_thread(run_scheduled_now, repository.database_path, identifier)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if exit_code is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="task was not started because its overlap limit was reached",
+        )
+    return {"exit_code": exit_code}
+
+
+@app.get("/api/schedule-runs")
+async def portable_schedule_history(
+    identifier: str | None = Query(None), limit: int = Query(100, ge=1, le=10000)
+):
+    try:
+        runs = await asyncio.to_thread(SchedulerRepository().history, identifier, limit=limit)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return {"runs": runs}
+
+
 # Batch operations endpoint
 if UI_ENABLED:
     from pydantic import BaseModel as PydanticBaseModel
@@ -721,7 +843,9 @@ if UI_ENABLED:
         all: bool = Query(False),
     ):
         """Get services for UI dashboard."""
-        result = await service_status(match=match, running=running, all=all, as_json=True)
+        result = await service_status(
+            match=match, running=running, all=all, details=True, as_json=True
+        )
         # Transform to frontend expected format
         services = []
         for svc in result.get("status", []):

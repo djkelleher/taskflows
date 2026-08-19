@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-Taskflows needed a robust way to manage long-running services and scheduled tasks. The solution required:
+Taskflows needed a robust way to manage long-running Linux services. The solution required:
 - Process isolation and resource limits
 - Automatic restart on failure
 - Scheduled execution (cron-like)
@@ -13,7 +13,7 @@ Taskflows needed a robust way to manage long-running services and scheduled task
 - System-wide persistence across reboots
 
 ## Decision
-We chose to use systemd as the primary service management layer instead of building a custom process manager or using alternatives like supervisord or Docker Compose.
+We chose systemd as the Linux service-management layer instead of building a custom process manager or using alternatives like supervisord or Docker Compose. ADR-005 supersedes the per-task systemd timer decision for ordinary short-lived cross-platform jobs.
 
 ## Rationale
 
@@ -46,9 +46,9 @@ We chose to use systemd as the primary service management layer instead of build
 ## Implementation
 - Services defined as Python dataclasses (Service)
 - Unit files generated programmatically
-- D-Bus communication via dbus-python
+- D-Bus communication via dbus-next
 - User services in ~/.config/systemd/user/
-- Timers for scheduled execution
+- Timers remain available for Linux services that need native activation
 
 ## Consequences
 
@@ -60,7 +60,7 @@ We chose to use systemd as the primary service management layer instead of build
 - Standard tooling (systemctl, journalctl)
 
 ### Negative
-- Linux-only (not portable to Windows/macOS)
+- Linux-only; portable short-lived jobs use the ADR-005 scheduler instead
 - Requires systemd-enabled distributions
 - D-Bus API can be complex
 - User service limitations (no system-wide services without root)

@@ -93,6 +93,9 @@ class TestAPIAuthentication(unittest.TestCase):
             ("POST", "/disable", {"match": "test"}),
             ("POST", "/remove", {"match": "test"}),
             ("GET", "/show/test"),
+            ("GET", "/api/schedules"),
+            ("GET", "/api/schedule-runs"),
+            ("POST", "/api/schedules/example/run", {}),
         ]
 
         for method, endpoint, *body in endpoints:

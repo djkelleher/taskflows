@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import socket
 from collections import defaultdict
@@ -41,7 +42,6 @@ from taskflows.service import (
     is_start_service,
     reload_unit_files,
     service_logs,
-    systemd_manager,
 )
 from taskflows.service import get_unit_files as _get_unit_files
 
@@ -147,7 +147,7 @@ async def list_services(
         # Call local free function
         logger.info(f"list_services called with match={match}")
         files = await get_unit_files(match=match, unit_type="service")
-        srv_names = [extract_service_name(f) for f in files]
+        srv_names = list({extract_service_name(f) for f in files})
         srv_names = sort_service_names(srv_names)
         logger.debug(f"list_services found {len(srv_names)} services")
         data = with_hostname({"services": srv_names})
@@ -156,7 +156,9 @@ async def list_services(
         params = {}
         if match:
             params["match"] = match
-        data = call_api(host, "/list", method="GET", params=params, timeout=10)
+        data = await asyncio.to_thread(
+            call_api, host, "/list", method="GET", params=params, timeout=10
+        )
 
     if as_json:
         return data
@@ -227,13 +229,8 @@ async def next_runs(
                 # Periodic (OnBootSec/OnUnitActiveSec) timer: use systemd's own next elapse
                 info = await get_schedule_info(Path(f).name)
                 raw = info.get("Next Start")
-                value = getattr(raw, "value", raw)
-                try:
-                    usec = int(value)
-                except (TypeError, ValueError):
-                    usec = 0
-                if usec > 0:
-                    next_dt = datetime.fromtimestamp(usec / 1_000_000, tz=tz)
+                if isinstance(raw, datetime):
+                    next_dt = raw.astimezone(tz)
                     runs.append(next_dt.strftime("%a %Y-%m-%d %H:%M:%S %Z"))
                 else:
                     runs.append("no scheduled elapse (periodic timer not active)")
@@ -243,7 +240,9 @@ async def next_runs(
         params = {"iterations": iterations}
         if match:
             params["match"] = match
-        data = call_api(host, "/next", method="GET", params=params, timeout=30)
+        data = await asyncio.to_thread(
+            call_api, host, "/next", method="GET", params=params, timeout=30
+        )
 
     if as_json:
         return data
@@ -268,6 +267,7 @@ async def status(
     match: str | None = None,
     running: bool = False,
     all: bool = False,
+    details: bool = False,
     as_json: bool = False,
 ) -> Table:
     """Call the /status endpoint and return a Table component.
@@ -277,6 +277,7 @@ async def status(
         match (str): Optional pattern to filter services
         running (bool): Only show running services
         all (bool): Show all services including stop-* and restart-* services
+        details (bool): Include per-unit timing and timer properties
 
     Returns:
         Table: Table showing service status
@@ -339,41 +340,60 @@ async def status(
             "load_state",
             "active_state",
             "sub_state",
-            "Last Start",
-            "Uptime",
-            "Last Finish",
-            "Next Start",
-            "Timers",
         ]
+        if details:
+            COLUMNS.extend(["Last Start", "Uptime", "Last Finish", "Next Start", "Timers"])
 
         # Gather service states
-        srv_states = await get_unit_file_states(unit_type="service", match=match)
+        # One systemd file-state scan supplies both service and timer states.
+        # ListUnitFilesByPatterns is comparatively expensive on large user
+        # configurations, so avoid running it twice.
+        all_unit_states = await get_unit_file_states(match=match)
+        srv_states = {
+            path: state for path, state in all_unit_states.items() if path.endswith(".service")
+        }
         if not srv_states:
             data = with_hostname({"status": []})
         else:
-            # Build units metadata
-            manager = await systemd_manager()
+            # Build unit metadata from the two bulk unit-file queries.
             units_meta = defaultdict(dict)
 
-            # Process services and timers
             for file_path, enabled_status in srv_states.items():
                 stem = Path(file_path).stem
                 units_meta[stem]["Service\nEnabled"] = enabled_status
-                await manager.call_load_unit(Path(file_path).name)
 
-            for file_path, enabled_status in (
-                await get_unit_file_states(unit_type="timer", match=match)
-            ).items():
+            for file_path, enabled_status in all_unit_states.items():
+                if not file_path.endswith(".timer"):
+                    continue
                 units_meta[Path(file_path).stem]["Timer\nEnabled"] = enabled_status
 
-            # Add unit runtime data
+            if details:
+                # Load and inspect units concurrently. get_schedule_info loads
+                # both the service and timer, so the old preliminary LoadUnit
+                # loop was duplicate work. Keep concurrency bounded.
+                semaphore = asyncio.Semaphore(32)
+
+                async def schedule_info(unit_name: str):
+                    async with semaphore:
+                        return unit_name, await get_schedule_info(unit_name)
+
+                detail_rows = await asyncio.gather(
+                    *(schedule_info(unit_name) for unit_name in units_meta)
+                )
+                for unit_name, detail in detail_rows:
+                    units_meta[unit_name].update(detail)
+
+            # The default summary is a single bulk runtime-state operation.
+            # In detail mode all installed units were loaded above first.
             for unit in await get_units(unit_type="service", match=match, states=None):
                 units_meta[Path(unit["unit_name"]).stem].update(unit)
 
-            # Enrich with schedule info and service names
+            # Add public service names.
             for unit_name, unit_data in units_meta.items():
-                unit_data.update(await get_schedule_info(unit_name))
                 unit_data["Service"] = extract_service_name(unit_name)
+                unit_data.setdefault("load_state", "not-loaded")
+                unit_data.setdefault("active_state", "inactive")
+                unit_data.setdefault("sub_state", "dead")
 
             # Filter out not-found units
             units_meta = {k: v for k, v in units_meta.items() if v.get("load_state") != "not-found"}
@@ -393,15 +413,15 @@ async def status(
                 if not all and srv_name.startswith(("stop-", "restart-")):
                     continue
 
-                # Format timers
-                timers = [f"{t['base']}({t['spec']})" for t in row.get("Timers Calendar", [])] + [
-                    f"{t['base']}({t['offset']})" for t in row.get("Timers Monotonic", [])
-                ]
-                row["Timers"] = "\n".join(timers) or "-"
+                if details:
+                    timers = [
+                        f"{t['base']}({t['spec']})" for t in row.get("Timers Calendar", [])
+                    ] + [f"{t['base']}({t['offset']})" for t in row.get("Timers Monotonic", [])]
+                    row["Timers"] = "\n".join(timers) or "-"
 
                 # Calculate uptime
                 if row.get("active_state") == "active" and (last_start := row.get("Last Start")):
-                    row["Uptime"] = str(datetime.now() - last_start).split(".")[0]
+                    row["Uptime"] = str(datetime.now(last_start.tzinfo) - last_start).split(".")[0]
 
                 # Format datetime columns
                 tz = ZoneInfo(config.display_timezone)
@@ -428,10 +448,12 @@ async def status(
 
     else:
         # Call via API
-        params = {"running": running, "all": all}
+        params = {"running": running, "all": all, "details": details}
         if match:
             params["match"] = match
-        data = call_api(host, "/status", method="GET", params=params, timeout=10)
+        data = await asyncio.to_thread(
+            call_api, host, "/status", method="GET", params=params, timeout=10
+        )
     if as_json:
         return data
     if "error" in data:
@@ -525,7 +547,7 @@ async def show(host: str | None = None, match: str | None = None, as_json: bool 
         data = with_hostname({"files": load_service_files(files)})
     else:
         # Call via API
-        data = call_api(host, f"/show/{match}", method="GET", timeout=30)
+        data = await asyncio.to_thread(call_api, host, f"/show/{match}", method="GET", timeout=30)
 
     if as_json:
         return data
@@ -663,7 +685,9 @@ async def create(
             data["include"] = include
         if exclude:
             data["exclude"] = exclude
-        result = call_api(host, "/create", method="POST", json_data=data, timeout=30)
+        result = await asyncio.to_thread(
+            call_api, host, "/create", method="POST", json_data=data, timeout=30
+        )
 
     if as_json:
         return result
@@ -723,7 +747,9 @@ async def start(
     else:
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
-        result = call_api(host, "/start", method="POST", json_data=data, timeout=30)
+        result = await asyncio.to_thread(
+            call_api, host, "/start", method="POST", json_data=data, timeout=30
+        )
 
     if as_json:
         return result
@@ -775,7 +801,9 @@ async def stop(
     else:
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
-        result = call_api(host, "/stop", method="POST", json_data=data, timeout=30)
+        result = await asyncio.to_thread(
+            call_api, host, "/stop", method="POST", json_data=data, timeout=30
+        )
 
     if as_json:
         return result
@@ -815,7 +843,9 @@ async def restart(
     else:
         # Call via API
         data = {"match": match}
-        result = call_api(host, "/restart", method="POST", json_data=data, timeout=30)
+        result = await asyncio.to_thread(
+            call_api, host, "/restart", method="POST", json_data=data, timeout=30
+        )
 
     if as_json:
         return result
@@ -858,7 +888,9 @@ async def remove(host: str | None = None, match: str | None = None, as_json: boo
     else:
         # Call via API
         data = {"match": match}
-        result = call_api(host, "/remove", method="POST", json_data=data, timeout=30)
+        result = await asyncio.to_thread(
+            call_api, host, "/remove", method="POST", json_data=data, timeout=30
+        )
 
     if as_json:
         return result
@@ -910,7 +942,9 @@ async def disable(
     else:
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
-        result = call_api(host, "/disable", method="POST", json_data=data, timeout=30)
+        result = await asyncio.to_thread(
+            call_api, host, "/disable", method="POST", json_data=data, timeout=30
+        )
 
     if as_json:
         return result
@@ -962,7 +996,9 @@ async def enable(
     else:
         # Call via API
         data = {"match": match, "timers": timers, "services": services}
-        result = call_api(host, "/enable", method="POST", json_data=data, timeout=30)
+        result = await asyncio.to_thread(
+            call_api, host, "/enable", method="POST", json_data=data, timeout=30
+        )
 
     if as_json:
         return result
@@ -1014,7 +1050,7 @@ async def execute_command_on_servers(command: str, servers=None, **kwargs) -> di
         servers = [{"address": servers}]
     elif isinstance(servers, dict):
         servers = [servers]
-    elif isinstance(servers, list):
+    elif isinstance(servers, (list, tuple)):
         normalized = []
         for s in servers:
             if isinstance(s, str):
@@ -1067,14 +1103,19 @@ async def execute_command_on_servers(command: str, servers=None, **kwargs) -> di
         return {"localhost": Text(f"Unknown command: {command}")}
 
     func = command_map[command]
-    results = {}
 
-    # Execute on specified servers
-    for server in servers:
+    async def invoke(server):
         hostname = server["address"] or "localhost"
-        # pass hostname (normalized) directly as host parameter
-        # If address is None, it will use local functions
-        results[hostname] = await func(host=server["address"], **kwargs)
+        if inspect.iscoroutinefunction(func):
+            result = await func(host=server["address"], **kwargs)
+        else:
+            result = await asyncio.to_thread(func, host=server["address"], **kwargs)
+        return hostname, result
+
+    # Hosts are independent. Querying them serially made total latency grow
+    # linearly with server count even when each backend was responsive.
+    pairs = await asyncio.gather(*(invoke(server) for server in servers))
+    results = dict(pairs)
 
     # If all results are Tables, concatenate them with Host column
     if len(results) > 0 and all(isinstance(r, Table) for r in results.values()):

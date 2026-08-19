@@ -23,6 +23,9 @@ _SYMBOL_MODULES = {
     # schedules
     "Calendar": "schedule",
     "Periodic": "schedule",
+    "ScheduleSpec": "scheduler",
+    "ScheduledTask": "scheduler",
+    "SchedulerRepository": "scheduler",
     # docker environments
     "ContainerLimits": "docker",
     "DockerContainer": "docker",
@@ -80,6 +83,7 @@ if TYPE_CHECKING:
     from .entrypoints import async_entrypoint, get_shutdown_handler
     from .monitor import MissedRunAlert
     from .schedule import Calendar, Periodic
+    from .scheduler import ScheduledTask, SchedulerRepository, ScheduleSpec
     from .serialization import load_services_from_yaml, save_services_to_yaml
     from .service import RestartPolicy, Service, ServiceRegistry, Venv, Watchdog
     from .tasks import get_current_task_id, run_task, task

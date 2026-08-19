@@ -46,6 +46,14 @@ from .security import (
 
 cli = Group("admin")
 
+# Portable short-lived job scheduling. Imported here (rather than implemented
+# in the systemd administration module) so the same commands are available on
+# Linux, macOS and Windows.
+from taskflows.scheduler.cli import schedule_cli, scheduler_cli
+
+cli.add_command(schedule_cli)
+cli.add_command(scheduler_cli)
+
 
 def get_console_with_wrap() -> Console:
     """Create a Rich Console with soft wrapping enabled for better text display."""
@@ -395,6 +403,11 @@ async def list_services(match: str | None = None, server: tuple = ()):
     help="Show all services including stop-* and restart-* services.",
 )
 @click.option(
+    "--details",
+    is_flag=True,
+    help="Fetch timing and timer properties for every matched service.",
+)
+@click.option(
     "--server",
     "-s",
     multiple=True,
@@ -405,6 +418,7 @@ async def status(
     match: str | None = None,
     running: bool = False,
     show_all: bool = False,
+    details: bool = False,
     server: tuple = (),
 ):
     """Show status of services from specified servers."""
@@ -415,6 +429,8 @@ async def status(
         kwargs["running"] = running
     if show_all:
         kwargs["all"] = show_all
+    if details:
+        kwargs["details"] = details
 
     results = await execute_command_on_servers("status", servers=server, **kwargs)
     _print_results(results, console=get_console_with_wrap())

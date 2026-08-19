@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Cross-platform short-lived scheduling:** a Taskflows-owned SQLite registry,
+  persistent APScheduler daemon, date/interval/cron schedules, durable run
+  history, overlap and misfire policies, process-tree timeouts, authenticated
+  REST endpoints, and `tf schedule`/`tf scheduler` commands. One native daemon
+  definition is installed through systemd, a macOS LaunchAgent, or Windows
+  Task Scheduler instead of creating an OS unit for every job.
+- **Faster service status:** systemd properties are fetched in bulk with
+  bounded concurrency, repeated manager health probes and duplicate unit loads
+  are removed, and independent remote servers are queried concurrently.
 - **AWS Lambda cloud deployment (beta):** `taskflows.cloud` adds boto3 and
   Pulumi backends, EventBridge schedule translation, dependency-aware Lambda
   packaging, deployment management for functions and `Service` objects, and

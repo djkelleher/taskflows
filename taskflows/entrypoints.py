@@ -3,6 +3,7 @@ import inspect
 import re
 import signal
 import sys
+import threading
 import traceback
 from collections.abc import Callable, Sequence
 from functools import cache, wraps
@@ -56,11 +57,26 @@ class ShutdownHandler:
         self._shutdown_task = None
         self._exit_code = None
         self.loop.set_exception_handler(self._loop_exception_handle)
-        for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            self.loop.add_signal_handler(
-                s,
-                lambda s=s: self.loop.create_task(self._on_signal_interrupt(s)),
-            )
+        for signal_name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            platform_signal = getattr(signal, signal_name, None)
+            if platform_signal is None:
+                continue
+            try:
+                self.loop.add_signal_handler(
+                    platform_signal,
+                    lambda s=platform_signal: self.loop.create_task(self._on_signal_interrupt(s)),
+                )
+            except NotImplementedError:
+                # Windows event loops do not implement add_signal_handler().
+                # signal.signal() is available for its smaller supported set;
+                # marshal the callback onto the loop thread when it arrives.
+                if threading.current_thread() is threading.main_thread():
+                    signal.signal(
+                        platform_signal,
+                        lambda _signum, _frame, s=platform_signal: self.loop.call_soon_threadsafe(
+                            self.loop.create_task, self._on_signal_interrupt(s)
+                        ),
+                    )
 
     def add_callback(self, cb: Callable[[], None]):
         """

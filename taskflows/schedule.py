@@ -91,7 +91,10 @@ class Calendar(Schedule):
 
     @classmethod
     def from_datetime(cls, dt: datetime):
-        return cls(schedule=dt.strftime("%a %Y-%m-%d %H:%M:%S %Z").strip())
+        # Preserve fractional seconds. Dropping them can place a near-future
+        # timer before the requested instant while the unit is being created.
+        time_format = "%H:%M:%S.%f" if dt.microsecond else "%H:%M:%S"
+        return cls(schedule=dt.strftime(f"%a %Y-%m-%d {time_format} %Z").strip())
 
     def next_runs(self, n: int = 5, timezone: str | None = None) -> list[str]:
         """Upcoming activation times for this calendar spec (via systemd-analyze)."""

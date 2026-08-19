@@ -1,7 +1,7 @@
 [project]
 name = "taskflows"
 version = "0.20.0"
-description = "Tasks and systemd services with scheduling, resource constraints, alerts, and observability"
+description = "Cross-platform scheduled tasks and Linux systemd services with observability"
 authors = [
     {name = "Dan Kelleher",email = "kelleherjdan@gmail.com"}
 ]
@@ -11,6 +11,8 @@ license-files = ["LICENSE"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -47,10 +49,14 @@ dependencies = [
     "loguru>=0.7.3,<0.8.0",
     "prometheus-client>=0.19.0,<1.0.0",
     "structlog>=25.4.0,<26.0.0",
-    "textdistance>=4.6.3,<5.0.0",
     "xxhash>=3.5.0,<4.0.0",
     # service discovery
     "dynamic-imports>=1.1.1,<2.0.0",
+    "apscheduler>=3.11.0,<4.0.0",
+    "pywin32>=311 ; sys_platform == 'win32'",
+    "sqlalchemy>=2.0.0,<3.0.0",
+    # Windows does not ship an IANA time-zone database for zoneinfo.
+    "tzdata>=2025.2",
 ]
 
 [project.optional-dependencies]
@@ -80,6 +86,7 @@ all = [
 
 [project.scripts]
 tf = "taskflows.admin.cli:cli"
+_taskflows_scheduler = "taskflows.scheduler.daemon:main"
 _start_srv_api = "taskflows.admin.api:_start_api_cmd"
 _run_docker_service = "taskflows.exec:_run_docker_service"
 _deserialize_and_call = "taskflows.exec:_deserialize_and_call"
@@ -154,12 +161,13 @@ disallow_untyped_defs = true
 [[tool.mypy.overrides]]
 module = [
     "cloudpickle.*",
+    "apscheduler.*",
     "dbus_next.*",
     "docker.*",
     "dynamic_imports.*",
     "grafanalib.*",
-    "textdistance.*",
     "xxhash.*",
+    "win32com.*",
 ]
 ignore_missing_imports = true
 

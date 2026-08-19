@@ -3,13 +3,12 @@ import re
 import stat
 import tempfile
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from textdistance import lcsseq
 
 from .loggers import get_logger
 
@@ -140,75 +139,28 @@ def logql_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def sort_service_names(services: list[str]) -> list[str]:
+def sort_service_names(services: Iterable[str]) -> list[str]:
+    """Naturally order names while keeping raw stop units beside their service.
+
+    The previous nearest-neighbour LCS sort was quadratic and dominated
+    `tf list`/`tf status` at a few hundred services. This key-based ordering is
+    deterministic and O(n log n).
     """
-    Sort service names to display in a list.
-
-    This function takes a list of service names and sorts them intelligently,
-    grouping stop services with their corresponding main services. The sorting
-    uses text similarity to order related services together.
-
-    Args:
-        services (List[str]): A list of service names to sort.
-
-    Returns:
-        List[str]: A sorted list where stop services appear immediately after
-                  their corresponding main services, ordered by similarity.
-
-    The sorting algorithm:
-    1. Separates services into stop services (prefixed with "stop-{prefix}") and regular services
-    2. Normalizes service names by replacing hyphens and underscores with spaces
-    3. Orders services by text similarity using longest common subsequence
-    4. Places stop services immediately after their corresponding main services
-    """
-    # Define the prefix used for stopped services
     stop_prefix = f"stop-{_SYSTEMD_FILE_PREFIX}"
 
-    # Separate services into two categories: those that start with the stop prefix and those that do not
-    stop_services: list[str] = []
-    non_stop_services_raw: list[str] = []
-    for srv in services:
-        if srv.startswith(stop_prefix):
-            stop_services.append(srv)
-        else:
-            non_stop_services_raw.append(srv)
-    remaining_stop_services = stop_services.copy()
+    def natural_key(value: str) -> tuple[tuple[bool, int | str], ...]:
+        return tuple(
+            (part.isdigit(), int(part) if part.isdigit() else part.casefold())
+            for part in re.split(r"(\d+)", value)
+            if part
+        )
 
-    # Normalize non-stop service names by replacing hyphens and underscores with spaces for similarity comparison
-    non_stop_services: list[tuple[str, str]] = [
-        (s, s.replace("-", " ").replace("_", " ")) for s in non_stop_services_raw
-    ]
+    def key(value: str):
+        is_stop = value.startswith(stop_prefix)
+        base = value.removeprefix(stop_prefix) if is_stop else value
+        return natural_key(base), is_stop, natural_key(value)
 
-    # Start the ordering process with the first non-stop service
-    if not non_stop_services:
-        # No non-stop services, just return the stop services or all services
-        return services
-
-    def append_with_stop(service_name: str) -> None:
-        ordered.append(service_name)
-        stop_service = f"{stop_prefix}{service_name}"
-        if stop_service in remaining_stop_services:
-            ordered.append(stop_service)
-            remaining_stop_services.remove(stop_service)
-
-    srv, filt_srv = non_stop_services.pop(0)
-    ordered = []
-    append_with_stop(srv)
-
-    # Continue ordering the remaining non-stop services
-    while non_stop_services:
-        # Find the service with the greatest similarity to the current service
-        best = max(non_stop_services, key=lambda o: lcsseq.similarity(filt_srv, o[1]))
-
-        # Update the current service and filtered service to the best match found
-        srv, filt_srv = best
-
-        # Remove the matched service from the list and append it to the ordered list
-        non_stop_services.remove(best)
-        append_with_stop(srv)
-
-    ordered.extend(remaining_stop_services)
-    return ordered
+    return sorted(services, key=key)
 
 
 def load_service_files(files: list[Path]) -> dict:

@@ -2,7 +2,7 @@
 
 from typing import Any, Literal, TypedDict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ServerInfo(TypedDict, total=False):
@@ -64,3 +64,22 @@ class ErrorResponse(TypedDict):
 
     error: str
     hostname: str
+
+
+class PortableScheduleRequest(BaseModel):
+    """Create or replace a portable short-lived scheduled command."""
+
+    name: str
+    command: list[str]
+    run_at: str | None = None
+    interval_seconds: float | None = None
+    cron: str | None = None
+    timezone: str = "UTC"
+    enabled: bool = True
+    timeout: float | None = None
+    cwd: str | None = None
+    environment: dict[str, str] = Field(default_factory=dict)
+    misfire_grace_time: int | None = 3600
+    coalesce: bool = True
+    max_instances: int = 1
+    replace_existing: bool = False

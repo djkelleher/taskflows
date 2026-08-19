@@ -1,10 +1,11 @@
 """Query and drive systemd user units."""
 
+import asyncio
 import os
 import re
 import subprocess
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from pprint import pformat
 from typing import Literal
@@ -90,42 +91,37 @@ async def get_schedule_info(unit: str):
     manager = await systemd_manager()
     bus = await session_dbus()
 
-    # Load service unit
-    service_path = await manager.call_load_unit(f"{unit_stem}.service")
+    # Service and timer paths are independent manager lookups.
+    service_path, timer_path = await asyncio.gather(
+        manager.call_load_unit(f"{unit_stem}.service"),
+        manager.call_load_unit(f"{unit_stem}.timer"),
+    )
     service_proxy = await _get_unit_proxy(bus, service_path)
     service_props = service_proxy.get_interface("org.freedesktop.DBus.Properties")
-
-    schedule = {
-        # timestamp of the last time a unit entered the active state.
-        "Last Start": await service_props.call_get(
-            "org.freedesktop.systemd1.Unit", "ActiveEnterTimestamp"
-        ),
-        # timestamp of the last time a unit exited the active state.
-        "Last Finish": await service_props.call_get(
-            "org.freedesktop.systemd1.Unit", "ActiveExitTimestamp"
-        ),
-    }
-
-    # Load timer unit
-    timer_path = await manager.call_load_unit(f"{unit_stem}.timer")
     timer_proxy = await _get_unit_proxy(bus, timer_path)
     timer_props = timer_proxy.get_interface("org.freedesktop.DBus.Properties")
 
-    schedule["Next Start"] = await timer_props.call_get(
-        "org.freedesktop.systemd1.Timer", "NextElapseUSecRealtime"
+    # Fetch both interfaces concurrently and each interface in one operation.
+    # The previous implementation made five serial Properties.Get calls and
+    # two introspection calls for every service shown by `tf status`.
+    service_values, timer_values = await asyncio.gather(
+        service_props.call_get_all("org.freedesktop.systemd1.Unit"),
+        timer_props.call_get_all("org.freedesktop.systemd1.Timer"),
     )
-
-    missing_dt = datetime(1970, 1, 1, 0, 0, 0)
+    schedule = {
+        "Last Start": service_values.get("ActiveEnterTimestamp", 0),
+        "Last Finish": service_values.get("ActiveExitTimestamp", 0),
+    }
+    schedule["Next Start"] = timer_values.get("NextElapseUSecRealtime", 0)
 
     def timestamp_to_dt(timestamp):
         try:
             # Handle Variant type from dbus-next
             if hasattr(timestamp, "value"):
                 timestamp = timestamp.value
-            dt = datetime.fromtimestamp(timestamp / 1_000_000)
-            if dt == missing_dt:
+            if not timestamp:
                 return None
-            return dt
+            return datetime.fromtimestamp(timestamp / 1_000_000, tz=UTC)
         except (ValueError, TypeError):
             # "year 586524 is out of range" or type error
             return None
@@ -134,9 +130,7 @@ async def get_schedule_info(unit: str):
 
     # TimersCalendar
     timers_cal = []
-    timers_calendar_raw = await timer_props.call_get(
-        "org.freedesktop.systemd1.Timer", "TimersCalendar"
-    )
+    timers_calendar_raw = timer_values.get("TimersCalendar", [])
     # Handle Variant type
     if hasattr(timers_calendar_raw, "value"):
         timers_calendar_raw = timers_calendar_raw.value
@@ -157,9 +151,7 @@ async def get_schedule_info(unit: str):
 
     # TimersMonotonic
     timers_mono = []
-    timers_monotonic_raw = await timer_props.call_get(
-        "org.freedesktop.systemd1.Timer", "TimersMonotonic"
-    )
+    timers_monotonic_raw = timer_values.get("TimersMonotonic", [])
     # Handle Variant type
     if hasattr(timers_monotonic_raw, "value"):
         timers_monotonic_raw = timers_monotonic_raw.value

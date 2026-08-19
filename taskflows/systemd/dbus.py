@@ -6,6 +6,7 @@ from contextlib import suppress
 from dbus_next import BusType
 from dbus_next.aio import MessageBus
 from dbus_next.errors import DBusError
+from dbus_next.introspection import Node
 
 from ..common import logger
 
@@ -14,10 +15,27 @@ from ..common import logger
 # Use a dict to store locks per event loop to avoid "bound to different event loop" errors
 _dbus_connection_locks: dict = {}
 _dbus_session_bus: MessageBus | None = None
+_dbus_session_bus_loop_id: int | None = None
 _dbus_manager = None
 _dbus_manager_introspection = None
 _dbus_last_error_time = 0
 _dbus_error_cooldown = 5  # Seconds between reconnection attempts
+
+_PROPERTIES_INTROSPECTION = Node.parse(
+    """<node>
+      <interface name="org.freedesktop.DBus.Properties">
+        <method name="Get">
+          <arg name="interface_name" direction="in" type="s"/>
+          <arg name="property_name" direction="in" type="s"/>
+          <arg name="value" direction="out" type="v"/>
+        </method>
+        <method name="GetAll">
+          <arg name="interface_name" direction="in" type="s"/>
+          <arg name="properties" direction="out" type="a{sv}"/>
+        </method>
+      </interface>
+    </node>"""
+)
 
 
 def _get_dbus_lock() -> asyncio.Lock:
@@ -39,11 +57,13 @@ def _get_dbus_lock() -> asyncio.Lock:
 
 async def _reset_dbus_connections():
     """Reset DBus connections (called when connection becomes stale)."""
-    global _dbus_session_bus, _dbus_manager, _dbus_manager_introspection
+    global _dbus_session_bus, _dbus_session_bus_loop_id, _dbus_manager
+    global _dbus_manager_introspection
     if _dbus_session_bus is not None:
         with suppress(Exception):
             _dbus_session_bus.disconnect()
     _dbus_session_bus = None
+    _dbus_session_bus_loop_id = None
     _dbus_manager = None
     _dbus_manager_introspection = None
     logger.info("DBus connections reset for reconnection")
@@ -54,16 +74,29 @@ async def _session_dbus_unlocked() -> MessageBus:
 
     MUST be called with _get_dbus_lock() already held.
     """
-    global _dbus_session_bus, _dbus_last_error_time
+    global _dbus_session_bus, _dbus_session_bus_loop_id, _dbus_last_error_time
+    global _dbus_manager, _dbus_manager_introspection
     import time
 
-    # Try to use existing connection
-    if _dbus_session_bus is not None and _dbus_session_bus.connected:
+    loop_id = id(asyncio.get_running_loop())
+
+    # D-Bus transports are bound to the event loop that created them. Pytest,
+    # asyncio.run(), and some CLI paths create multiple loops in one process.
+    if (
+        _dbus_session_bus is not None
+        and _dbus_session_bus.connected
+        and _dbus_session_bus_loop_id == loop_id
+    ):
         return _dbus_session_bus
 
     if _dbus_session_bus is not None:
-        logger.warning("DBus session bus disconnected, reconnecting...")
+        logger.debug("D-Bus loop changed or session bus disconnected; reconnecting")
+        with suppress(Exception):
+            _dbus_session_bus.disconnect()
         _dbus_session_bus = None
+        _dbus_session_bus_loop_id = None
+        _dbus_manager = None
+        _dbus_manager_introspection = None
 
     # Apply cooldown to avoid tight reconnection loops
     current_time = time.time()
@@ -74,6 +107,7 @@ async def _session_dbus_unlocked() -> MessageBus:
     try:
         logger.info("Creating new DBus session bus connection")
         _dbus_session_bus = await MessageBus(bus_type=BusType.SESSION).connect()
+        _dbus_session_bus_loop_id = loop_id
         logger.info("DBus session bus connection established successfully")
         return _dbus_session_bus
     except Exception as e:
@@ -116,16 +150,13 @@ async def systemd_manager():
         # Get bus (will reconnect if needed) - use unlocked version since we already hold the lock
         bus = await _session_dbus_unlocked()
 
-        # Try to use existing manager if bus is still the same
+        # The connected bus is the manager health check. Reading Manager.Version
+        # here made every helper invocation another D-Bus round trip, which is
+        # especially expensive while rendering status for hundreds of units.
+        # Individual operations still surface a stale proxy and the retry
+        # wrappers reset it when appropriate.
         if _dbus_manager is not None:
-            try:
-                # Health check: try a simple property access
-                version = await _dbus_manager.get_version()
-                return _dbus_manager
-            except (DBusError, Exception) as e:
-                logger.warning(f"DBus manager health check failed: {e}")
-                await _reset_dbus_connections()
-                bus = await _session_dbus_unlocked()
+            return _dbus_manager
 
         # Create new manager interface
         try:
@@ -222,6 +253,9 @@ async def escape_path(path) -> str:
 
 
 async def _get_unit_proxy(bus: MessageBus, unit_path: str):
-    """Get a proxy object for a unit at the given path."""
-    introspection = await bus.introspect("org.freedesktop.systemd1", unit_path)
-    return bus.get_proxy_object("org.freedesktop.systemd1", unit_path, introspection)
+    """Get a properties-only unit proxy without per-unit introspection I/O.
+
+    Every status query only needs the standard D-Bus Properties interface.
+    Reusing its static schema avoids two additional round trips per service.
+    """
+    return bus.get_proxy_object("org.freedesktop.systemd1", unit_path, _PROPERTIES_INTROSPECTION)

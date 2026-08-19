@@ -13,10 +13,10 @@
          │   taskflows Library   │
          │   - @task decorator   │
          │   - Service class     │
-         │   - Schedule objects  │
+         │   - Portable schedules│
          └──────────┬────────────┘
                     │
-        ┌───────────┴───────────┐
+        ┌───────────┼───────────┐
         │                       │
         ▼                       ▼
 ┌───────────────┐       ┌──────────────┐
@@ -27,11 +27,16 @@
 │ - Restarts    │              │
 │ - Cgroups     │              │
 └───────┬───────┘              │
-        │                      │
-        │                ┌─────┴──────┐
-        │                │  D-Bus     │
-        │                │  (Control) │
-        │                └────────────┘
+        │              ┌────────┴─────────────┐
+        │              │ Scheduler daemon     │
+        │              │ SQLite + APScheduler │
+        │              │ Windows/macOS/Linux  │
+        │              └────────┬─────────────┘
+        │                       │ subprocesses
+        │                ┌──────▼──────┐
+        │                │ Short-lived │
+        │                │ commands    │
+        │                └─────────────┘
         │
         ▼
 ┌───────────────────────────────────────┐
@@ -143,7 +148,15 @@ Unified cgroup configuration for both systemd and Docker:
 - **Security**: OOM score, capabilities, read-only rootfs
 
 ### 6. Scheduling
-**File**: `taskflows/schedule.py`
+**Files**: `taskflows/scheduler/`, `taskflows/schedule.py`
+
+Portable short-lived jobs use `ScheduleSpec`, the SQLite registry, and one
+APScheduler daemon. The daemon is supervised by systemd on Linux, launchd on
+macOS, or Task Scheduler on Windows. Bulk list/status reads come directly from
+SQLite rather than issuing one OS query per task.
+
+The older `Calendar` and `Periodic` objects compile to systemd timers and remain
+available for Linux `Service` objects.
 
 Two scheduling primitives:
 - **Periodic**: Run every N seconds/minutes/hours
@@ -231,6 +244,7 @@ See Architecture Decision Records (ADRs):
 - [ADR-002: Loki Logging](adr/002-loki-logging.md)
 - [ADR-003: Prometheus Metrics](adr/003-prometheus-metrics.md)
 - [ADR-004: Constants Module](adr/004-constants-module.md)
+- [ADR-005: Portable Short-Lived Scheduling](adr/005-portable-scheduling.md)
 
 ## Extension Points
 
