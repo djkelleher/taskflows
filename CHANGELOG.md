@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   captured-log viewing, revision-safe deletion, and consistent CLI/REST
   representations. Native state also distinguishes queued/starting work and
   launchd restart now recovers an unloaded agent.
+- Scheduler diagnostics now expose a stable native-plus-runtime status model,
+  automatic-start state, SQLite integrity checks, and an actionable
+  `tf scheduler doctor` command. `tf schedule prune` applies safe history/log
+  retention, and orphan reservations are rechecked during reconciliation.
 - **Faster service status:** systemd properties are fetched in bulk with
   bounded concurrency, repeated manager health probes and duplicate unit loads
   are removed, and independent remote servers are queried concurrently.

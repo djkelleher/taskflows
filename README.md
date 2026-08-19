@@ -164,6 +164,7 @@ tf schedule list
 tf schedule show report
 tf schedule history report
 tf schedule logs report
+tf schedule prune --older-than 30d --keep-latest 10
 tf schedule run report
 tf schedule disable report
 
@@ -171,6 +172,7 @@ tf schedule disable report
 tf scheduler stop
 tf scheduler start
 tf scheduler restart
+tf scheduler doctor
 ```
 
 The Taskflows SQLite registry is authoritative. APScheduler maintains its own
@@ -179,8 +181,11 @@ definitions. Only task IDs are placed in scheduler jobs; commands and
 environment values remain in the Taskflows registry. Run stdout and stderr are
 written under `~/.taskflows/data/runs/`.
 
-`tf scheduler status --json` reports both the native supervisor state and the
-Taskflows daemon heartbeat, and exits non-zero when the daemon is unhealthy.
+`tf scheduler status --json` reports one stable cross-platform object combining
+native registration, automatic-start state, the Taskflows heartbeat, registry
+path, and task counts. `tf scheduler doctor` also checks SQLite integrity and
+permissions and prints actionable recovery steps. Both exit non-zero when the
+daemon is unhealthy.
 
 Use portable schedules for bounded jobs. Continue to use `Service` for
 long-running Linux daemons, cgroups, watchdogs, and systemd dependency graphs.

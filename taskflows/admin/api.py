@@ -65,6 +65,7 @@ from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
 from taskflows.scheduler.models import ScheduledTask, ScheduleSpec
 from taskflows.scheduler.repository import SchedulerRepository
 from taskflows.scheduler.runner import run_now as run_scheduled_now
+from taskflows.scheduler.status import diagnose_scheduler, scheduler_status
 from taskflows.service import RestartPolicy, Service, Venv
 
 config = Config()
@@ -785,6 +786,35 @@ async def portable_schedule_history(
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return {"runs": runs}
+
+
+@app.get("/api/scheduler/status")
+async def portable_scheduler_status() -> dict[str, Any]:
+    """Return the same cross-platform status contract as the scheduler CLI."""
+    try:
+        result = await asyncio.to_thread(scheduler_status)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"could not inspect scheduler status: {exc}",
+        ) from exc
+    return result.to_dict()
+
+
+@app.get("/api/scheduler/diagnostics")
+async def portable_scheduler_diagnostics() -> dict[str, Any]:
+    """Return actionable supervisor, registry, heartbeat, and dispatch checks."""
+    try:
+        current, checks = await asyncio.to_thread(diagnose_scheduler)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"could not diagnose scheduler: {exc}",
+        ) from exc
+    return {
+        "status": current.to_dict(),
+        "checks": [check.to_dict() for check in checks],
+    }
 
 
 # Batch operations endpoint

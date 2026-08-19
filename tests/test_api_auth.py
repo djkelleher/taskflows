@@ -95,6 +95,8 @@ class TestAPIAuthentication(unittest.TestCase):
             ("GET", "/show/test"),
             ("GET", "/api/schedules"),
             ("GET", "/api/schedule-runs"),
+            ("GET", "/api/scheduler/status"),
+            ("GET", "/api/scheduler/diagnostics"),
             ("POST", "/api/schedules/example/run", {}),
         ]
 

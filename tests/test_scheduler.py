@@ -1,5 +1,7 @@
+import json
 import os
 import plistlib
+import socket
 import sqlite3
 import sys
 import time
@@ -25,6 +27,8 @@ from taskflows.admin.api import (
     list_portable_schedules,
     list_servers_endpoint,
     portable_schedule_history,
+    portable_scheduler_diagnostics,
+    portable_scheduler_status,
     run_portable_schedule,
     set_portable_schedule_enabled,
 )
@@ -38,6 +42,8 @@ from taskflows.scheduler.daemon import DaemonAlreadyRunning, SchedulerDaemon, _S
 from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, utc_now
 from taskflows.scheduler.repository import SchedulerRepository, _pid_is_running
 from taskflows.scheduler.runner import execute_scheduled_task, run_now
+from taskflows.scheduler.status import DiagnosticCheck, runtime_status, scheduler_status
+from taskflows.scheduler.supervisor import SupervisorStatus
 
 
 def make_repository(tmp_path: Path) -> SchedulerRepository:
@@ -268,6 +274,16 @@ def test_repository_prevents_overlapping_manual_runs(tmp_path):
     assert first is not None
     assert second is None
     assert [run["status"] for run in repository.history("single")] == ["skipped", "running"]
+
+
+def test_reconcile_recovers_finished_orphan_reservations_without_restart(tmp_path, monkeypatch):
+    daemon = SchedulerDaemon(make_repository(tmp_path).database_path)
+    calls = []
+    monkeypatch.setattr(daemon.repository, "mark_interrupted_runs", lambda: calls.append(True) or 0)
+
+    daemon.reconcile()
+
+    assert calls == [True]
 
 
 def test_overlapping_scheduled_one_shot_is_consumed(tmp_path):
@@ -767,7 +783,114 @@ def test_scheduler_status_rejects_future_heartbeat(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ["scheduler", "status"])
 
     assert result.exit_code == 1
-    assert "stopped or unresponsive" in result.output
+    assert "in the future" in result.output
+
+
+def test_portable_status_combines_native_runtime_and_registry(tmp_path):
+    repository = make_repository(tmp_path)
+    repository.add(ScheduledTask.create("enabled", ["echo", "ok"], ScheduleSpec.interval(60)))
+    repository.add(
+        ScheduledTask.create("disabled", ["echo", "ok"], ScheduleSpec.interval(60), enabled=False)
+    )
+    repository.heartbeat(pid=os.getpid(), hostname=socket.gethostname(), started_at=utc_now())
+    native = SupervisorStatus(backend="systemd", installed=True, state="running", automatic=True)
+    fake_supervisor = SimpleNamespace(status=lambda: native)
+
+    status = scheduler_status(repository, fake_supervisor)
+
+    assert status.state == "running"
+    assert status.runtime.healthy is True
+    assert status.runtime.pid_running is True
+    assert status.task_count == 2
+    assert status.enabled_task_count == 1
+    assert status.to_dict()["supervisor"]["automatic"] is True
+
+
+def test_scheduler_doctor_has_stable_actionable_json(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    repository.heartbeat(pid=os.getpid(), hostname=socket.gethostname(), started_at=utc_now())
+    native = SupervisorStatus(backend="systemd", installed=True, state="running", automatic=True)
+    fake_supervisor = SimpleNamespace(status=lambda: native)
+    monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
+    monkeypatch.setattr("taskflows.scheduler.cli.get_supervisor", lambda: fake_supervisor)
+
+    result = CliRunner().invoke(cli, ["scheduler", "doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["status"]["state"] == "running"
+    assert {check["name"] for check in payload["checks"]} >= {
+        "supervisor-registration",
+        "automatic-start",
+        "registry",
+        "heartbeat",
+        "dispatch-readiness",
+    }
+
+
+def test_runtime_status_has_stable_empty_shape(tmp_path):
+    status = runtime_status(make_repository(tmp_path))
+
+    assert status.healthy is False
+    assert status.pid is None
+    assert status.heartbeat_at is None
+
+
+def test_runtime_status_rejects_a_fresh_heartbeat_owned_by_another_host(tmp_path):
+    repository = make_repository(tmp_path)
+    repository.heartbeat(pid=os.getpid(), hostname="another-host", started_at=utc_now())
+
+    status = runtime_status(repository)
+
+    assert status.healthy is False
+    assert status.pid_running is False
+
+
+def test_history_retention_keeps_latest_and_removes_owned_logs(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("retained", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    run_dir = repository.database_path.parent / "runs" / task.id
+    run_dir.mkdir(parents=True)
+    timestamps = [
+        utc_now() - timedelta(days=90),
+        utc_now() - timedelta(days=80),
+        utc_now() - timedelta(days=70),
+    ]
+    paths = []
+    for index, timestamp in enumerate(timestamps):
+        run_id = repository.begin_run(task, timestamp)
+        assert run_id is not None
+        path = run_dir / f"{run_id}.stdout.log"
+        path.write_text(str(index))
+        paths.append(path)
+        repository.finish_run(run_id, status="succeeded", exit_code=0, stdout_path=str(path))
+        with repository.connect() as db:
+            db.execute(
+                "UPDATE task_runs SET started_at=?, finished_at=? WHERE id=?",
+                (timestamp.isoformat(), timestamp.isoformat(), run_id),
+            )
+
+    preview = repository.prune_history(
+        before=utc_now() - timedelta(days=30), keep_latest=1, dry_run=True
+    )
+    monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
+    cli_preview = CliRunner().invoke(
+        cli,
+        ["schedule", "prune", "--older-than", "30d", "--keep-latest", "1", "--dry-run"],
+    )
+    result = repository.prune_history(before=utc_now() - timedelta(days=30), keep_latest=1)
+
+    assert preview.runs_deleted == 2
+    assert cli_preview.exit_code == 0, cli_preview.output
+    assert "Would delete 2 terminal run(s)" in cli_preview.output
+    assert result.runs_deleted == 2
+    assert result.log_files_deleted == 2
+    assert repository.history(task.id, limit=10)[0]["stdout_path"] == str(paths[-1])
+    assert not paths[0].exists()
+    assert not paths[1].exists()
+    assert paths[2].exists()
 
 
 @pytest.mark.asyncio
@@ -845,6 +968,24 @@ async def test_portable_schedule_api_get_and_delete_use_revisions(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_scheduler_api_reuses_portable_status_contract(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    repository.heartbeat(pid=os.getpid(), hostname=socket.gethostname(), started_at=utc_now())
+    native = SupervisorStatus(backend="systemd", installed=True, state="running", automatic=True)
+    current = scheduler_status(repository, SimpleNamespace(status=lambda: native))
+    checks = [DiagnosticCheck("heartbeat", "ok", "healthy")]
+    monkeypatch.setattr("taskflows.admin.api.scheduler_status", lambda: current)
+    monkeypatch.setattr("taskflows.admin.api.diagnose_scheduler", lambda: (current, checks))
+
+    status_payload = await portable_scheduler_status()
+    diagnostic_payload = await portable_scheduler_diagnostics()
+
+    assert status_payload["state"] == "running"
+    assert diagnostic_payload["status"] == status_payload
+    assert diagnostic_payload["checks"] == [checks[0].to_dict()]
+
+
+@pytest.mark.asyncio
 async def test_list_servers_endpoint_uses_core_signature(monkeypatch):
     expected = {"servers": [], "hostname": "test"}
 
@@ -891,7 +1032,7 @@ def test_systemd_supervisor_reports_native_state(tmp_path, monkeypatch):
         installer,
         "_run",
         lambda command, check=True: __import__("subprocess").CompletedProcess(
-            command, 0, "active\n", ""
+            command, 0, "enabled\n" if "is-enabled" in command else "active\n", ""
         ),
     )
 
@@ -900,6 +1041,7 @@ def test_systemd_supervisor_reports_native_state(tmp_path, monkeypatch):
     assert status.installed is True
     assert status.state == "running"
     assert status.backend == "systemd"
+    assert status.automatic is True
 
 
 def test_launchd_supervisor_distinguishes_loaded_but_stopped(tmp_path, monkeypatch):
@@ -920,6 +1062,35 @@ def test_launchd_supervisor_distinguishes_loaded_but_stopped(tmp_path, monkeypat
 
     assert status.installed is True
     assert status.state == "stopped"
+
+
+def test_launchd_stop_preserves_login_autostart_and_reports_last_failure(tmp_path, monkeypatch):
+    plist = tmp_path / "Library" / "LaunchAgents" / f"{installer.MACOS_LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("plist")
+    calls = []
+    monkeypatch.setattr(installer, "_home_dir", lambda: tmp_path)
+    monkeypatch.setattr(supervisor.os, "getuid", lambda: 501, raising=False)
+
+    def run(command, check=True):
+        calls.append(command)
+        output = (
+            f'{{ "{installer.MACOS_LABEL}" => false }}'
+            if command[:2] == ["launchctl", "print-disabled"]
+            else "state = exited\nlast exit code = 7\n"
+        )
+        return __import__("subprocess").CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(installer, "_run", run)
+    adapter = supervisor.LaunchdSupervisor()
+
+    adapter.stop()
+    status = adapter.status()
+
+    assert not any(command[:2] == ["launchctl", "disable"] for command in calls)
+    assert status.automatic is True
+    assert status.state == "failed"
+    assert status.last_exit_code == 7
 
 
 @pytest.mark.parametrize(

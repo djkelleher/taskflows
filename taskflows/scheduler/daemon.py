@@ -295,6 +295,11 @@ class SchedulerDaemon:
             raise
 
     def reconcile(self) -> None:
+        # A daemon killed with SIGKILL can leave a child command running. The
+        # replacement daemon deliberately preserves that reservation while the
+        # child exists; once it exits, release the stale slot without requiring
+        # yet another daemon restart.
+        self.repository.mark_interrupted_runs()
         tasks = self.repository.list()
         desired_ids = {self._job_id(task.id) for task in tasks if task.enabled}
         jobs = {job.id: job for job in self.scheduler.get_jobs() if job.id.startswith(JOB_PREFIX)}

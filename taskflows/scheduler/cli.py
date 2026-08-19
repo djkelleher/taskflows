@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,12 +13,11 @@ from taskflows.exceptions import RevisionConflict
 
 from .daemon import SchedulerDaemon
 from .installer import install, uninstall
-from .models import ScheduledTask, ScheduleSpec, parse_datetime, utc_now
+from .models import ScheduledTask, ScheduleSpec, utc_now
 from .repository import SchedulerRepository
 from .runner import run_now
+from .status import diagnose_scheduler, runtime_status, scheduler_status
 from .supervisor import get_supervisor
-
-HEARTBEAT_TIMEOUT_SECONDS = 5
 
 _DURATION_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?\s*$")
 _DURATION_UNITS = {
@@ -76,22 +74,6 @@ DURATION = DurationType()
 
 def _repository() -> SchedulerRepository:
     return SchedulerRepository()
-
-
-def _daemon_runtime_state(repository: SchedulerRepository) -> dict[str, Any]:
-    state = repository.daemon_state() or {}
-    heartbeat_value = state.get("heartbeat_at")
-    if heartbeat_value:
-        try:
-            heartbeat = parse_datetime(heartbeat_value)
-            age = (datetime.now(UTC) - heartbeat.astimezone(UTC)).total_seconds()
-        except (TypeError, ValueError):
-            age = None
-        state["heartbeat_age_seconds"] = age
-        state["healthy"] = age is not None and 0 <= age < HEARTBEAT_TIMEOUT_SECONDS
-    else:
-        state["healthy"] = False
-    return state
 
 
 def _parse_environment(values: tuple[str, ...], env_files: tuple[Path, ...] = ()) -> dict[str, str]:
@@ -220,7 +202,7 @@ def add_schedule(
     except (RevisionConflict, TypeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Scheduled {saved.name} ({saved.schedule.describe()})")
-    if saved.enabled and not _daemon_runtime_state(repository)["healthy"]:
+    if saved.enabled and not runtime_status(repository).healthy:
         click.echo(
             "Warning: the scheduler daemon is not responding; run "
             "'tf scheduler install' or 'tf scheduler start'.",
@@ -341,6 +323,53 @@ def schedule_history(identifier: str | None, limit: int, as_json: bool) -> None:
         )
 
 
+@schedule_cli.command("prune")
+@click.option(
+    "--older-than",
+    type=DURATION,
+    default="30d",
+    show_default=True,
+    help="Delete terminal attempts older than this duration.",
+)
+@click.option(
+    "--keep-latest",
+    type=click.IntRange(min=0),
+    default=10,
+    show_default=True,
+    help="Always retain this many newest attempts per task definition.",
+)
+@click.option("--dry-run", is_flag=True, help="Count eligible attempts without deleting them.")
+@click.option("--yes", is_flag=True, help="Do not ask for confirmation.")
+def prune_schedule_history(
+    older_than: float,
+    keep_latest: int,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Apply run-history and captured-log retention safely."""
+    repository = _repository()
+    cutoff = utc_now() - timedelta(seconds=older_than)
+    preview = repository.prune_history(
+        before=cutoff,
+        keep_latest=keep_latest,
+        dry_run=True,
+    )
+    if dry_run:
+        click.echo(f"Would delete {preview.runs_deleted} terminal run(s)")
+        return
+    if preview.runs_deleted == 0:
+        click.echo("No run history eligible for pruning")
+        return
+    if not yes and not click.confirm(
+        f"Delete {preview.runs_deleted} terminal run(s) and their captured logs?"
+    ):
+        return
+    result = repository.prune_history(before=cutoff, keep_latest=keep_latest)
+    click.echo(f"Deleted {result.runs_deleted} run(s) and {result.log_files_deleted} log file(s)")
+    for error in result.log_errors:
+        click.echo(f"Warning: {error}", err=True)
+
+
 def _safe_log_path(repository: SchedulerRepository, value: str) -> Path:
     root = (repository.database_path.parent / "runs").resolve()
     path = Path(value).resolve()
@@ -456,23 +485,60 @@ def restart_daemon() -> None:
 @click.pass_context
 def daemon_status(context: click.Context, as_json: bool) -> None:
     try:
-        native = asdict(get_supervisor().status())
+        status = scheduler_status(_repository(), get_supervisor())
     except Exception as exc:
-        native = {
-            "backend": "unsupported",
-            "installed": False,
-            "state": "unknown",
-            "definition_path": None,
-            "detail": str(exc),
-        }
-    state = _daemon_runtime_state(_repository())
-    state["supervisor"] = native
+        raise click.ClickException(f"could not inspect scheduler status: {exc}") from exc
     if as_json:
-        click.echo(json.dumps(state, indent=2))
+        click.echo(json.dumps(status.to_dict(), indent=2))
     else:
-        if state["healthy"]:
-            click.echo(f"running ({native['backend']}: {native['state']})")
-        else:
-            click.echo(f"stopped or unresponsive ({native['backend']}: {native['state']})")
-    if not state["healthy"]:
+        click.echo(f"{status.state} ({status.supervisor.backend}: {status.supervisor.state})")
+        click.echo(
+            f"Registry: {status.database_path} "
+            f"({status.enabled_task_count}/{status.task_count} tasks enabled)"
+        )
+        if status.runtime.heartbeat_at:
+            age = status.runtime.heartbeat_age_seconds
+            age_text = (
+                "invalid"
+                if age is None
+                else f"{-age:.1f}s in the future"
+                if age < 0
+                else f"{age:.1f}s ago"
+            )
+            click.echo(
+                f"Heartbeat: {age_text} from {status.runtime.hostname or 'unknown host'} "
+                f"(pid {status.runtime.pid or '-'})"
+            )
+        if status.supervisor.detail and status.state != "running":
+            click.echo(f"Native detail: {status.supervisor.detail}")
+    if status.state != "running":
+        context.exit(1)
+
+
+@scheduler_cli.command("doctor")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def scheduler_doctor(context: click.Context, as_json: bool) -> None:
+    """Run actionable native, registry, heartbeat, and dispatch checks."""
+    try:
+        status, checks = diagnose_scheduler(_repository(), get_supervisor())
+    except Exception as exc:
+        raise click.ClickException(f"could not diagnose scheduler: {exc}") from exc
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "status": status.to_dict(),
+                    "checks": [check.to_dict() for check in checks],
+                },
+                indent=2,
+            )
+        )
+    else:
+        labels = {"ok": "OK", "warning": "WARN", "error": "ERROR"}
+        for check in checks:
+            click.echo(f"[{labels[check.level]}] {check.name}: {check.message}")
+            if check.remedy:
+                click.echo(f"       Fix: {check.remedy}")
+    if any(check.level == "error" for check in checks):
         context.exit(1)

@@ -5,11 +5,12 @@ import json
 import os
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from taskflows.common import ensure_data_dir, services_data_dir
@@ -18,6 +19,15 @@ from taskflows.exceptions import RevisionConflict
 from .models import ScheduledTask, ScheduleSpec, parse_datetime, utc_now
 
 SCHEMA_VERSION = 3
+
+
+@dataclass(frozen=True)
+class HistoryPruneResult:
+    """Summary of one terminal run-history retention pass."""
+
+    runs_deleted: int
+    log_files_deleted: int
+    log_errors: tuple[str, ...] = ()
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -250,6 +260,14 @@ class SchedulerRepository:
             next_run_at=_dt(row["next_run_at"]),
         )
 
+    @staticmethod
+    def _resolve_row(db: sqlite3.Connection, identifier: str) -> sqlite3.Row | None:
+        """Resolve with the documented ID-before-name precedence in one transaction."""
+        row = db.execute("SELECT * FROM scheduled_tasks WHERE id=?", (identifier,)).fetchone()
+        if row is None:
+            row = db.execute("SELECT * FROM scheduled_tasks WHERE name=?", (identifier,)).fetchone()
+        return cast("sqlite3.Row | None", row)
+
     def add(
         self,
         task: ScheduledTask,
@@ -338,10 +356,11 @@ class SchedulerRepository:
         return self._task_from_row(row) if row else None
 
     def resolve(self, identifier: str) -> ScheduledTask:
-        task = self.get(identifier) or self.get_by_name(identifier)
-        if task is None:
+        with self.connect() as db:
+            row = self._resolve_row(db, identifier)
+        if row is None:
             raise KeyError(f"scheduled task not found: {identifier}")
-        return task
+        return self._task_from_row(row)
 
     def list(self, *, enabled: bool | None = None, match: str | None = None) -> list[ScheduledTask]:
         query = "SELECT * FROM scheduled_tasks"
@@ -360,58 +379,47 @@ class SchedulerRepository:
     def set_enabled(
         self, identifier: str, enabled: bool, *, expected_revision: int | None = None
     ) -> ScheduledTask:
-        task = self.resolve(identifier)
-        if expected_revision is not None and task.revision != expected_revision:
-            raise RevisionConflict(
-                f"scheduled task {task.name!r} changed from revision "
-                f"{expected_revision} to {task.revision}"
-            )
-        if task.enabled == enabled:
-            return task
-        revision_clause = " AND revision=?" if expected_revision is not None else ""
-        params: list[Any] = [int(enabled), _iso(utc_now()), task.id, int(enabled)]
-        if expected_revision is not None:
-            params.append(expected_revision)
         with self.connect() as db:
-            cursor = db.execute(
-                f"""UPDATE scheduled_tasks
+            # The read, idempotence decision, conditional write, and returned
+            # representation belong to one write transaction. Otherwise an
+            # expected-revision no-op can return success after another client
+            # changes the row between resolve() and update().
+            db.execute("BEGIN IMMEDIATE")
+            row = self._resolve_row(db, identifier)
+            if row is None:
+                raise KeyError(f"scheduled task not found: {identifier}")
+            task = self._task_from_row(row)
+            if expected_revision is not None and task.revision != expected_revision:
+                raise RevisionConflict(
+                    f"scheduled task {task.name!r} changed from revision "
+                    f"{expected_revision} to {task.revision}"
+                )
+            if task.enabled == enabled:
+                return task
+            db.execute(
+                """UPDATE scheduled_tasks
                    SET enabled=?, updated_at=?, revision=revision+1, next_run_at=NULL
-                   WHERE id=? AND enabled<>?{revision_clause}""",
-                params,
+                   WHERE id=?""",
+                (int(enabled), _iso(utc_now()), task.id),
             )
-        if cursor.rowcount == 0 and expected_revision is not None:
-            current = self.get(task.id)
-            current_revision = current.revision if current is not None else "deleted"
-            raise RevisionConflict(
-                f"scheduled task {task.name!r} changed from revision "
-                f"{expected_revision} to {current_revision}"
-            )
-        result = self.get(task.id)
-        if result is None:
-            raise KeyError(f"scheduled task not found: {identifier}")
-        return result
+            updated = db.execute("SELECT * FROM scheduled_tasks WHERE id=?", (task.id,)).fetchone()
+            assert updated is not None
+            return self._task_from_row(updated)
 
     def delete(self, identifier: str, *, expected_revision: int | None = None) -> bool:
-        task = self.resolve(identifier)
-        if expected_revision is not None and task.revision != expected_revision:
-            raise RevisionConflict(
-                f"scheduled task {task.name!r} changed from revision "
-                f"{expected_revision} to {task.revision}"
-            )
-        revision_clause = " AND revision=?" if expected_revision is not None else ""
-        params: tuple[Any, ...] = (
-            (task.id, expected_revision) if expected_revision is not None else (task.id,)
-        )
         with self.connect() as db:
-            cursor = db.execute(f"DELETE FROM scheduled_tasks WHERE id=?{revision_clause}", params)
-        if cursor.rowcount == 0 and expected_revision is not None:
-            current = self.get(task.id)
-            current_revision = current.revision if current is not None else "deleted"
-            raise RevisionConflict(
-                f"scheduled task {task.name!r} changed from revision "
-                f"{expected_revision} to {current_revision}"
-            )
-        return cursor.rowcount > 0
+            db.execute("BEGIN IMMEDIATE")
+            row = self._resolve_row(db, identifier)
+            if row is None:
+                raise KeyError(f"scheduled task not found: {identifier}")
+            task = self._task_from_row(row)
+            if expected_revision is not None and task.revision != expected_revision:
+                raise RevisionConflict(
+                    f"scheduled task {task.name!r} changed from revision "
+                    f"{expected_revision} to {task.revision}"
+                )
+            cursor = db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task.id,))
+            return cursor.rowcount > 0
 
     def set_next_runs(self, next_runs: dict[str, datetime | None]) -> None:
         """Update cached next-run values in one transaction for fast bulk status."""
@@ -572,6 +580,72 @@ class SchedulerRepository:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def prune_history(
+        self,
+        *,
+        before: datetime,
+        keep_latest: int = 0,
+        dry_run: bool = False,
+    ) -> HistoryPruneResult:
+        """Remove old terminal attempts while retaining recent runs per definition.
+
+        Active runs are never eligible. Log paths are deleted only when they
+        resolve beneath this registry's run directory.
+        """
+        if keep_latest < 0:
+            raise ValueError("keep_latest cannot be negative")
+        cutoff = _iso(parse_datetime(before))
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                """WITH ranked AS (
+                       SELECT id, stdout_path, stderr_path, finished_at,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY COALESCE(task_id, 'deleted:' || task_name)
+                                  ORDER BY COALESCE(started_at, scheduled_for, finished_at) DESC,
+                                           id DESC
+                              ) AS newest_rank
+                       FROM task_runs
+                       WHERE status <> 'running' AND finished_at IS NOT NULL
+                   )
+                   SELECT id, stdout_path, stderr_path
+                   FROM ranked
+                   WHERE finished_at < ? AND newest_rank > ?""",
+                (cutoff, keep_latest),
+            ).fetchall()
+            if rows and not dry_run:
+                db.executemany("DELETE FROM task_runs WHERE id=?", [(row["id"],) for row in rows])
+
+        if dry_run:
+            return HistoryPruneResult(runs_deleted=len(rows), log_files_deleted=0)
+
+        run_root = (self.database_path.parent / "runs").resolve()
+        deleted_logs = 0
+        errors: list[str] = []
+        for row in rows:
+            for value in (row["stdout_path"], row["stderr_path"]):
+                if not value:
+                    continue
+                path = Path(value).resolve()
+                if not path.is_relative_to(run_root):
+                    errors.append(f"refused log outside run directory: {path}")
+                    continue
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    errors.append(f"could not delete {path}: {exc}")
+                else:
+                    deleted_logs += 1
+                    with suppress(OSError):
+                        path.parent.rmdir()
+        return HistoryPruneResult(
+            runs_deleted=len(rows),
+            log_files_deleted=deleted_logs,
+            log_errors=tuple(errors),
+        )
 
     def heartbeat(self, *, pid: int, hostname: str, started_at: datetime) -> None:
         now = _iso(utc_now())

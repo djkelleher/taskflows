@@ -7,14 +7,27 @@ Windows.
 """
 
 from .models import ScheduledTask, ScheduleSpec
-from .repository import SchedulerRepository
+from .repository import HistoryPruneResult, SchedulerRepository
+from .status import (
+    DiagnosticCheck,
+    SchedulerRuntimeStatus,
+    SchedulerStatus,
+    diagnose_scheduler,
+    scheduler_status,
+)
 from .supervisor import SchedulerSupervisor, SupervisorStatus, get_supervisor
 
 __all__ = [
+    "DiagnosticCheck",
+    "HistoryPruneResult",
     "ScheduleSpec",
     "ScheduledTask",
     "SchedulerRepository",
+    "SchedulerRuntimeStatus",
+    "SchedulerStatus",
     "SchedulerSupervisor",
     "SupervisorStatus",
+    "diagnose_scheduler",
     "get_supervisor",
+    "scheduler_status",
 ]

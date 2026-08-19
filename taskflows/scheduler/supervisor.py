@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from contextlib import suppress
@@ -22,7 +23,9 @@ class SupervisorStatus:
     backend: Literal["systemd", "launchd", "windows-task-scheduler"]
     installed: bool
     state: SupervisorState
+    automatic: bool | None = None
     definition_path: str | None = None
+    last_exit_code: int | None = None
     detail: str | None = None
 
 
@@ -91,6 +94,21 @@ class SystemdSupervisor:
                 detail=str(exc),
             )
         detail = _completed_detail(result)
+        try:
+            enabled_result = native._run(
+                ["systemctl", "--user", "is-enabled", native.LINUX_UNIT_NAME], check=False
+            )
+        except OSError:
+            enabled_detail = None
+        else:
+            enabled_detail = _completed_detail(enabled_result)
+        automatic = (
+            True
+            if enabled_detail in {"enabled", "enabled-runtime", "linked", "linked-runtime"}
+            else False
+            if enabled_detail in {"disabled", "masked", "masked-runtime"}
+            else None
+        )
         state: SupervisorState
         if result.returncode == 0 and detail == "active":
             state = "running"
@@ -104,6 +122,7 @@ class SystemdSupervisor:
             backend="systemd",
             installed=True,
             state=state,
+            automatic=automatic,
             definition_path=str(self.definition_path),
             detail=detail,
         )
@@ -133,15 +152,15 @@ class LaunchdSupervisor:
     def start(self) -> None:
         if not self.definition_path.exists():
             raise RuntimeError("the Taskflows scheduler LaunchAgent is not installed")
-        native._run(["launchctl", "enable", self.service_target])
         loaded = native._run(["launchctl", "print", self.service_target], check=False)
         if loaded.returncode != 0:
             native._run(["launchctl", "bootstrap", self.domain, str(self.definition_path)])
         native._run(["launchctl", "kickstart", "-k", self.service_target])
 
     def stop(self) -> None:
+        if not self.definition_path.exists():
+            raise RuntimeError("the Taskflows scheduler LaunchAgent is not installed")
         native._run(["launchctl", "bootout", self.domain, str(self.definition_path)], check=False)
-        native._run(["launchctl", "disable", self.service_target])
 
     def restart(self) -> None:
         # ``kickstart`` alone fails after ``stop`` because bootout unloads the
@@ -172,11 +191,35 @@ class LaunchdSupervisor:
         state: SupervisorState = "stopped"
         if result.returncode == 0 and detail and "state = running" in detail:
             state = "running"
+        exit_match = re.search(r"last exit code\s*=\s*(-?\d+)", detail or "")
+        last_exit_code = int(exit_match.group(1)) if exit_match else None
+        if state == "stopped" and last_exit_code not in (None, 0):
+            state = "failed"
+        automatic: bool | None = None
+        try:
+            disabled = native._run(["launchctl", "print-disabled", self.domain], check=False)
+        except OSError:
+            disabled_detail = ""
+        else:
+            disabled_detail = _completed_detail(disabled) or ""
+            if disabled.returncode == 0:
+                # print-disabled lists persistent overrides. An absent label
+                # uses launchd's enabled-by-default LaunchAgent behavior.
+                automatic = True
+        disabled_match = re.search(
+            rf'"{re.escape(native.MACOS_LABEL)}"\s*=>\s*(true|false)',
+            disabled_detail,
+            flags=re.IGNORECASE,
+        )
+        if disabled_match:
+            automatic = disabled_match.group(1).lower() == "false"
         return SupervisorStatus(
             backend="launchd",
             installed=True,
             state=state,
+            automatic=automatic,
             definition_path=str(self.definition_path),
+            last_exit_code=last_exit_code,
             detail=detail,
         )
 
@@ -234,6 +277,10 @@ class WindowsTaskSupervisor:
                 backend="windows-task-scheduler", installed=False, state="not-installed"
             )
         task_state = int(getattr(task, "State", 0))
+        enabled_value = getattr(task, "Enabled", None)
+        automatic = bool(enabled_value) if enabled_value is not None else None
+        result_value = getattr(task, "LastTaskResult", None)
+        last_exit_code = int(result_value) if isinstance(result_value, int) else None
         # TASK_STATE_RUNNING=4, READY=3, QUEUED=2, DISABLED=1, UNKNOWN=0.
         state: SupervisorState = "running" if task_state == 4 else "stopped"
         if task_state == 2:
@@ -244,6 +291,8 @@ class WindowsTaskSupervisor:
             backend="windows-task-scheduler",
             installed=True,
             state=state,
+            automatic=automatic,
+            last_exit_code=last_exit_code,
             detail=f"Task Scheduler state {task_state}",
         )
 

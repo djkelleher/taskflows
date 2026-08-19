@@ -50,7 +50,9 @@ slot transactionally, and starts the command without a shell. Taskflows:
 - uses a dedicated process group and terminates the process tree on timeout;
 - captures stdout and stderr in owner-only run directories;
 - records success, failure, timeout, missed, skipped, and interrupted states;
-- marks orphaned `running` records interrupted on daemon startup.
+- marks orphaned `running` records interrupted on daemon startup and keeps
+  checking them during reconciliation, releasing overlap slots after orphaned
+  children exit without requiring another daemon restart.
 
 Environment values are never returned from list APIs. The SQLite database and
 run logs are created with owner-only permissions on POSIX systems.
@@ -63,6 +65,7 @@ tf scheduler status
 tf scheduler start
 tf scheduler stop
 tf scheduler restart
+tf scheduler doctor [--json]
 tf scheduler run              # foreground/debug mode
 tf scheduler uninstall
 
@@ -75,27 +78,38 @@ tf schedule list --json
 tf schedule show NAME [--json]
 tf schedule history [NAME]
 tf schedule logs NAME [--stream stdout|stderr|both] [--lines 200]
+tf schedule prune [--older-than 30d] [--keep-latest 10] [--dry-run]
 tf schedule run NAME
 tf schedule enable NAME
 tf schedule disable NAME
 tf schedule remove NAME
 ```
 
-`tf scheduler status --json` combines the native manager state with the daemon
-heartbeat. An unhealthy status exits non-zero, making it directly useful in
-shell scripts and monitoring checks.
+`tf scheduler status --json` returns the shared `SchedulerStatus` contract. It
+combines native manager state and automatic-start configuration with heartbeat,
+registry identity, and task counts. `tf scheduler doctor` adds registration,
+SQLite integrity/permission, heartbeat, and dispatch-readiness checks with
+concrete remedies. Unhealthy results exit non-zero, making both commands useful
+in shell scripts and monitoring checks.
 
 Internally, systemd, launchd, and Windows Task Scheduler implement the same
 `SchedulerSupervisor` lifecycle (`install`, `uninstall`, `start`, `stop`,
 `restart`, and `status`). Scheduling remains inside Taskflows, so native
 platform differences do not leak into task definitions or trigger semantics.
+Stopping preserves login/boot registration on every platform; uninstalling
+removes it.
+
+History pruning never deletes active attempts and protects the requested number
+of newest terminal attempts per task definition. Captured logs are removed only
+when their resolved path is beneath the registry's Taskflows run directory.
 
 `tf status` now uses the fast bulk systemd summary path for legacy Linux
 services. Use `tf status --details` when last/next activation and timer
 properties are needed for every matched service.
 
-REST clients can use `/api/schedules` and `/api/schedule-runs`. These endpoints
-use the existing HMAC/JWT authentication middleware. Schedule representations
+REST clients can use `/api/schedules`, `/api/schedule-runs`,
+`/api/scheduler/status`, and `/api/scheduler/diagnostics`. These endpoints use
+the existing HMAC/JWT authentication middleware. Schedule representations
 include a `revision`; clients can send `expected_revision` when enabling or
 disabling, replacing, or deleting a definition and receive HTTP 409 instead of
 silently overwriting a concurrent change. CLI replacements offer the same

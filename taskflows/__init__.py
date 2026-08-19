@@ -25,10 +25,16 @@ _SYMBOL_MODULES = {
     "Periodic": "schedule",
     "ScheduleSpec": "scheduler",
     "ScheduledTask": "scheduler",
+    "DiagnosticCheck": "scheduler",
+    "HistoryPruneResult": "scheduler",
+    "SchedulerRuntimeStatus": "scheduler",
+    "SchedulerStatus": "scheduler",
     "SchedulerRepository": "scheduler",
     "SchedulerSupervisor": "scheduler",
     "SupervisorStatus": "scheduler",
+    "diagnose_scheduler": "scheduler",
     "get_supervisor": "scheduler",
+    "scheduler_status": "scheduler",
     # docker environments
     "ContainerLimits": "docker",
     "DockerContainer": "docker",
@@ -87,12 +93,18 @@ if TYPE_CHECKING:
     from .monitor import MissedRunAlert
     from .schedule import Calendar, Periodic
     from .scheduler import (
+        DiagnosticCheck,
+        HistoryPruneResult,
         ScheduledTask,
         SchedulerRepository,
+        SchedulerRuntimeStatus,
+        SchedulerStatus,
         SchedulerSupervisor,
         ScheduleSpec,
         SupervisorStatus,
+        diagnose_scheduler,
         get_supervisor,
+        scheduler_status,
     )
     from .serialization import load_services_from_yaml, save_services_to_yaml
     from .service import RestartPolicy, Service, ServiceRegistry, Venv, Watchdog

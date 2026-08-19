@@ -158,6 +158,8 @@ SQLite rather than issuing one OS query per task.
 `SchedulerSupervisor` gives all three native managers the same install,
 uninstall, start, stop, restart, and status lifecycle. The supervisor controls
 only the daemon; portable task scheduling remains inside Taskflows.
+`SchedulerStatus` is the higher-level common contract, combining normalized
+native and automatic-start state with registry heartbeat health and task counts.
 
 The older `Calendar` and `Periodic` objects compile to systemd timers and remain
 available for Linux `Service` objects.
