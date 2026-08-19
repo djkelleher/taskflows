@@ -35,7 +35,10 @@ APScheduler's persistent SQLAlchemy job store retains dispatch times during a
 daemon outage. The `scheduled_tasks` table remains authoritative: startup and
 runtime reconciliation removes stale scheduler jobs and updates changed ones.
 Exactly-once execution cannot be guaranteed across machine crashes, so commands
-should be idempotent. Every attempt receives a durable run record.
+should be idempotent. Once the stable runner reserves an attempt, it receives a
+durable run record. A hard crash in the hand-off from APScheduler to the runner
+can lose or duplicate an occurrence; this limitation is reported explicitly
+rather than claiming stronger delivery semantics.
 
 ## Execution
 
@@ -57,6 +60,9 @@ run logs are created with owner-only permissions on POSIX systems.
 ```bash
 tf scheduler install
 tf scheduler status
+tf scheduler start
+tf scheduler stop
+tf scheduler restart
 tf scheduler run              # foreground/debug mode
 tf scheduler uninstall
 
@@ -71,12 +77,24 @@ tf schedule disable NAME
 tf schedule remove NAME
 ```
 
+`tf scheduler status --json` combines the native manager state with the daemon
+heartbeat. An unhealthy status exits non-zero, making it directly useful in
+shell scripts and monitoring checks.
+
+Internally, systemd, launchd, and Windows Task Scheduler implement the same
+`SchedulerSupervisor` lifecycle (`install`, `uninstall`, `start`, `stop`,
+`restart`, and `status`). Scheduling remains inside Taskflows, so native
+platform differences do not leak into task definitions or trigger semantics.
+
 `tf status` now uses the fast bulk systemd summary path for legacy Linux
 services. Use `tf status --details` when last/next activation and timer
 properties are needed for every matched service.
 
 REST clients can use `/api/schedules` and `/api/schedule-runs`. These endpoints
-use the existing HMAC/JWT authentication middleware.
+use the existing HMAC/JWT authentication middleware. Schedule representations
+include a `revision`; clients can send `expected_revision` when enabling or
+disabling a definition and receive HTTP 409 instead of silently overwriting a
+concurrent change.
 
 ## Native services
 

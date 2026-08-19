@@ -9,19 +9,28 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MISSED,
+    EVENT_JOB_SUBMITTED,
+)
 from click.testing import CliRunner
+from fastapi import HTTPException
 
 from taskflows.admin.api import (
     create_portable_schedule,
     list_portable_schedules,
+    list_servers_endpoint,
     portable_schedule_history,
     run_portable_schedule,
+    set_portable_schedule_enabled,
 )
 from taskflows.admin.cli import cli
 from taskflows.admin.models import PortableScheduleRequest
+from taskflows.exceptions import RevisionConflict
 from taskflows.schedule import Calendar
-from taskflows.scheduler import installer
+from taskflows.scheduler import installer, supervisor
 from taskflows.scheduler import repository as repository_module
 from taskflows.scheduler.daemon import DaemonAlreadyRunning, SchedulerDaemon, _SingletonLock
 from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, utc_now
@@ -76,6 +85,22 @@ def test_task_rejects_non_finite_timeout_and_invalid_environment():
             schedule,
             environment={"PATH": "first", "Path": "second"},
         )
+
+
+def test_task_rejects_string_commands_and_unsafe_names_and_freezes_environment():
+    schedule = ScheduleSpec.interval(60)
+    with pytest.raises(TypeError, match="sequence of arguments"):
+        ScheduledTask.create("split-command", "echo", schedule)
+    for name in (" leading", "trailing ", "line\nbreak", "escape\x1bname"):
+        with pytest.raises(ValueError, match="task name|control characters"):
+            ScheduledTask.create(name, ["echo", "ok"], schedule)
+
+    environment = {"MODE": "before"}
+    task = ScheduledTask.create("immutable", ["echo", "ok"], schedule, environment=environment)
+    environment["MODE"] = "after"
+    assert task.environment == {"MODE": "before"}
+    with pytest.raises(TypeError):
+        task.environment["MODE"] = "mutated"
 
 
 def test_legacy_calendar_datetime_preserves_fractional_seconds():
@@ -174,6 +199,18 @@ def test_set_enabled_is_idempotent(tmp_path):
     unchanged = repository.set_enabled(task.id, True)
 
     assert unchanged.revision == task.revision
+
+
+def test_set_enabled_reports_stale_revision(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("revisioned", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    disabled = repository.set_enabled(task.id, False, expected_revision=task.revision)
+
+    with pytest.raises(RevisionConflict, match="changed from revision"):
+        repository.set_enabled(task.id, True, expected_revision=task.revision)
+    assert repository.resolve(task.id) == disabled
 
 
 def test_repository_name_matching_is_case_sensitive(tmp_path):
@@ -295,6 +332,15 @@ def test_repository_migrates_v1_run_history_without_losing_rows(tmp_path):
     assert migrated.history()[0]["task_name"] == "legacy"
 
 
+def test_repository_rejects_newer_database_schema(tmp_path):
+    database_path = tmp_path / "scheduler.sqlite3"
+    with sqlite3.connect(database_path) as db:
+        db.execute("PRAGMA user_version=999")
+
+    with pytest.raises(RuntimeError, match="newer than this Taskflows version"):
+        SchedulerRepository(database_path)
+
+
 def test_runner_captures_output_environment_and_working_directory(tmp_path):
     repository = make_repository(tmp_path)
     output_file = tmp_path / "result.txt"
@@ -317,6 +363,7 @@ def test_runner_captures_output_environment_and_working_directory(tmp_path):
     assert output_file.read_text() == f"present:{tmp_path.name}"
     run = repository.history(task.id)[0]
     assert run["status"] == "succeeded"
+    assert run["runner_pid"] != os.getpid()
     assert Path(run["stdout_path"]).read_text() == "stdout\n"
     assert Path(run["stderr_path"]).read_text() == "stderr\n"
     if os.name != "nt":
@@ -502,7 +549,7 @@ def test_stale_scheduler_event_does_not_disable_replacement(tmp_path):
     job_id = daemon._job_id(original.id)
     daemon._known_revisions[job_id] = original.revision
     daemon._known_date_revisions[job_id] = original.revision
-    daemon._submitted_date_jobs.add(job_id)
+    daemon._submitted_date_jobs[job_id] = original.revision
     replacement = repository.add(
         ScheduledTask.create("replace-me", ["echo", "new"], ScheduleSpec.interval(60)),
         replace_existing=True,
@@ -520,6 +567,30 @@ def test_stale_scheduler_event_does_not_disable_replacement(tmp_path):
 
     daemon._on_scheduler_event(SimpleNamespace(job_id=job_id, code=EVENT_JOB_EXECUTED))
     assert job_id not in daemon._submitted_date_jobs
+
+
+def test_late_submission_event_cannot_block_reenabled_one_shot(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "fast-once", ["echo", "ok"], ScheduleSpec.once(utc_now() + timedelta(days=1))
+        )
+    )
+    daemon = SchedulerDaemon(repository.database_path)
+    job_id = daemon._job_id(task.id)
+    daemon._known_revisions[job_id] = task.revision
+    daemon._known_date_revisions[job_id] = task.revision
+
+    # A very fast executor can queue completion before APScheduler dispatches
+    # its submission event to listeners.
+    daemon._on_scheduler_event(SimpleNamespace(job_id=job_id, code=EVENT_JOB_EXECUTED))
+    daemon._on_scheduler_event(SimpleNamespace(job_id=job_id, code=EVENT_JOB_SUBMITTED))
+
+    assert job_id not in daemon._submitted_date_jobs
+    disabled = repository.resolve(task.id)
+    reenabled = repository.set_enabled(task.id, True, expected_revision=disabled.revision)
+    assert daemon._add_or_update(reenabled) is not None
+    daemon.scheduler.remove_all_jobs()
 
 
 def test_one_time_scheduler_error_consumes_definition(tmp_path):
@@ -562,6 +633,7 @@ def test_schedule_cli_add_list_and_run(tmp_path, monkeypatch):
         ],
     )
     assert result.exit_code == 0, result.output
+    assert "scheduler daemon is not responding" in result.output
     assert repository.resolve("cli-job")
     result = runner.invoke(cli, ["schedule", "list", "--json"])
     assert result.exit_code == 0
@@ -584,8 +656,8 @@ def test_scheduler_status_rejects_future_heartbeat(tmp_path, monkeypatch):
 
     result = CliRunner().invoke(cli, ["scheduler", "status"])
 
-    assert result.exit_code == 0
-    assert result.output.strip() == "stopped or unresponsive"
+    assert result.exit_code == 1
+    assert "stopped or unresponsive" in result.output
 
 
 @pytest.mark.asyncio
@@ -614,6 +686,33 @@ async def test_portable_schedule_api_uses_bulk_registry(tmp_path, monkeypatch):
     assert history["runs"][0]["status"] == "succeeded"
 
 
+@pytest.mark.asyncio
+async def test_portable_schedule_api_reports_revision_conflict(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("api-revision", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    monkeypatch.setattr("taskflows.admin.api.SchedulerRepository", lambda: repository)
+    disabled = repository.set_enabled(task.id, False, expected_revision=task.revision)
+
+    with pytest.raises(HTTPException) as raised:
+        await set_portable_schedule_enabled(task.id, True, task.revision)
+
+    assert raised.value.status_code == 409
+    assert repository.resolve(task.id) == disabled
+
+
+@pytest.mark.asyncio
+async def test_list_servers_endpoint_uses_core_signature(monkeypatch):
+    expected = {"servers": [], "hostname": "test"}
+
+    async def fake_list_servers():
+        return expected
+
+    monkeypatch.setattr("taskflows.admin.api.list_servers", fake_list_servers)
+    assert await list_servers_endpoint() == expected
+
+
 def test_linux_installer_writes_one_user_service(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(installer, "_home_dir", lambda: tmp_path)
@@ -631,6 +730,69 @@ def test_linux_installer_writes_one_user_service(tmp_path, monkeypatch):
         ["systemctl", "--user", "enable", installer.LINUX_UNIT_NAME],
         ["systemctl", "--user", "restart", installer.LINUX_UNIT_NAME],
     ]
+
+
+def test_supervisor_selection_exposes_one_common_lifecycle():
+    assert isinstance(supervisor.get_supervisor("linux"), supervisor.SystemdSupervisor)
+    assert isinstance(supervisor.get_supervisor("darwin"), supervisor.LaunchdSupervisor)
+    assert isinstance(supervisor.get_supervisor("win32"), supervisor.WindowsTaskSupervisor)
+    with pytest.raises(NotImplementedError, match="unsupported"):
+        supervisor.get_supervisor("plan9")
+
+
+def test_systemd_supervisor_reports_native_state(tmp_path, monkeypatch):
+    unit = tmp_path / ".config" / "systemd" / "user" / installer.LINUX_UNIT_NAME
+    unit.parent.mkdir(parents=True)
+    unit.write_text("unit")
+    monkeypatch.setattr(installer, "_home_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        installer,
+        "_run",
+        lambda command, check=True: __import__("subprocess").CompletedProcess(
+            command, 0, "active\n", ""
+        ),
+    )
+
+    status = supervisor.SystemdSupervisor().status()
+
+    assert status.installed is True
+    assert status.state == "running"
+    assert status.backend == "systemd"
+
+
+def test_launchd_supervisor_distinguishes_loaded_but_stopped(tmp_path, monkeypatch):
+    plist = tmp_path / "Library" / "LaunchAgents" / f"{installer.MACOS_LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("plist")
+    monkeypatch.setattr(installer, "_home_dir", lambda: tmp_path)
+    monkeypatch.setattr(supervisor.os, "getuid", lambda: 501, raising=False)
+    monkeypatch.setattr(
+        installer,
+        "_run",
+        lambda command, check=True: __import__("subprocess").CompletedProcess(
+            command, 0, "state = exited\n", ""
+        ),
+    )
+
+    status = supervisor.LaunchdSupervisor().status()
+
+    assert status.installed is True
+    assert status.state == "stopped"
+
+
+@pytest.mark.parametrize(
+    ("native_state", "expected"),
+    [(4, "running"), (3, "stopped"), (1, "stopped"), (0, "unknown")],
+)
+def test_windows_supervisor_normalizes_task_states(native_state, expected, monkeypatch):
+    monkeypatch.setattr(
+        supervisor, "_windows_registered_task", lambda: SimpleNamespace(State=native_state)
+    )
+
+    status = supervisor.WindowsTaskSupervisor().status()
+
+    assert status.installed is True
+    assert status.state == expected
 
 
 def test_macos_installer_writes_launch_agent(tmp_path, monkeypatch):

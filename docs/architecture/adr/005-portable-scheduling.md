@@ -34,7 +34,9 @@ privileged, resource-controlled, or dependency-aware processes.
 ### Negative
 
 - The daemon is a single local scheduling dependency and must be OS-supervised.
-- Task execution is at-least-once around hard crashes, not exactly-once.
+- A hard crash during APScheduler-to-runner hand-off can lose or duplicate an
+  occurrence. Commands must be idempotent until durable occurrence leasing is
+  implemented.
 - Wake-from-sleep and privileged execution remain native-platform concerns.
 - APScheduler 3 job stores must not be shared by multiple scheduler processes;
   Taskflows enforces a local singleton lock.

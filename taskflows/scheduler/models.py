@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -147,8 +148,12 @@ class ScheduledTask:
     next_run_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        if not self.id or not self.name.strip() or "\x00" in self.name:
-            raise ValueError("task id and name cannot be empty or contain NUL bytes")
+        if not self.id or not self.name.strip():
+            raise ValueError("task id and name cannot be empty")
+        if self.name != self.name.strip():
+            raise ValueError("task name cannot have leading or trailing whitespace")
+        if any(ord(character) < 32 or ord(character) == 127 for character in self.id + self.name):
+            raise ValueError("task id and name cannot contain control characters")
         if not self.command or any(not isinstance(part, str) or not part for part in self.command):
             raise ValueError("command must contain at least one non-empty argument")
         if any("\x00" in part for part in self.command):
@@ -190,6 +195,10 @@ class ScheduledTask:
             if normalized_key in environment_names:
                 raise ValueError("environment variable names must be unique ignoring case")
             environment_names.add(normalized_key)
+        # A frozen dataclass should not expose a mutable mapping through one of
+        # its fields. Copy first so changes to the caller's dictionary cannot
+        # silently alter a persisted definition after validation.
+        object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
 
     @classmethod
     def create(
@@ -199,6 +208,8 @@ class ScheduledTask:
         schedule: ScheduleSpec,
         **kwargs: Any,
     ) -> ScheduledTask:
+        if isinstance(command, (str, bytes)):
+            raise TypeError("command must be a sequence of arguments, not a string")
         now = utc_now()
         if schedule.kind == "interval" and schedule.start_at is None:
             schedule = replace(schedule, start_at=now.isoformat())

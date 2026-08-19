@@ -143,6 +143,7 @@ portable registry:
 ```bash
 # Installs a systemd user service, macOS LaunchAgent, or per-user Windows task.
 tf scheduler install
+tf scheduler status
 
 # One-time execution. Timestamps must include an offset or Z.
 tf schedule add cleanup --at 2026-08-20T02:00:00Z -- python cleanup.py
@@ -158,6 +159,11 @@ tf schedule list
 tf schedule history report
 tf schedule run report
 tf schedule disable report
+
+# The lifecycle commands are identical on Linux, macOS, and Windows.
+tf scheduler stop
+tf scheduler start
+tf scheduler restart
 ```
 
 The Taskflows SQLite registry is authoritative. APScheduler maintains its own
@@ -165,6 +171,9 @@ persistent dispatch state in that database and is reconciled from Taskflows
 definitions. Only task IDs are placed in scheduler jobs; commands and
 environment values remain in the Taskflows registry. Run stdout and stderr are
 written under `~/.taskflows/data/runs/`.
+
+`tf scheduler status --json` reports both the native supervisor state and the
+Taskflows daemon heartbeat, and exits non-zero when the daemon is unhealthy.
 
 Use portable schedules for bounded jobs. Continue to use `Service` for
 long-running Linux daemons, cgroups, watchdogs, and systemd dependency graphs.

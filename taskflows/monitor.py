@@ -97,6 +97,12 @@ def load_monitor_configs() -> dict[str, MissedRunAlert]:
 
 
 def _usec_to_datetime(raw: Any) -> datetime | None:
+    # get_schedule_info() exposes normalized datetimes. Retain support for raw
+    # D-Bus microseconds for compatibility with older callers and stored mocks.
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None or raw.utcoffset() is None:
+            return raw.replace(tzinfo=UTC)
+        return raw.astimezone(UTC)
     value = getattr(raw, "value", raw)
     try:
         usec = int(value)

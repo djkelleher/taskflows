@@ -59,6 +59,7 @@ from taskflows.admin.security import (
 )
 from taskflows.admin.utils import with_hostname
 from taskflows.common import Config, logger
+from taskflows.exceptions import RevisionConflict
 from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
 from taskflows.scheduler.models import ScheduledTask, ScheduleSpec
 from taskflows.scheduler.repository import SchedulerRepository
@@ -520,7 +521,7 @@ async def metrics_endpoint():
 
 @app.get("/list-servers")
 async def list_servers_endpoint():
-    return await list_servers(as_json=True)
+    return await list_servers()
 
 
 @app.get("/next")
@@ -657,6 +658,9 @@ def _portable_task_data(task: ScheduledTask) -> dict:
         "misfire_grace_time": task.misfire_grace_time,
         "coalesce": task.coalesce,
         "max_instances": task.max_instances,
+        "revision": task.revision,
+        "created_at": task.created_at.isoformat(),
+        "updated_at": task.updated_at.isoformat(),
         "next_run_at": task.next_run_at.isoformat() if task.next_run_at else None,
     }
 
@@ -712,11 +716,22 @@ async def create_portable_schedule(request: PortableScheduleRequest):
 
 
 @app.patch("/api/schedules/{identifier}/enabled")
-async def set_portable_schedule_enabled(identifier: str, enabled: bool = Body(..., embed=True)):
+async def set_portable_schedule_enabled(
+    identifier: str,
+    enabled: bool = Body(..., embed=True),
+    expected_revision: int | None = Body(None, embed=True, ge=1),
+):
     try:
-        task = await asyncio.to_thread(SchedulerRepository().set_enabled, identifier, enabled)
+        task = await asyncio.to_thread(
+            SchedulerRepository().set_enabled,
+            identifier,
+            enabled,
+            expected_revision=expected_revision,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RevisionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return _portable_task_data(task)
 
 
@@ -926,7 +941,7 @@ if UI_ENABLED:
     @app.get("/api/servers")
     async def servers_api():
         """List servers from UI."""
-        return await list_servers(as_json=True)
+        return await list_servers()
 
     @app.post("/api/create")
     async def create_api(

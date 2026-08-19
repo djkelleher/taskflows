@@ -8,5 +8,13 @@ Windows.
 
 from .models import ScheduledTask, ScheduleSpec
 from .repository import SchedulerRepository
+from .supervisor import SchedulerSupervisor, SupervisorStatus, get_supervisor
 
-__all__ = ["ScheduleSpec", "ScheduledTask", "SchedulerRepository"]
+__all__ = [
+    "ScheduleSpec",
+    "ScheduledTask",
+    "SchedulerRepository",
+    "SchedulerSupervisor",
+    "SupervisorStatus",
+    "get_supervisor",
+]

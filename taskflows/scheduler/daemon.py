@@ -116,7 +116,7 @@ class SchedulerDaemon:
         self.reconcile_interval = reconcile_interval
         self.started_at = utc_now()
         self.stop_event = threading.Event()
-        self._submitted_date_jobs: set[str] = set()
+        self._submitted_date_jobs: dict[str, int] = {}
         self._submitted_lock = threading.RLock()
         self._known_date_revisions: dict[str, int] = {}
         self._known_revisions: dict[str, int] = {}
@@ -151,23 +151,30 @@ class SchedulerDaemon:
         with self._submitted_lock:
             known_revision = self._known_revisions.get(event.job_id)
             is_known_date = event.job_id in self._known_date_revisions
-            if event.code == EVENT_JOB_SUBMITTED and is_known_date:
-                self._submitted_date_jobs.add(event.job_id)
-            elif event.code in (EVENT_JOB_EXECUTED, EVENT_JOB_ERROR):
-                # Completion must release the one-shot guard even when the task
-                # was deleted or replaced while its old revision was running.
-                self._submitted_date_jobs.discard(event.job_id)
         task = self.repository.get(event.job_id.removeprefix(JOB_PREFIX))
         if task is None:
+            if event.code in (EVENT_JOB_EXECUTED, EVENT_JOB_ERROR):
+                with self._submitted_lock:
+                    self._submitted_date_jobs.pop(event.job_id, None)
             return
         # Events can arrive after the registry definition was replaced but
         # before reconciliation updates APScheduler. Never attribute an old
         # job's event to (or disable) the new definition.
         if known_revision is not None and task.revision != known_revision:
+            if event.code in (EVENT_JOB_EXECUTED, EVENT_JOB_ERROR):
+                with self._submitted_lock:
+                    if self._submitted_date_jobs.get(event.job_id) == known_revision:
+                        self._submitted_date_jobs.pop(event.job_id, None)
             return
         if event.code == EVENT_JOB_SUBMITTED:
+            if is_known_date and known_revision is not None:
+                with self._submitted_lock:
+                    self._submitted_date_jobs[event.job_id] = known_revision
             return
         if event.code in (EVENT_JOB_EXECUTED, EVENT_JOB_ERROR):
+            with self._submitted_lock:
+                if self._submitted_date_jobs.get(event.job_id) == known_revision:
+                    self._submitted_date_jobs.pop(event.job_id, None)
             # A DateTrigger is consumed when APScheduler dispatches it, even
             # if the callable fails before the stable runner can claim the
             # task. Disable the definition here as a final safety net so a
@@ -209,7 +216,7 @@ class SchedulerDaemon:
     def _add_or_update(self, task: ScheduledTask, existing: Any = None) -> Any:
         job_id = self._job_id(task.id)
         with self._submitted_lock:
-            if job_id in self._submitted_date_jobs:
+            if self._submitted_date_jobs.get(job_id) == task.revision:
                 return existing
             # Date jobs disappear from APScheduler's job store immediately
             # before their executor thread starts. Remember the revision so a
@@ -287,6 +294,7 @@ class SchedulerDaemon:
                 with self._submitted_lock:
                     self._known_revisions.pop(job.id, None)
                     self._known_date_revisions.pop(job.id, None)
+                    self._submitted_date_jobs.pop(job.id, None)
         for task in tasks:
             if task.enabled:
                 job_id = self._job_id(task.id)

@@ -62,7 +62,7 @@ async def _run_check(config, units, next_start=None):
         patch(
             "taskflows.systemd.get_schedule_info",
             new_callable=AsyncMock,
-            return_value={"Next Start": _usec(next_start) if next_start else 0},
+            return_value={"Next Start": next_start},
         ),
     ):
         return await check_service("my-job", config, NOW)
@@ -77,6 +77,11 @@ async def test_healthy_service_reports_no_problems(dst):
     ]
     problems = await _run_check(config, units, next_start=NOW + timedelta(hours=1))
     assert problems == []
+
+
+def test_schedule_timestamp_normalizer_accepts_datetime_and_legacy_microseconds():
+    assert monitor_mod._usec_to_datetime(NOW) == NOW
+    assert monitor_mod._usec_to_datetime(_usec(NOW)) == NOW
 
 
 @pytest.mark.asyncio

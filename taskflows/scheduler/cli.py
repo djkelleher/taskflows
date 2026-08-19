@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime
+from typing import Any, Literal
 
 import click
 
@@ -10,10 +12,29 @@ from .installer import install, uninstall
 from .models import ScheduledTask, ScheduleSpec, parse_datetime, utc_now
 from .repository import SchedulerRepository
 from .runner import run_now
+from .supervisor import get_supervisor
+
+HEARTBEAT_TIMEOUT_SECONDS = 5
 
 
 def _repository() -> SchedulerRepository:
     return SchedulerRepository()
+
+
+def _daemon_runtime_state(repository: SchedulerRepository) -> dict[str, Any]:
+    state = repository.daemon_state() or {}
+    heartbeat_value = state.get("heartbeat_at")
+    if heartbeat_value:
+        try:
+            heartbeat = parse_datetime(heartbeat_value)
+            age = (datetime.now(UTC) - heartbeat.astimezone(UTC)).total_seconds()
+        except (TypeError, ValueError):
+            age = None
+        state["heartbeat_age_seconds"] = age
+        state["healthy"] = age is not None and 0 <= age < HEARTBEAT_TIMEOUT_SECONDS
+    else:
+        state["healthy"] = False
+    return state
 
 
 def _parse_environment(values: tuple[str, ...]) -> dict[str, str]:
@@ -85,10 +106,17 @@ def add_schedule(
             coalesce=not no_coalesce,
             max_instances=max_instances,
         )
-        saved = _repository().add(task, replace_existing=replace)
+        repository = _repository()
+        saved = repository.add(task, replace_existing=replace)
     except (TypeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Scheduled {saved.name} ({saved.schedule.describe()})")
+    if saved.enabled and not _daemon_runtime_state(repository)["healthy"]:
+        click.echo(
+            "Warning: the scheduler daemon is not responding; run "
+            "'tf scheduler install' or 'tf scheduler start'.",
+            err=True,
+        )
 
 
 @schedule_cli.command("list")
@@ -220,17 +248,61 @@ def uninstall_daemon() -> None:
     click.echo("Scheduler uninstalled")
 
 
+def _supervisor_operation(operation: Literal["start", "stop", "restart"]) -> None:
+    try:
+        supervisor = get_supervisor()
+        operations = {
+            "start": supervisor.start,
+            "stop": supervisor.stop,
+            "restart": supervisor.restart,
+        }
+        operations[operation]()
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    completed = {"start": "started", "stop": "stopped", "restart": "restarted"}
+    click.echo(f"Scheduler {completed[operation]}")
+
+
+@scheduler_cli.command("start")
+def start_daemon() -> None:
+    """Start the installed native scheduler daemon."""
+    _supervisor_operation("start")
+
+
+@scheduler_cli.command("stop")
+def stop_daemon() -> None:
+    """Stop the installed native scheduler daemon without uninstalling it."""
+    _supervisor_operation("stop")
+
+
+@scheduler_cli.command("restart")
+def restart_daemon() -> None:
+    """Restart the installed native scheduler daemon."""
+    _supervisor_operation("restart")
+
+
 @scheduler_cli.command("status")
 @click.option("--json", "as_json", is_flag=True)
-def daemon_status(as_json: bool) -> None:
-    state = _repository().daemon_state()
-    if state:
-        heartbeat = parse_datetime(state["heartbeat_at"])
-        age = (datetime.now(UTC) - heartbeat.astimezone(UTC)).total_seconds()
-        state["healthy"] = 0 <= age < 5
-    else:
-        state = {"healthy": False}
+@click.pass_context
+def daemon_status(context: click.Context, as_json: bool) -> None:
+    try:
+        native = asdict(get_supervisor().status())
+    except Exception as exc:
+        native = {
+            "backend": "unsupported",
+            "installed": False,
+            "state": "unknown",
+            "definition_path": None,
+            "detail": str(exc),
+        }
+    state = _daemon_runtime_state(_repository())
+    state["supervisor"] = native
     if as_json:
         click.echo(json.dumps(state, indent=2))
     else:
-        click.echo("running" if state["healthy"] else "stopped or unresponsive")
+        if state["healthy"]:
+            click.echo(f"running ({native['backend']}: {native['state']})")
+        else:
+            click.echo(f"stopped or unresponsive ({native['backend']}: {native['state']})")
+    if not state["healthy"]:
+        context.exit(1)

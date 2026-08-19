@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   REST endpoints, and `tf schedule`/`tf scheduler` commands. One native daemon
   definition is installed through systemd, a macOS LaunchAgent, or Windows
   Task Scheduler instead of creating an OS unit for every job.
+- Native scheduler supervision now exposes one common install/start/stop/
+  restart/status lifecycle across systemd, launchd, and Windows Task Scheduler.
+  Scheduler status includes native state and heartbeat health with a useful
+  non-zero unhealthy exit code.
 - **Faster service status:** systemd properties are fetched in bulk with
   bounded concurrency, repeated manager health probes and duplicate unit loads
   are removed, and independent remote servers are queried concurrently.

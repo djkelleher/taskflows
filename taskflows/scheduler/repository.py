@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from taskflows.common import ensure_data_dir, services_data_dir
+from taskflows.exceptions import RevisionConflict
 
 from .models import ScheduledTask, ScheduleSpec, parse_datetime, utc_now
 
@@ -120,6 +121,12 @@ class SchedulerRepository:
 
     def _initialize(self) -> None:
         with self.connect() as db:
+            schema_version = int(db.execute("PRAGMA user_version").fetchone()[0])
+            if schema_version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"scheduler database schema {schema_version} is newer than "
+                    f"this Taskflows version supports ({SCHEMA_VERSION})"
+                )
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(
                 """
@@ -333,16 +340,30 @@ class SchedulerRepository:
         self, identifier: str, enabled: bool, *, expected_revision: int | None = None
     ) -> ScheduledTask:
         task = self.resolve(identifier)
+        if expected_revision is not None and task.revision != expected_revision:
+            raise RevisionConflict(
+                f"scheduled task {task.name!r} changed from revision "
+                f"{expected_revision} to {task.revision}"
+            )
+        if task.enabled == enabled:
+            return task
         revision_clause = " AND revision=?" if expected_revision is not None else ""
         params: list[Any] = [int(enabled), _iso(utc_now()), task.id, int(enabled)]
         if expected_revision is not None:
             params.append(expected_revision)
         with self.connect() as db:
-            db.execute(
+            cursor = db.execute(
                 f"""UPDATE scheduled_tasks
                    SET enabled=?, updated_at=?, revision=revision+1, next_run_at=NULL
                    WHERE id=? AND enabled<>?{revision_clause}""",
                 params,
+            )
+        if cursor.rowcount == 0 and expected_revision is not None:
+            current = self.get(task.id)
+            current_revision = current.revision if current is not None else "deleted"
+            raise RevisionConflict(
+                f"scheduled task {task.name!r} changed from revision "
+                f"{expected_revision} to {current_revision}"
             )
         result = self.get(task.id)
         if result is None:
@@ -417,6 +438,14 @@ class SchedulerRepository:
                 ),
             )
         return run_id
+
+    def set_runner_pid(self, run_id: str, pid: int) -> None:
+        """Record the command process after a reserved run is launched."""
+        with self.connect() as db:
+            db.execute(
+                "UPDATE task_runs SET runner_pid=? WHERE id=? AND status='running'",
+                (pid, run_id),
+            )
 
     def finish_run(
         self,

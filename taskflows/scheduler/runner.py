@@ -165,6 +165,7 @@ def execute_scheduled_task(
             process = subprocess.Popen(
                 list(task.command), stdout=stdout, stderr=stderr, **popen_kwargs
             )
+            repository.set_runner_pid(run_id, process.pid)
             with _active_lock:
                 _active_processes[run_id] = process
             try:

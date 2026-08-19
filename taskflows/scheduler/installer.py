@@ -221,22 +221,12 @@ def uninstall_windows() -> None:
 
 
 def install() -> Path | None:
-    if sys.platform == "win32":
-        install_windows()
-        return None
-    if sys.platform == "darwin":
-        return install_macos()
-    if sys.platform.startswith("linux"):
-        return install_linux()
-    raise NotImplementedError(f"scheduler installation is unsupported on {sys.platform}")
+    from .supervisor import get_supervisor
+
+    return get_supervisor().install()
 
 
 def uninstall() -> None:
-    if sys.platform == "win32":
-        uninstall_windows()
-    elif sys.platform == "darwin":
-        uninstall_macos()
-    elif sys.platform.startswith("linux"):
-        uninstall_linux()
-    else:
-        raise NotImplementedError(f"scheduler installation is unsupported on {sys.platform}")
+    from .supervisor import get_supervisor
+
+    get_supervisor().uninstall()

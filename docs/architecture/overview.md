@@ -155,25 +155,35 @@ APScheduler daemon. The daemon is supervised by systemd on Linux, launchd on
 macOS, or Task Scheduler on Windows. Bulk list/status reads come directly from
 SQLite rather than issuing one OS query per task.
 
+`SchedulerSupervisor` gives all three native managers the same install,
+uninstall, start, stop, restart, and status lifecycle. The supervisor controls
+only the daemon; portable task scheduling remains inside Taskflows.
+
 The older `Calendar` and `Periodic` objects compile to systemd timers and remain
 available for Linux `Service` objects.
 
-Two scheduling primitives:
+Portable trigger primitives:
+- **Once**: One offset-aware timestamp
+- **Interval**: Run every N elapsed seconds
+- **Cron**: Five-field cron in an IANA time zone
+
+Linux service trigger primitives:
 - **Periodic**: Run every N seconds/minutes/hours
-- **Calendar**: Cron-like calendar expressions (systemd OnCalendar)
+- **Calendar**: Native systemd `OnCalendar` expression
 
 Example:
 ```python
-from taskflows import Schedule
+from taskflows import Calendar, Periodic, ScheduleSpec
 
-# Run every 30 minutes
-schedule1 = Periodic(minutes=30)
+# Portable short-lived command: every 30 minutes
+portable = ScheduleSpec.interval(30 * 60)
 
-# Run daily at 3 AM
-schedule2 = Calendar("daily 03:00")
+# Portable short-lived command: weekdays at 09:00 New York time
+weekday_job = ScheduleSpec.cron("0 9 * * mon-fri", timezone="America/New_York")
 
-# Run on weekdays at 9 AM
-schedule3 = Calendar("Mon..Fri 09:00")
+# Native Linux Service timers
+periodic_service = Periodic(period=30 * 60)
+calendar_service = Calendar("Mon..Fri 09:00")
 ```
 
 ### 7. Security
@@ -276,7 +286,7 @@ class MyTaskLogger(TaskLogger):
 
 ## Technology Stack
 
-- **Python**: 3.12+
+- **Python**: 3.11+
 - **Systemd**: Process management
 - **D-Bus**: Systemd communication
 - **Docker**: Container runtime (optional)
@@ -296,6 +306,7 @@ taskflows/
 ├── service.py            # Service class, systemd integration
 ├── docker.py             # DockerContainer, Docker integration
 ├── schedule.py           # Periodic, Calendar scheduling
+├── scheduler/            # Portable registry, daemon, runner, supervisors
 ├── constraints.py        # CgroupConfig, resource limits
 ├── security_validation.py # Input validation, sanitization
 ├── exceptions.py         # Exception hierarchy
@@ -323,7 +334,8 @@ docs/
 │       ├── 001-systemd-integration.md
 │       ├── 002-loki-logging.md
 │       ├── 003-prometheus-metrics.md
-│       └── 004-constants-module.md
+│       ├── 004-constants-module.md
+│       └── 005-portable-scheduling.md
 
 tests/
 ├── test_security.py      # Security validation tests

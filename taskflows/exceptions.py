@@ -17,3 +17,9 @@ class ValidationError(TaskflowsError):
     """Input validation error."""
 
     pass
+
+
+class RevisionConflict(TaskflowsError):
+    """A persisted definition changed since the caller last read it."""
+
+    pass
