@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useDebounce } from "use-debounce";
-import { Button, Input, Select, Card, CardHeader, CardContent, LoadingSpinner } from "@/components/ui";
+import { Button, Checkbox, Input, Select, Card, CardHeader, CardContent, LoadingSpinner } from "@/components/ui";
 import { useLogs } from "@/hooks/useLogs";
 import { Search, Download, RefreshCw } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -107,15 +107,11 @@ export function LogViewer({ serviceName }: LogViewerProps) {
             />
           </div>
           <div className="flex items-center gap-2">
-            <label className="flex items-center gap-2 text-sm text-muted cursor-pointer">
-              <input
-                type="checkbox"
-                checked={autoScroll}
-                onChange={(e) => setAutoScroll(e.target.checked)}
-                className="rounded"
-              />
-              Auto-scroll
-            </label>
+            <Checkbox
+              checked={autoScroll}
+              label="Auto-scroll"
+              onChange={(e) => setAutoScroll(e.target.checked)}
+            />
             <Button variant="secondary" size="sm" onClick={handleRefresh} disabled={isFetching}>
               <RefreshCw className={`w-4 h-4 ${isFetching ? "animate-spin" : ""}`} />
               Refresh

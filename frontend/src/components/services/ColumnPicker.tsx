@@ -1,6 +1,5 @@
-import { useState, useRef, useEffect } from "react";
 import { Settings } from "lucide-react";
-import { Checkbox, Select } from "@/components/ui";
+import { Checkbox, IconButton, Popover, Select } from "@/components/ui";
 import { COLUMN_DEFINITIONS } from "./columns";
 import { useServiceStore } from "@/stores/serviceStore";
 
@@ -77,36 +76,25 @@ const TIMEZONES = [
 ];
 
 export function ColumnPicker() {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
   const visibleColumns = useServiceStore((state) => state.visibleColumns);
   const toggleColumn = useServiceStore((state) => state.toggleColumn);
   const timezone = useServiceStore((state) => state.timezone);
   const setTimezone = useServiceStore((state) => state.setTimezone);
 
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    }
-    if (open) {
-      document.addEventListener("mousedown", handleClickOutside);
-      return () => document.removeEventListener("mousedown", handleClickOutside);
-    }
-  }, [open]);
-
   return (
-    <div className="relative" ref={ref}>
-      <button
-        onClick={() => setOpen((prev) => !prev)}
-        className="p-2 rounded-md hover:bg-muted/50 text-muted hover:text-foreground transition-colors"
-        title="Configure columns"
-      >
-        <Settings className="w-4 h-4" />
-      </button>
-      {open && (
-        <div className="absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-md shadow-lg py-1 min-w-56 max-h-96 overflow-y-auto">
+    <Popover
+      align="end"
+      className="min-w-56 p-0"
+      trigger={
+        <IconButton
+          aria-label="Configure columns"
+          className="border-transparent text-muted hover:bg-muted/50 hover:text-foreground"
+          icon={<Settings className="w-4 h-4" aria-hidden="true" />}
+          size="sm"
+          variant="ghost"
+        />
+      }
+    >
           <div className="px-3 py-1.5 text-xs font-semibold text-muted uppercase tracking-wider border-b border-border">
             Timezone
           </div>
@@ -133,8 +121,6 @@ export function ColumnPicker() {
               {col.label}
             </label>
           ))}
-        </div>
-      )}
-    </div>
+    </Popover>
   );
 }
