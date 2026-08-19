@@ -168,6 +168,12 @@ class SchedulerDaemon:
         if event.code == EVENT_JOB_SUBMITTED:
             return
         if event.code in (EVENT_JOB_EXECUTED, EVENT_JOB_ERROR):
+            # A DateTrigger is consumed when APScheduler dispatches it, even
+            # if the callable fails before the stable runner can claim the
+            # task. Disable the definition here as a final safety net so a
+            # one-shot cannot remain enabled with no persisted job to run it.
+            if task.schedule.kind == "date" and task.enabled:
+                self.repository.set_enabled(task.id, False, expected_revision=task.revision)
             return
         scheduled_times = getattr(event, "scheduled_run_times", None) or [
             getattr(event, "scheduled_run_time", utc_now())
@@ -235,28 +241,40 @@ class SchedulerDaemon:
                         self.scheduler.remove_job(job_id)
                     return None
 
-        job = self.scheduler.add_job(
-            execute_scheduled_task,
-            trigger=task.schedule.to_trigger(),
-            id=job_id,
-            name=task.name,
-            kwargs={
-                "database_path": str(self.database_path),
-                "task_id": task.id,
-                "revision": task.revision,
-            },
-            replace_existing=True,
-            coalesce=task.coalesce,
-            misfire_grace_time=task.misfire_grace_time,
-            max_instances=task.max_instances,
-        )
+        # Record the revision before registering the job. A date job can be
+        # submitted immediately during a runtime reconcile, before add_job()
+        # returns; the event listener must already be able to identify it.
         with self._submitted_lock:
             self._known_revisions[job_id] = task.revision
             if task.schedule.kind == "date":
                 self._known_date_revisions[job_id] = task.revision
             else:
                 self._known_date_revisions.pop(job_id, None)
-        return job
+        try:
+            return self.scheduler.add_job(
+                execute_scheduled_task,
+                trigger=task.schedule.to_trigger(),
+                id=job_id,
+                name=task.name,
+                kwargs={
+                    "database_path": str(self.database_path),
+                    "task_id": task.id,
+                    "revision": task.revision,
+                },
+                replace_existing=True,
+                coalesce=task.coalesce,
+                misfire_grace_time=task.misfire_grace_time,
+                max_instances=task.max_instances,
+            )
+        except Exception:
+            # Do not leave a failed registration looking like an in-flight
+            # date job. Preserve newer state if another reconcile won a race.
+            with self._submitted_lock:
+                if self._known_revisions.get(job_id) == task.revision:
+                    self._known_revisions.pop(job_id, None)
+                if self._known_date_revisions.get(job_id) == task.revision:
+                    self._known_date_revisions.pop(job_id, None)
+            raise
 
     def reconcile(self) -> None:
         tasks = self.repository.list()
