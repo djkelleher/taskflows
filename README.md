@@ -143,8 +143,9 @@ For short-lived commands, install one scheduler daemon and add tasks to the
 portable registry:
 
 ```bash
-# Installs a systemd user service, macOS LaunchAgent, or per-user Windows task.
-tf scheduler install
+# Idempotently installs, repairs, or starts the systemd user service, macOS
+# LaunchAgent, or per-user Windows task.
+tf scheduler ensure
 tf scheduler status
 
 # One-time execution. Timestamps must include an offset or Z.
@@ -172,6 +173,7 @@ tf schedule run report
 tf schedule disable report
 
 # The lifecycle commands are identical on Linux, macOS, and Windows.
+tf scheduler ensure
 tf scheduler stop
 tf scheduler start
 tf scheduler restart
@@ -189,6 +191,10 @@ native registration, automatic-start state, the Taskflows heartbeat, registry
 path, and task counts. `tf scheduler doctor` also checks SQLite integrity and
 permissions and prints actionable recovery steps. Both exit non-zero when the
 daemon is unhealthy.
+
+Schedule definitions always store an absolute working directory. If `--cwd` is
+omitted, Taskflows captures the directory where the definition is created;
+legacy definitions without a stored directory use the user's home on every OS.
 
 Use portable schedules for bounded jobs. Continue to use `Service` for
 long-running Linux daemons, cgroups, watchdogs, and systemd dependency graphs.

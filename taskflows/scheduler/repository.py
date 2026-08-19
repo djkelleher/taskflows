@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-from taskflows.common import ensure_data_dir, services_data_dir
+from taskflows.common import ensure_data_dir, logger, services_data_dir
 from taskflows.exceptions import RevisionConflict
 
 from .models import ScheduledTask, ScheduleSpec, parse_datetime, utc_now
@@ -211,6 +211,16 @@ class SchedulerRepository:
             # Secure directories we create, but never change permissions on an
             # existing directory owned or managed by the caller.
             os.chmod(self.database_path.parent, 0o700)
+        if os.name != "nt":
+            # Definitions may contain environment values. The parent is usually
+            # owner-only, but an explicitly configured database can live in an
+            # existing shared directory. Set the database mode before enabling
+            # WAL so SQLite also derives owner-only permissions for sidecars.
+            try:
+                self.database_path.touch(mode=0o600, exist_ok=True)
+                os.chmod(self.database_path, 0o600)
+            except OSError as exc:
+                logger.warning(f"Could not set secure permissions on {self.database_path}: {exc}")
         self._initialize()
 
     @contextmanager

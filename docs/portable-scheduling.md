@@ -10,8 +10,9 @@ daemon.
 | macOS | `~/Library/LaunchAgents/com.taskflows.scheduler.plist` |
 | Windows | per-user Task Scheduler logon task |
 
-The macOS launch agent and Linux user unit are written atomically with
-owner-only permissions. The macOS agent is registered in the installing user's
+All three native definitions give the daemon the user's home as its working
+directory. The macOS launch agent and Linux user unit are written atomically
+with owner-only permissions. The macOS agent is registered in the installing user's
 GUI domain; reinstalling re-enables and restarts a previously loaded or
 manually disabled agent. Reinstalling the Linux unit also restarts an active
 daemon so updated paths and environment settings take effect immediately.
@@ -70,6 +71,7 @@ run logs are created with owner-only permissions on POSIX systems.
 
 ```bash
 tf scheduler install [--wait/--no-wait] [--timeout 15s]
+tf scheduler ensure [--wait/--no-wait] [--timeout 15s]
 tf scheduler status
 tf scheduler start
 tf scheduler stop
@@ -108,6 +110,13 @@ executable preflight, native log hints, and dispatch-readiness checks with
 concrete remedies. Unhealthy results exit non-zero, making both commands useful
 in shell scripts and monitoring checks.
 
+`tf scheduler ensure` is the idempotent entry point for provisioning and repair:
+it does nothing when the registered daemon and automatic-start configuration are
+healthy, installs when registration is absent or disabled, starts a stopped
+daemon, and restarts a native process whose heartbeat is unresponsive.
+Uninstall readiness is stricter than stop readiness and is not reported until
+the native definition has actually disappeared.
+
 Internally, systemd, launchd, and Windows Task Scheduler implement the same
 `SchedulerSupervisor` lifecycle (`install`, `uninstall`, `start`, `stop`,
 `restart`, and `status`). Scheduling remains inside Taskflows, so native
@@ -125,7 +134,8 @@ properties are needed for every matched service.
 
 REST clients can use `/api/schedules`, `/api/schedule-runs`,
 `/api/scheduler/status`, `/api/scheduler/diagnostics`, and authenticated
-`POST /api/scheduler/install|uninstall|start|stop|restart` lifecycle operations.
+`POST /api/scheduler/ensure|install|uninstall|start|stop|restart` lifecycle
+operations.
 Python callers use the same `operate_scheduler()` entry point. These endpoints
 use the existing HMAC/JWT authentication middleware. Schedule representations
 include a `revision`; clients can send `expected_revision` when enabling or
@@ -148,8 +158,12 @@ precedence. Public output includes environment variable names for diagnostics
 but never their values.
 
 New definitions resolve their working directory to an absolute path at creation
-time. Native supervisors have different default directories, so persisting a
-relative `cwd` would otherwise make the same schedule platform-dependent.
+time, defaulting to the creator's current directory when `cwd` is omitted.
+Legacy definitions without a stored directory use the user's home, and all
+native daemon definitions use that same fallback. Native supervisors otherwise
+have different default directories, which would make relative command arguments
+platform-dependent. The registry itself is explicitly owner-only on POSIX even
+when a caller selects an existing custom parent directory.
 Registry schema upgrades take one SQLite write lock and commit atomically;
 current-schema opens use a fast path because the daemon, API, CLI, and each
 runner may all create repository clients concurrently.

@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -188,6 +189,18 @@ def test_new_tasks_persist_absolute_working_directories(tmp_path, monkeypatch):
     assert task.cwd == str(working_directory.resolve())
 
 
+def test_new_tasks_default_to_the_creation_working_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    task = ScheduledTask.create(
+        "default-cwd",
+        [sys.executable, "-c", "pass"],
+        ScheduleSpec.interval(60),
+    )
+
+    assert task.cwd == str(tmp_path.resolve())
+
+
 def test_legacy_calendar_datetime_preserves_fractional_seconds():
     schedule = Calendar.from_datetime(datetime.fromisoformat("2026-08-19T10:00:00.500000+00:00"))
     assert schedule.schedule == "Wed 2026-08-19 10:00:00.500000 UTC"
@@ -297,6 +310,17 @@ def test_custom_database_does_not_chmod_existing_parent(tmp_path, monkeypatch):
     SchedulerRepository(tmp_path / "scheduler.sqlite3")
 
     assert all(path != tmp_path for path, _mode in chmod_calls)
+    if os.name != "nt":
+        assert (tmp_path / "scheduler.sqlite3", 0o600) in chmod_calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_repository_database_is_owner_only_even_in_an_existing_parent(tmp_path):
+    database_path = tmp_path / "scheduler.sqlite3"
+
+    SchedulerRepository(database_path)
+
+    assert database_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_custom_database_secures_parent_it_creates(tmp_path, monkeypatch):
@@ -642,6 +666,27 @@ def test_runner_captures_output_environment_and_working_directory(tmp_path):
     if os.name != "nt":
         assert Path(run["stdout_path"]).stat().st_mode & 0o777 == 0o600
         assert Path(run["stderr_path"]).stat().st_mode & 0o777 == 0o600
+
+
+def test_legacy_task_without_cwd_uses_home_consistently(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    marker = tmp_path / "cwd.txt"
+    task = ScheduledTask.create(
+        "legacy-cwd",
+        [
+            sys.executable,
+            "-c",
+            f"import pathlib; pathlib.Path({str(marker)!r}).write_text(str(pathlib.Path.cwd()))",
+        ],
+        ScheduleSpec.interval(60),
+    )
+    repository.add(replace(task, cwd=None))
+    monkeypatch.setattr("taskflows.scheduler.runner.Path.home", lambda: home)
+
+    assert run_now(repository.database_path, task.id) == 0
+    assert marker.read_text() == str(home)
 
 
 def test_runner_enforces_timeout(tmp_path):
@@ -1093,6 +1138,7 @@ def test_wait_for_scheduler_uses_combined_cross_platform_health(tmp_path):
 @pytest.mark.parametrize(
     ("operation", "target_state"),
     [
+        ("ensure", "running"),
         ("install", "running"),
         ("start", "running"),
         ("restart", "running"),
@@ -1139,6 +1185,87 @@ def test_operate_scheduler_normalizes_every_native_lifecycle(tmp_path, operation
 
     assert calls == [operation]
     assert result.state == target_state
+
+
+def test_ensure_scheduler_is_idempotent_and_repairs_disabled_autostart(tmp_path):
+    repository = make_repository(tmp_path)
+    repository.heartbeat(pid=os.getpid(), hostname=socket.gethostname(), started_at=utc_now())
+    calls = []
+    automatic = True
+
+    def install():
+        nonlocal automatic
+        calls.append("install")
+        automatic = True
+        repository.heartbeat(
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            started_at=utc_now() + timedelta(microseconds=1),
+        )
+
+    fake_supervisor = SimpleNamespace(
+        install=install,
+        uninstall=lambda: calls.append("uninstall"),
+        start=lambda: calls.append("start"),
+        stop=lambda: calls.append("stop"),
+        restart=lambda: calls.append("restart"),
+        status=lambda: SupervisorStatus(
+            backend="systemd", installed=True, state="running", automatic=automatic
+        ),
+    )
+
+    assert operate_scheduler("ensure", repository, fake_supervisor).state == "running"
+    assert calls == []
+
+    automatic = False
+    assert operate_scheduler("ensure", repository, fake_supervisor).state == "running"
+    assert calls == ["install"]
+
+
+def test_restart_waits_for_a_new_runtime_owner(tmp_path):
+    repository = make_repository(tmp_path)
+    started_at = utc_now()
+    repository.heartbeat(pid=os.getpid(), hostname=socket.gethostname(), started_at=started_at)
+    fake_supervisor = SimpleNamespace(
+        install=lambda: None,
+        uninstall=lambda: None,
+        start=lambda: None,
+        stop=lambda: None,
+        restart=lambda: None,
+        status=lambda: SupervisorStatus(backend="systemd", installed=True, state="running"),
+    )
+
+    with pytest.raises(TimeoutError, match="did not become running"):
+        operate_scheduler("restart", repository, fake_supervisor, timeout=0.01)
+
+    def restart():
+        repository.heartbeat(
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            started_at=started_at + timedelta(seconds=1),
+        )
+
+    fake_supervisor.restart = restart
+    assert operate_scheduler("restart", repository, fake_supervisor, timeout=0.1).state == "running"
+
+
+def test_wait_for_uninstall_requires_registration_to_be_removed(tmp_path):
+    repository = make_repository(tmp_path)
+    still_installed = SimpleNamespace(
+        status=lambda: SupervisorStatus(backend="systemd", installed=True, state="stopped")
+    )
+
+    with pytest.raises(TimeoutError, match="not-installed"):
+        wait_for_scheduler(
+            "not-installed",
+            repository,
+            still_installed,
+            timeout=0.01,
+            poll_interval=0.001,
+        )
+
+    with pytest.raises(ValueError, match="wait target"):
+        wait_for_scheduler("unknown", repository, still_installed)  # type: ignore[arg-type]
 
 
 def test_scheduler_doctor_has_stable_actionable_json(tmp_path, monkeypatch):
@@ -1416,6 +1543,7 @@ def test_linux_installer_writes_one_user_service(tmp_path, monkeypatch):
     assert f"TASKFLOWS_DATA_DIR={tmp_path / 'data%%dir'}" in content
     assert unit_path.stat().st_mode & 0o777 == 0o600
     assert "Restart=on-failure" in content
+    assert f"WorkingDirectory={tmp_path}" in content
     assert calls[-2:] == [
         ["systemctl", "--user", "enable", installer.LINUX_UNIT_NAME],
         ["systemctl", "--user", "restart", installer.LINUX_UNIT_NAME],
@@ -1581,6 +1709,7 @@ def test_macos_installer_writes_launch_agent(tmp_path, monkeypatch):
     assert definition["KeepAlive"] == {"SuccessfulExit": False}
     assert definition["ProgramArguments"][1:3] == ["-m", "taskflows.scheduler.daemon"]
     assert definition["ProgramArguments"][-1] == str(tmp_path / "data" / "scheduler.sqlite3")
+    assert definition["WorkingDirectory"] == str(tmp_path)
     assert plist_path.stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
     assert (tmp_path / "data" / "logs").stat().st_mode & 0o777 == 0o700

@@ -295,11 +295,17 @@ class ScheduledTask:
         if schedule.kind == "interval" and schedule.start_at is None:
             schedule = replace(schedule, start_at=now.isoformat())
         # Native supervisors do not share a guaranteed working directory.
-        # Persist an absolute creation-time path so a definition behaves the
-        # same under systemd, launchd, Task Scheduler, foreground mode, and
-        # manual API execution.
-        if kwargs.get("cwd") is not None:
-            kwargs["cwd"] = str(Path(kwargs["cwd"]).expanduser().resolve())
+        # Persist an absolute creation-time path even when the caller omits
+        # ``cwd`` so relative command arguments behave the same under systemd,
+        # launchd, Task Scheduler, foreground mode, and manual execution.
+        configured_cwd = kwargs.get("cwd")
+        try:
+            working_directory = (
+                Path(configured_cwd).expanduser() if configured_cwd is not None else Path.cwd()
+            ).resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"could not resolve working directory: {exc}") from exc
+        kwargs["cwd"] = str(working_directory)
         return cls(
             id=str(uuid4()),
             name=name,

@@ -10,6 +10,7 @@ from .models import ScheduledTask, ScheduleSpec, schedule_preview
 from .repository import HistoryPruneResult, SchedulerRepository
 from .status import (
     DiagnosticCheck,
+    SchedulerOperation,
     SchedulerRuntimeStatus,
     SchedulerStatus,
     diagnose_scheduler,
@@ -25,6 +26,7 @@ __all__ = [
     "ScheduleSpec",
     "ScheduledTask",
     "SchedulerRepository",
+    "SchedulerOperation",
     "SchedulerRuntimeStatus",
     "SchedulerStatus",
     "SchedulerSupervisor",

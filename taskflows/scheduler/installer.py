@@ -57,6 +57,7 @@ def install_linux() -> Path:
     # systemd expands percent specifiers even in quoted command/environment
     # values, so literal path components must double them.
     command = shlex.join(part.replace("%", "%%") for part in _daemon_command())
+    working_directory = shlex.quote(str(_home_dir()).replace("%", "%%"))
     data_dir = services_data_dir.resolve()
     environment_assignment = (
         str(data_dir).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
@@ -68,6 +69,7 @@ After=default.target
 [Service]
 Type=simple
 ExecStart={command}
+WorkingDirectory={working_directory}
 Environment="TASKFLOWS_DATA_DIR={environment_assignment}"
 Restart=on-failure
 RestartSec=2
@@ -113,6 +115,7 @@ def install_macos() -> Path:
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
         "ProcessType": "Background",
+        "WorkingDirectory": str(_home_dir()),
         "StandardOutPath": str(log_dir / "scheduler.stdout.log"),
         "StandardErrorPath": str(log_dir / "scheduler.stderr.log"),
     }

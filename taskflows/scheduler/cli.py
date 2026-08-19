@@ -4,7 +4,7 @@ import json
 import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 from dotenv import dotenv_values
@@ -16,7 +16,6 @@ from .models import ScheduledTask, ScheduleSpec, schedule_preview, utc_now
 from .repository import SchedulerRepository
 from .runner import run_now
 from .status import (
-    SchedulerOperation,
     diagnose_scheduler,
     operate_scheduler,
     runtime_status,
@@ -209,8 +208,7 @@ def add_schedule(
     click.echo(f"Scheduled {saved.name} ({saved.schedule.describe()})")
     if saved.enabled and not runtime_status(repository).healthy:
         click.echo(
-            "Warning: the scheduler daemon is not responding; run "
-            "'tf scheduler install' or 'tf scheduler start'.",
+            "Warning: the scheduler daemon is not responding; run 'tf scheduler ensure'.",
             err=True,
         )
 
@@ -289,11 +287,17 @@ def preview_schedule(identifier: str, count: int, from_time: str | None, as_json
 
 
 def _set_enabled(identifier: str, enabled: bool) -> None:
+    repository = _repository()
     try:
-        task = _repository().set_enabled(identifier, enabled)
+        task = repository.set_enabled(identifier, enabled)
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"{'Enabled' if enabled else 'Disabled'} {task.name}")
+    if enabled and not runtime_status(repository).healthy:
+        click.echo(
+            "Warning: the scheduler daemon is not responding; run 'tf scheduler ensure'.",
+            err=True,
+        )
 
 
 @schedule_cli.command("enable")
@@ -476,6 +480,20 @@ def install_daemon(wait: bool, timeout: float) -> None:
     click.echo(f"Scheduler installed{f' at {path}' if path else ''}")
 
 
+@scheduler_cli.command("ensure")
+@click.option("--wait/--no-wait", default=True, show_default=True)
+@click.option("--timeout", type=DURATION, default=15.0, show_default="15s")
+def ensure_daemon(wait: bool, timeout: float) -> None:
+    """Install, repair, or start the scheduler only when needed."""
+    try:
+        status = operate_scheduler(
+            "ensure", _repository(), get_supervisor(), wait=wait, timeout=timeout
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Scheduler ready ({status.supervisor.backend})")
+
+
 @scheduler_cli.command("uninstall")
 @click.option("--wait/--no-wait", default=True, show_default=True)
 @click.option("--timeout", type=DURATION, default=15.0, show_default="15s")
@@ -488,7 +506,9 @@ def uninstall_daemon(wait: bool, timeout: float) -> None:
     click.echo("Scheduler uninstalled")
 
 
-def _supervisor_operation(operation: SchedulerOperation, *, wait: bool, timeout: float) -> None:
+def _supervisor_operation(
+    operation: Literal["start", "stop", "restart"], *, wait: bool, timeout: float
+) -> None:
     try:
         operate_scheduler(
             operation,

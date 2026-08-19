@@ -168,8 +168,10 @@ The custom executor persists a deduplicated queued occurrence before APScheduler
 advances its trigger. Replacement daemons adopt orphaned queue entries, while
 the runner atomically applies definition revisions and overlap limits when work
 actually begins.
-`operate_scheduler()` centralizes install/uninstall/start/stop/restart readiness
-for Python, CLI, and REST clients. Repository schema changes are serialized in
+`operate_scheduler()` centralizes idempotent ensure plus install/uninstall/start/
+stop/restart readiness for Python, CLI, and REST clients. Uninstall verifies
+native registration removal rather than treating every inactive state as success.
+Repository schema changes are serialized in
 one SQLite transaction, while current-schema clients avoid repeated migration
 inspection. Diagnostics preflight enabled commands and expose native log hints.
 

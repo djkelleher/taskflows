@@ -835,7 +835,7 @@ async def portable_scheduler_diagnostics() -> dict[str, Any]:
 
 @app.post("/api/scheduler/{operation}")
 async def operate_portable_scheduler(
-    operation: Literal["install", "uninstall", "start", "stop", "restart"],
+    operation: Literal["ensure", "install", "uninstall", "start", "stop", "restart"],
     wait: bool = Query(True),
     timeout: float = Query(15.0, gt=0, le=120),
 ) -> dict[str, Any]:

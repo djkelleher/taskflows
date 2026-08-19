@@ -30,6 +30,7 @@ privileged, resource-controlled, or dependency-aware processes.
 - One daemon definition instead of native artifacts for every task.
 - Durable run history and portable stdout/stderr locations.
 - Commands are data; APScheduler serializes only stable IDs.
+- One idempotent ensure operation hides native install/repair/start differences.
 
 ### Negative
 

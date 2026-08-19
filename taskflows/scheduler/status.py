@@ -27,8 +27,8 @@ OverallSchedulerState = Literal[
     "running", "starting", "stopped", "failed", "unresponsive", "not-installed", "unknown"
 ]
 CheckLevel = Literal["ok", "warning", "error"]
-WaitTarget = Literal["running", "stopped"]
-SchedulerOperation = Literal["install", "uninstall", "start", "stop", "restart"]
+WaitTarget = Literal["running", "stopped", "not-installed"]
+SchedulerOperation = Literal["ensure", "install", "uninstall", "start", "stop", "restart"]
 
 
 @dataclass(frozen=True)
@@ -157,8 +157,11 @@ def wait_for_scheduler(
     *,
     timeout: float = 15.0,
     poll_interval: float = 0.2,
+    previous_runtime: SchedulerRuntimeStatus | None = None,
 ) -> SchedulerStatus:
     """Wait for the combined native/runtime contract to reach a lifecycle target."""
+    if target not in {"running", "stopped", "not-installed"}:
+        raise ValueError(f"unsupported scheduler wait target: {target}")
     if timeout <= 0:
         raise ValueError("timeout must be greater than zero")
     repository = repository or SchedulerRepository()
@@ -166,14 +169,41 @@ def wait_for_scheduler(
     deadline = time.monotonic() + timeout
     current = scheduler_status(repository, supervisor)
     while True:
-        reached = (
-            current.runtime.healthy and current.supervisor.state == "running"
-            if target == "running"
-            else (
-                current.supervisor.state not in {"running", "starting"}
+        if target == "running":
+            previous_owner = (
+                (
+                    previous_runtime.pid,
+                    previous_runtime.process_identity,
+                    previous_runtime.started_at,
+                )
+                if previous_runtime is not None
+                else None
+            )
+            current_owner = (
+                current.runtime.pid,
+                current.runtime.process_identity,
+                current.runtime.started_at,
+            )
+            reached = (
+                current.runtime.healthy
+                and current.supervisor.state == "running"
+                and (previous_owner is None or current_owner != previous_owner)
+            )
+        elif target == "not-installed":
+            reached = (
+                not current.supervisor.installed
+                and current.supervisor.state == "not-installed"
                 and not current.runtime.healthy
             )
-        )
+        else:
+            # A manager can retain the command's previous non-zero exit after
+            # it has stopped (launchd and Task Scheduler both do). Treat that
+            # as inactive, but never report an uninspectable/unknown state as a
+            # successful stop.
+            reached = (
+                current.supervisor.state in {"stopped", "failed", "not-installed"}
+                and not current.runtime.healthy
+            )
         if reached:
             return current
         if time.monotonic() >= deadline:
@@ -201,6 +231,12 @@ def operate_scheduler(
     """
     repository = repository or SchedulerRepository()
     supervisor = supervisor or get_supervisor()
+    if operation not in {"ensure", "install", "uninstall", "start", "stop", "restart"}:
+        raise ValueError(f"unsupported scheduler operation: {operation}")
+    before = scheduler_status(repository, supervisor)
+    require_new_runtime = (
+        operation in {"install", "restart"} and before.runtime.heartbeat_at is not None
+    )
     operations = {
         "install": supervisor.install,
         "uninstall": supervisor.uninstall,
@@ -208,15 +244,51 @@ def operate_scheduler(
         "stop": supervisor.stop,
         "restart": supervisor.restart,
     }
-    try:
-        action = operations[operation]
-    except KeyError as exc:
-        raise ValueError(f"unsupported scheduler operation: {operation}") from exc
-    action()
+    if operation == "ensure":
+        current = before
+        ready = (
+            current.runtime.healthy
+            and current.supervisor.state == "running"
+            and current.supervisor.automatic is not False
+        )
+        if ready:
+            return current
+        if (
+            not current.supervisor.installed
+            or current.supervisor.automatic is False
+            or current.supervisor.state == "unknown"
+        ):
+            supervisor.install()
+            require_new_runtime = current.runtime.heartbeat_at is not None
+        elif current.supervisor.state in {"running", "starting"}:
+            # The native manager claims ownership but no healthy heartbeat was
+            # observed. Restart instead of issuing a start that may be a no-op.
+            supervisor.restart()
+            require_new_runtime = current.runtime.heartbeat_at is not None
+        else:
+            supervisor.start()
+    else:
+        try:
+            action = operations[operation]
+        except KeyError as exc:
+            raise ValueError(f"unsupported scheduler operation: {operation}") from exc
+        action()
     if not wait:
         return scheduler_status(repository, supervisor)
-    target: WaitTarget = "stopped" if operation in {"stop", "uninstall"} else "running"
-    return wait_for_scheduler(target, repository, supervisor, timeout=timeout)
+    target: WaitTarget = (
+        "not-installed"
+        if operation == "uninstall"
+        else "stopped"
+        if operation == "stop"
+        else "running"
+    )
+    return wait_for_scheduler(
+        target,
+        repository,
+        supervisor,
+        timeout=timeout,
+        previous_runtime=before.runtime if require_new_runtime else None,
+    )
 
 
 def diagnose_scheduler(
@@ -243,7 +315,7 @@ def diagnose_scheduler(
                 "supervisor-registration",
                 "error",
                 f"not registered with {status.supervisor.backend}",
-                "run 'tf scheduler install'",
+                "run 'tf scheduler ensure'",
             )
         )
 
@@ -253,7 +325,7 @@ def diagnose_scheduler(
                 "automatic-start",
                 "warning",
                 "native registration is disabled for future login/boot starts",
-                "run 'tf scheduler install' to re-enable and refresh the registration",
+                "run 'tf scheduler ensure' to re-enable and refresh the registration",
             )
         )
     elif status.supervisor.automatic is True:
@@ -285,7 +357,7 @@ def diagnose_scheduler(
                 "native-process",
                 "error",
                 f"native supervisor reports {status.supervisor.state}{detail}",
-                f"run 'tf scheduler start', then {log_remedy}",
+                f"run 'tf scheduler ensure', then {log_remedy}",
             )
         )
 
@@ -402,8 +474,8 @@ def _task_definition_errors(tasks: list[ScheduledTask]) -> list[str]:
     """Return portable preflight failures without executing user commands."""
     errors: list[str] = []
     for task in tasks:
-        working_directory = Path(task.cwd) if task.cwd else None
-        if working_directory is not None and not working_directory.is_dir():
+        working_directory = Path(task.cwd) if task.cwd else Path.home()
+        if not working_directory.is_dir():
             errors.append(f"{task.name}: working directory does not exist ({working_directory})")
             # A relative executable cannot be evaluated against an invalid cwd.
             continue
@@ -415,7 +487,7 @@ def _task_definition_errors(tasks: list[ScheduledTask]) -> list[str]:
         if has_separator or Path(executable).is_absolute():
             executable_path = Path(executable)
             if not executable_path.is_absolute():
-                executable_path = (working_directory or Path.cwd()) / executable_path
+                executable_path = working_directory / executable_path
             if not executable_path.is_file():
                 errors.append(f"{task.name}: executable does not exist ({executable_path})")
             elif os.name != "nt" and not os.access(executable_path, os.X_OK):

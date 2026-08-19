@@ -163,8 +163,13 @@ def execute_scheduled_task(
             os.chmod(log_dir, 0o700)
 
         environment = merge_environment(os.environ, task.environment)
+        # Schema versions before Taskflows persisted a creation-time cwd may
+        # still contain NULL. Use one documented fallback rather than inheriting
+        # the platform supervisor's process directory (/, $HOME, or another
+        # backend-specific value).
+        working_directory = task.cwd or str(Path.home())
         popen_kwargs: dict[str, Any] = {
-            "cwd": task.cwd,
+            "cwd": working_directory,
             "env": environment,
         }
         if os.name == "nt":
