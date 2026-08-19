@@ -593,7 +593,10 @@ def test_linux_installer_writes_one_user_service(tmp_path, monkeypatch):
     assert f"TASKFLOWS_DATA_DIR={tmp_path / 'data%%dir'}" in content
     assert unit_path.stat().st_mode & 0o777 == 0o600
     assert "Restart=on-failure" in content
-    assert calls[-1] == ["systemctl", "--user", "enable", "--now", installer.LINUX_UNIT_NAME]
+    assert calls[-2:] == [
+        ["systemctl", "--user", "enable", installer.LINUX_UNIT_NAME],
+        ["systemctl", "--user", "restart", installer.LINUX_UNIT_NAME],
+    ]
 
 
 def test_macos_installer_writes_launch_agent(tmp_path, monkeypatch):
