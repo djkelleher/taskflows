@@ -20,6 +20,8 @@ from fastapi import HTTPException
 
 from taskflows.admin.api import (
     create_portable_schedule,
+    delete_portable_schedule,
+    get_portable_schedule,
     list_portable_schedules,
     list_servers_endpoint,
     portable_schedule_history,
@@ -156,6 +158,30 @@ def test_repository_add_is_atomic_and_replacements_increment_current_revision(tm
     assert {task.id for task in replacements} == {saved.id}
 
 
+def test_repository_replacement_can_require_the_current_revision(tmp_path):
+    repository = make_repository(tmp_path)
+    original = repository.add(
+        ScheduledTask.create("replace-cas", ["echo", "old"], ScheduleSpec.interval(60))
+    )
+    current = repository.set_enabled(original.id, False, expected_revision=original.revision)
+    replacement = ScheduledTask.create("replace-cas", ["echo", "new"], ScheduleSpec.interval(120))
+
+    with pytest.raises(RevisionConflict, match="changed from revision"):
+        repository.add(
+            replacement,
+            replace_existing=True,
+            expected_revision=original.revision,
+        )
+
+    saved = repository.add(
+        replacement,
+        replace_existing=True,
+        expected_revision=current.revision,
+    )
+    assert saved.command == ("echo", "new")
+    assert saved.revision == current.revision + 1
+
+
 def test_custom_database_does_not_chmod_existing_parent(tmp_path, monkeypatch):
     chmod_calls = []
     monkeypatch.setattr(
@@ -211,6 +237,19 @@ def test_set_enabled_reports_stale_revision(tmp_path):
     with pytest.raises(RevisionConflict, match="changed from revision"):
         repository.set_enabled(task.id, True, expected_revision=task.revision)
     assert repository.resolve(task.id) == disabled
+
+
+def test_delete_reports_stale_revision(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("delete-revision", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    current = repository.set_enabled(task.id, False, expected_revision=task.revision)
+
+    with pytest.raises(RevisionConflict, match="changed from revision"):
+        repository.delete(task.id, expected_revision=task.revision)
+
+    assert repository.resolve(task.id) == current
 
 
 def test_repository_name_matching_is_case_sensitive(tmp_path):
@@ -612,6 +651,27 @@ def test_one_time_scheduler_error_consumes_definition(tmp_path):
     assert repository.resolve(task.id).enabled is False
 
 
+def test_one_time_consumption_ignores_a_concurrent_revision_change(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "concurrent-once",
+            ["echo", "never"],
+            ScheduleSpec.once(utc_now() + timedelta(days=1)),
+        )
+    )
+    daemon = SchedulerDaemon(repository.database_path)
+
+    def changed(*args, **kwargs):
+        raise RevisionConflict("changed concurrently")
+
+    monkeypatch.setattr(daemon.repository, "set_enabled", changed)
+
+    # Expected edit races are handled as normal reconciliation, not as an
+    # event-listener failure that tears down the scheduler process.
+    daemon._disable_if_current(task)
+
+
 def test_schedule_cli_add_list_and_run(tmp_path, monkeypatch):
     repository = make_repository(tmp_path)
     monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
@@ -642,6 +702,56 @@ def test_schedule_cli_add_list_and_run(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert marker.exists()
     assert repository.resolve("cli-job").enabled is True
+
+
+def test_schedule_cli_accepts_human_durations_env_files_and_reads_logs(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
+    env_file = tmp_path / "job.env"
+    env_file.write_text("Value=from-file\nSECRET_NAME=hidden\n")
+    start_at = (utc_now() + timedelta(days=1)).isoformat()
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "schedule",
+            "add",
+            "friendly-job",
+            "--interval",
+            "5m",
+            "--start-at",
+            start_at,
+            "--timeout",
+            "1.5h",
+            "--env-file",
+            str(env_file),
+            "--env",
+            "VALUE=explicit",
+            "--",
+            sys.executable,
+            "-c",
+            "import os; print(os.environ['VALUE'])",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    task = repository.resolve("friendly-job")
+    assert task.schedule.value == 300.0
+    assert task.schedule.start_at == start_at
+    assert task.timeout == 5400.0
+    assert task.environment["VALUE"] == "explicit"
+    assert "Value" not in task.environment
+
+    shown = runner.invoke(cli, ["schedule", "show", "friendly-job", "--json"])
+    assert shown.exit_code == 0, shown.output
+    assert "SECRET_NAME" in shown.output
+    assert "hidden" not in shown.output
+
+    assert runner.invoke(cli, ["schedule", "run", "friendly-job"]).exit_code == 0
+    logs = runner.invoke(cli, ["schedule", "logs", "friendly-job", "--stream", "stdout"])
+    assert logs.exit_code == 0, logs.output
+    assert logs.output.strip() == "explicit"
 
 
 def test_scheduler_status_rejects_future_heartbeat(tmp_path, monkeypatch):
@@ -700,6 +810,38 @@ async def test_portable_schedule_api_reports_revision_conflict(tmp_path, monkeyp
 
     assert raised.value.status_code == 409
     assert repository.resolve(task.id) == disabled
+
+    replacement = PortableScheduleRequest(
+        name="api-revision",
+        command=["echo", "new"],
+        interval_seconds=120,
+        replace_existing=True,
+        expected_revision=task.revision,
+    )
+    with pytest.raises(HTTPException) as replaced:
+        await create_portable_schedule(replacement)
+    assert replaced.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_portable_schedule_api_get_and_delete_use_revisions(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("api-delete", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    monkeypatch.setattr("taskflows.admin.api.SchedulerRepository", lambda: repository)
+
+    fetched = await get_portable_schedule(task.id)
+    assert fetched["name"] == "api-delete"
+    assert "environment" not in fetched
+
+    current = repository.set_enabled(task.id, False, expected_revision=task.revision)
+    with pytest.raises(HTTPException) as raised:
+        await delete_portable_schedule(task.id, task.revision)
+    assert raised.value.status_code == 409
+
+    assert await delete_portable_schedule(task.id, current.revision) is None
+    assert repository.get(task.id) is None
 
 
 @pytest.mark.asyncio
@@ -782,7 +924,13 @@ def test_launchd_supervisor_distinguishes_loaded_but_stopped(tmp_path, monkeypat
 
 @pytest.mark.parametrize(
     ("native_state", "expected"),
-    [(4, "running"), (3, "stopped"), (1, "stopped"), (0, "unknown")],
+    [
+        (4, "running"),
+        (3, "stopped"),
+        (2, "starting"),
+        (1, "stopped"),
+        (0, "unknown"),
+    ],
 )
 def test_windows_supervisor_normalizes_task_states(native_state, expected, monkeypatch):
     monkeypatch.setattr(
@@ -793,6 +941,31 @@ def test_windows_supervisor_normalizes_task_states(native_state, expected, monke
 
     assert status.installed is True
     assert status.state == expected
+
+
+def test_launchd_restart_bootstraps_an_unloaded_agent(tmp_path, monkeypatch):
+    plist = tmp_path / "Library" / "LaunchAgents" / f"{installer.MACOS_LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("plist")
+    calls = []
+    monkeypatch.setattr(installer, "_home_dir", lambda: tmp_path)
+    monkeypatch.setattr(supervisor.os, "getuid", lambda: 501, raising=False)
+
+    def run(command, check=True):
+        calls.append(command)
+        return __import__("subprocess").CompletedProcess(
+            command,
+            1 if command[:2] == ["launchctl", "print"] else 0,
+            "",
+            "not loaded" if command[:2] == ["launchctl", "print"] else "",
+        )
+
+    monkeypatch.setattr(installer, "_run", run)
+
+    supervisor.LaunchdSupervisor().restart()
+
+    assert any(command[:2] == ["launchctl", "bootstrap"] for command in calls)
+    assert calls[-1][:3] == ["launchctl", "kickstart", "-k"]
 
 
 def test_macos_installer_writes_launch_agent(tmp_path, monkeypatch):

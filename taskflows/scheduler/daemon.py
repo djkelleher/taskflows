@@ -25,6 +25,7 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from taskflows.common import logger
+from taskflows.exceptions import RevisionConflict
 
 from .models import ScheduledTask, parse_datetime, utc_now
 from .repository import SchedulerRepository
@@ -145,6 +146,16 @@ class SchedulerDaemon:
     def _job_id(task_id: str) -> str:
         return f"{JOB_PREFIX}{task_id}"
 
+    def _disable_if_current(self, task: ScheduledTask) -> None:
+        """Consume a one-shot without disturbing a concurrent replacement."""
+        try:
+            self.repository.set_enabled(task.id, False, expected_revision=task.revision)
+        except (KeyError, RevisionConflict):
+            # A replacement or deletion won the race. Reconciliation will use
+            # that newer definition; an expected scheduler event must not crash
+            # and restart the daemon merely because a client edited the task.
+            return
+
     def _on_scheduler_event(self, event: JobExecutionEvent) -> None:
         if not event.job_id.startswith(JOB_PREFIX):
             return
@@ -180,7 +191,7 @@ class SchedulerDaemon:
             # task. Disable the definition here as a final safety net so a
             # one-shot cannot remain enabled with no persisted job to run it.
             if task.schedule.kind == "date" and task.enabled:
-                self.repository.set_enabled(task.id, False, expected_revision=task.revision)
+                self._disable_if_current(task)
             return
         scheduled_times = getattr(event, "scheduled_run_times", None) or [
             getattr(event, "scheduled_run_time", utc_now())
@@ -193,7 +204,7 @@ class SchedulerDaemon:
         for scheduled_time in scheduled_times:
             self.repository.record_missed(task, scheduled_time, reason)
         if task.schedule.kind == "date":
-            self.repository.set_enabled(task.id, False, expected_revision=task.revision)
+            self._disable_if_current(task)
 
     def start(self) -> None:
         if self._started:
@@ -243,7 +254,7 @@ class SchedulerDaemon:
                 late_by = (utc_now() - run_at.astimezone(UTC)).total_seconds()
                 if late_by > grace:
                     self.repository.record_missed(task, run_at, "misfire grace time exceeded")
-                    self.repository.set_enabled(task.id, False, expected_revision=task.revision)
+                    self._disable_if_current(task)
                     if existing:
                         self.scheduler.remove_job(job_id)
                     return None

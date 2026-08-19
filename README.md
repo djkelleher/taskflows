@@ -148,15 +148,22 @@ tf scheduler status
 # One-time execution. Timestamps must include an offset or Z.
 tf schedule add cleanup --at 2026-08-20T02:00:00Z -- python cleanup.py
 
-# Every five minutes.
-tf schedule add refresh --interval 300 --timeout 120 -- python refresh.py
+# Every five minutes; human durations are accepted.
+tf schedule add refresh --interval 5m --timeout 2m -- python refresh.py
+
+# Environment files are read when the definition is created. Repeated --env
+# values override the file without invoking a shell.
+tf schedule add import --interval 1h --env-file .env \
+  --env MODE=production -- python import.py
 
 # Weekdays at 09:00 New York time.
 tf schedule add report --cron '0 9 * * mon-fri' \
   --timezone America/New_York -- python report.py
 
 tf schedule list
+tf schedule show report
 tf schedule history report
+tf schedule logs report
 tf schedule run report
 tf schedule disable report
 

@@ -69,17 +69,19 @@ class ErrorResponse(TypedDict):
 class PortableScheduleRequest(BaseModel):
     """Create or replace a portable short-lived scheduled command."""
 
-    name: str
-    command: list[str]
+    name: str = Field(min_length=1)
+    command: list[str] = Field(min_length=1)
     run_at: str | None = None
-    interval_seconds: float | None = None
+    interval_seconds: float | None = Field(None, gt=0)
+    start_at: str | None = None
     cron: str | None = None
     timezone: str = "UTC"
     enabled: bool = True
-    timeout: float | None = None
+    timeout: float | None = Field(None, gt=0)
     cwd: str | None = None
     environment: dict[str, str] = Field(default_factory=dict)
-    misfire_grace_time: int | None = 3600
+    misfire_grace_time: int | None = Field(3600, gt=0)
     coalesce: bool = True
-    max_instances: int = 1
+    max_instances: int = Field(1, ge=1)
     replace_existing: bool = False
+    expected_revision: int | None = Field(None, ge=1)

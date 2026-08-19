@@ -226,3 +226,34 @@ class ScheduledTask:
     @property
     def working_directory(self) -> Path | None:
         return Path(self.cwd) if self.cwd else None
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """Return the non-secret representation shared by the CLI and API.
+
+        Environment values are intentionally omitted.  Keeping this projection
+        beside the model avoids subtly different public contracts across the
+        command line, REST API, and future platform-specific clients.
+        """
+        return {
+            "id": self.id,
+            "name": self.name,
+            "command": list(self.command),
+            "schedule": {
+                "kind": self.schedule.kind,
+                "value": self.schedule.value,
+                "timezone": self.schedule.timezone,
+                "start_at": self.schedule.start_at,
+                "description": self.schedule.describe(),
+            },
+            "enabled": self.enabled,
+            "timeout": self.timeout,
+            "cwd": self.cwd,
+            "environment_names": sorted(self.environment, key=str.casefold),
+            "misfire_grace_time": self.misfire_grace_time,
+            "coalesce": self.coalesce,
+            "max_instances": self.max_instances,
+            "revision": self.revision,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "next_run_at": self.next_run_at.isoformat() if self.next_run_at else None,
+        }

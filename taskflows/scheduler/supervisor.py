@@ -12,7 +12,7 @@ from typing import Any, Literal, Protocol
 
 from . import installer as native
 
-SupervisorState = Literal["running", "stopped", "failed", "unknown", "not-installed"]
+SupervisorState = Literal["starting", "running", "stopped", "failed", "unknown", "not-installed"]
 
 
 @dataclass(frozen=True)
@@ -94,6 +94,8 @@ class SystemdSupervisor:
         state: SupervisorState
         if result.returncode == 0 and detail == "active":
             state = "running"
+        elif detail in {"activating", "reloading"}:
+            state = "starting"
         elif detail == "failed":
             state = "failed"
         else:
@@ -132,12 +134,9 @@ class LaunchdSupervisor:
         if not self.definition_path.exists():
             raise RuntimeError("the Taskflows scheduler LaunchAgent is not installed")
         native._run(["launchctl", "enable", self.service_target])
-        bootstrap = native._run(
-            ["launchctl", "bootstrap", self.domain, str(self.definition_path)], check=False
-        )
-        # bootstrap returns a failure if the definition is already loaded.
-        if bootstrap.returncode != 0 and self.status().state != "running":
-            raise RuntimeError((bootstrap.stderr or "").strip() or "launchctl bootstrap failed")
+        loaded = native._run(["launchctl", "print", self.service_target], check=False)
+        if loaded.returncode != 0:
+            native._run(["launchctl", "bootstrap", self.domain, str(self.definition_path)])
         native._run(["launchctl", "kickstart", "-k", self.service_target])
 
     def stop(self) -> None:
@@ -145,7 +144,10 @@ class LaunchdSupervisor:
         native._run(["launchctl", "disable", self.service_target])
 
     def restart(self) -> None:
-        native._run(["launchctl", "kickstart", "-k", self.service_target])
+        # ``kickstart`` alone fails after ``stop`` because bootout unloads the
+        # agent.  Route restart through start so the common lifecycle has the
+        # same stopped -> running behavior on every operating system.
+        self.start()
 
     def status(self) -> SupervisorStatus:
         installed = self.definition_path.exists()
@@ -233,7 +235,9 @@ class WindowsTaskSupervisor:
             )
         task_state = int(getattr(task, "State", 0))
         # TASK_STATE_RUNNING=4, READY=3, QUEUED=2, DISABLED=1, UNKNOWN=0.
-        state: SupervisorState = "running" if task_state in (2, 4) else "stopped"
+        state: SupervisorState = "running" if task_state == 4 else "stopped"
+        if task_state == 2:
+            state = "starting"
         if task_state == 0:
             state = "unknown"
         return SupervisorStatus(

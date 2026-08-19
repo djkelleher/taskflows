@@ -250,7 +250,15 @@ class SchedulerRepository:
             next_run_at=_dt(row["next_run_at"]),
         )
 
-    def add(self, task: ScheduledTask, *, replace_existing: bool = False) -> ScheduledTask:
+    def add(
+        self,
+        task: ScheduledTask,
+        *,
+        replace_existing: bool = False,
+        expected_revision: int | None = None,
+    ) -> ScheduledTask:
+        if expected_revision is not None and not replace_existing:
+            raise ValueError("expected_revision requires replace_existing=True")
         now = utc_now()
         values = (
             task.id,
@@ -294,6 +302,19 @@ class SchedulerRepository:
                 """
         try:
             with self.connect() as db:
+                if expected_revision is not None:
+                    # Lock before checking so no writer can change the row
+                    # between the precondition and the atomic UPSERT.
+                    db.execute("BEGIN IMMEDIATE")
+                    current = db.execute(
+                        "SELECT revision FROM scheduled_tasks WHERE name=?", (task.name,)
+                    ).fetchone()
+                    current_revision = current["revision"] if current is not None else "missing"
+                    if current is None or current_revision != expected_revision:
+                        raise RevisionConflict(
+                            f"scheduled task {task.name!r} changed from revision "
+                            f"{expected_revision} to {current_revision}"
+                        )
                 db.execute(insert, values)
                 row = db.execute(
                     "SELECT * FROM scheduled_tasks WHERE name=?", (task.name,)
@@ -370,10 +391,26 @@ class SchedulerRepository:
             raise KeyError(f"scheduled task not found: {identifier}")
         return result
 
-    def delete(self, identifier: str) -> bool:
+    def delete(self, identifier: str, *, expected_revision: int | None = None) -> bool:
         task = self.resolve(identifier)
+        if expected_revision is not None and task.revision != expected_revision:
+            raise RevisionConflict(
+                f"scheduled task {task.name!r} changed from revision "
+                f"{expected_revision} to {task.revision}"
+            )
+        revision_clause = " AND revision=?" if expected_revision is not None else ""
+        params: tuple[Any, ...] = (
+            (task.id, expected_revision) if expected_revision is not None else (task.id,)
+        )
         with self.connect() as db:
-            cursor = db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task.id,))
+            cursor = db.execute(f"DELETE FROM scheduled_tasks WHERE id=?{revision_clause}", params)
+        if cursor.rowcount == 0 and expected_revision is not None:
+            current = self.get(task.id)
+            current_revision = current.revision if current is not None else "deleted"
+            raise RevisionConflict(
+                f"scheduled task {task.name!r} changed from revision "
+                f"{expected_revision} to {current_revision}"
+            )
         return cursor.rowcount > 0
 
     def set_next_runs(self, next_runs: dict[str, datetime | None]) -> None:

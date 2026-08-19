@@ -4,6 +4,7 @@ import threading
 import time
 import traceback
 from contextlib import asynccontextmanager
+from typing import Any
 
 import click
 
@@ -640,39 +641,30 @@ async def remove_endpoint(match: str = Body(..., embed=True)):
     return await remove(match=match, as_json=True)
 
 
-def _portable_task_data(task: ScheduledTask) -> dict:
+def _portable_task_data(task: ScheduledTask) -> dict[str, Any]:
     """Public schedule representation; deliberately excludes environment values."""
-    return {
-        "id": task.id,
-        "name": task.name,
-        "command": list(task.command),
-        "schedule": {
-            "kind": task.schedule.kind,
-            "value": task.schedule.value,
-            "timezone": task.schedule.timezone,
-            "start_at": task.schedule.start_at,
-        },
-        "enabled": task.enabled,
-        "timeout": task.timeout,
-        "cwd": task.cwd,
-        "misfire_grace_time": task.misfire_grace_time,
-        "coalesce": task.coalesce,
-        "max_instances": task.max_instances,
-        "revision": task.revision,
-        "created_at": task.created_at.isoformat(),
-        "updated_at": task.updated_at.isoformat(),
-        "next_run_at": task.next_run_at.isoformat() if task.next_run_at else None,
-    }
+    return task.to_public_dict()
 
 
 @app.get("/api/schedules")
-async def list_portable_schedules(match: str | None = Query(None)):
+async def list_portable_schedules(
+    match: str | None = Query(None),
+) -> dict[str, list[dict[str, Any]]]:
     tasks = await asyncio.to_thread(SchedulerRepository().list, match=match)
     return {"schedules": [_portable_task_data(task) for task in tasks]}
 
 
+@app.get("/api/schedules/{identifier}")
+async def get_portable_schedule(identifier: str) -> dict[str, Any]:
+    try:
+        task = await asyncio.to_thread(SchedulerRepository().resolve, identifier)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _portable_task_data(task)
+
+
 @app.post("/api/schedules", status_code=status.HTTP_201_CREATED)
-async def create_portable_schedule(request: PortableScheduleRequest):
+async def create_portable_schedule(request: PortableScheduleRequest) -> dict[str, Any]:
     selected = sum(
         value is not None for value in (request.run_at, request.interval_seconds, request.cron)
     )
@@ -681,11 +673,25 @@ async def create_portable_schedule(request: PortableScheduleRequest):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="provide exactly one of run_at, interval_seconds, or cron",
         )
+    if request.start_at is not None and request.interval_seconds is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_at can only be used with interval_seconds",
+        )
+    if request.expected_revision is not None and not request.replace_existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="expected_revision requires replace_existing=true",
+        )
     try:
         if request.run_at is not None:
             schedule = ScheduleSpec.once(request.run_at)
         elif request.interval_seconds is not None:
-            schedule = ScheduleSpec.interval(request.interval_seconds, timezone=request.timezone)
+            schedule = ScheduleSpec.interval(
+                request.interval_seconds,
+                start_at=request.start_at,
+                timezone=request.timezone,
+            )
         else:
             schedule = ScheduleSpec.cron(request.cron or "", timezone=request.timezone)
         task = ScheduledTask.create(
@@ -704,8 +710,11 @@ async def create_portable_schedule(request: PortableScheduleRequest):
             SchedulerRepository().add,
             task,
             replace_existing=request.replace_existing,
+            expected_revision=request.expected_revision,
         )
-    except ValueError as exc:
+    except RevisionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (TypeError, ValueError) as exc:
         code = (
             status.HTTP_409_CONFLICT
             if "already exists" in str(exc)
@@ -720,7 +729,7 @@ async def set_portable_schedule_enabled(
     identifier: str,
     enabled: bool = Body(..., embed=True),
     expected_revision: int | None = Body(None, embed=True, ge=1),
-):
+) -> dict[str, Any]:
     try:
         task = await asyncio.to_thread(
             SchedulerRepository().set_enabled,
@@ -736,15 +745,24 @@ async def set_portable_schedule_enabled(
 
 
 @app.delete("/api/schedules/{identifier}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_portable_schedule(identifier: str):
+async def delete_portable_schedule(
+    identifier: str,
+    expected_revision: int | None = Query(None, ge=1),
+) -> None:
     try:
-        await asyncio.to_thread(SchedulerRepository().delete, identifier)
+        await asyncio.to_thread(
+            SchedulerRepository().delete,
+            identifier,
+            expected_revision=expected_revision,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RevisionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @app.post("/api/schedules/{identifier}/run")
-async def run_portable_schedule(identifier: str):
+async def run_portable_schedule(identifier: str) -> dict[str, int]:
     repository = SchedulerRepository()
     try:
         exit_code = await asyncio.to_thread(run_scheduled_now, repository.database_path, identifier)
@@ -761,7 +779,7 @@ async def run_portable_schedule(identifier: str):
 @app.get("/api/schedule-runs")
 async def portable_schedule_history(
     identifier: str | None = Query(None), limit: int = Query(100, ge=1, le=10000)
-):
+) -> dict[str, list[dict[str, Any]]]:
     try:
         runs = await asyncio.to_thread(SchedulerRepository().history, identifier, limit=limit)
     except KeyError as exc:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from taskflows.common import logger
+from taskflows.exceptions import RevisionConflict
 
 from .models import parse_datetime, utc_now
 from .repository import SchedulerRepository
@@ -123,7 +124,7 @@ def execute_scheduled_task(
         # a concurrent manual run occupies the registry-level overlap slot.
         # Consume the definition too so a restart cannot retry it unexpectedly.
         if task.schedule.kind == "date" and not allow_disabled:
-            with suppress(KeyError):
+            with suppress(KeyError, RevisionConflict):
                 repository.set_enabled(task.id, False, expected_revision=task.revision)
         logger.warning(f"Scheduled task {task.name} reached max_instances={task.max_instances}")
         return None
@@ -138,7 +139,7 @@ def execute_scheduled_task(
         # recreate a DateTrigger after APScheduler removes it. A manual
         # `schedule run` must not consume a future one-time schedule.
         if task.schedule.kind == "date" and task.enabled and not allow_disabled:
-            with suppress(KeyError):
+            with suppress(KeyError, RevisionConflict):
                 repository.set_enabled(task.id, False, expected_revision=task.revision)
 
         # Setup belongs inside the guarded section: permission or filesystem

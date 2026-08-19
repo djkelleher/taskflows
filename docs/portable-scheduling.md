@@ -67,10 +67,14 @@ tf scheduler run              # foreground/debug mode
 tf scheduler uninstall
 
 tf schedule add NAME --at TIMESTAMP -- COMMAND [ARGS...]
-tf schedule add NAME --interval SECONDS -- COMMAND [ARGS...]
+tf schedule add NAME --interval 5m --timeout 2m -- COMMAND [ARGS...]
+tf schedule add NAME --interval 1h --start-at TIMESTAMP -- COMMAND [ARGS...]
 tf schedule add NAME --cron EXPRESSION --timezone ZONE -- COMMAND [ARGS...]
+tf schedule add NAME --interval 1h --env-file .env --env MODE=prod -- COMMAND
 tf schedule list --json
+tf schedule show NAME [--json]
 tf schedule history [NAME]
+tf schedule logs NAME [--stream stdout|stderr|both] [--lines 200]
 tf schedule run NAME
 tf schedule enable NAME
 tf schedule disable NAME
@@ -93,8 +97,17 @@ properties are needed for every matched service.
 REST clients can use `/api/schedules` and `/api/schedule-runs`. These endpoints
 use the existing HMAC/JWT authentication middleware. Schedule representations
 include a `revision`; clients can send `expected_revision` when enabling or
-disabling a definition and receive HTTP 409 instead of silently overwriting a
-concurrent change.
+disabling, replacing, or deleting a definition and receive HTTP 409 instead of
+silently overwriting a concurrent change. CLI replacements offer the same
+guard through `--replace --revision N`. `GET /api/schedules/{id-or-name}`
+returns the same non-secret representation used by CLI JSON output. Interval
+requests may provide an offset-aware `start_at` timestamp.
+
+Human durations (`30s`, `5m`, `1.5h`, `2d`) are accepted by the CLI. Environment
+files are resolved and copied into the registry when `schedule add` runs; they
+are not re-read for every occurrence. Explicit `--env KEY=VALUE` options take
+precedence. Public output includes environment variable names for diagnostics
+but never their values.
 
 ## Native services
 
