@@ -2,7 +2,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { LayoutDashboard, Box, LogOut } from "lucide-react";
 import { clsx } from "clsx";
 import { logout } from "@/api";
-import { ThemeToggle } from "@/components/ui";
+import { Button, ThemeToggle } from "@/components/ui";
 
 interface TabItemProps {
   to: string;
@@ -59,13 +59,14 @@ export function AppBar() {
 
       <div className="ml-auto flex items-center gap-2">
         <ThemeToggle />
-        <button
+        <Button
           onClick={handleLogout}
-          className="flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium text-electric-blue hover:bg-border transition-colors"
+          className="border-transparent text-electric-blue hover:bg-border"
+          leftIcon={<LogOut className="w-4 h-4" aria-hidden="true" />}
+          variant="ghost"
         >
-          <LogOut className="w-4 h-4" />
           Logout
-        </button>
+        </Button>
       </div>
     </header>
   );

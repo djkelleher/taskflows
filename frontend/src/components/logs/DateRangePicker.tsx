@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from "react";
-import { clsx } from "clsx";
+import { useState } from "react";
 import { Calendar, ChevronDown, Clock } from "lucide-react";
+
+import { Button, Input, Popover } from "@/components/ui";
 
 export interface TimeRange {
   from: string;
@@ -34,7 +35,6 @@ function toLocalDatetime(date: Date): { date: string; time: string } {
 export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [showCustom, setShowCustom] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
 
   const now = new Date();
   const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
@@ -43,16 +43,9 @@ export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
   const [endDate, setEndDate] = useState(toLocalDatetime(now).date);
   const [endTime, setEndTime] = useState(toLocalDatetime(now).time);
 
-  // Close dropdown on outside click
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setIsOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  const fromMs = new Date(`${startDate}T${startTime}`).getTime();
+  const toMs = new Date(`${endDate}T${endTime}`).getTime();
+  const customRangeIsValid = Number.isFinite(fromMs) && Number.isFinite(toMs) && fromMs < toMs;
 
   const handlePreset = (preset: TimeRange) => {
     onChange(preset);
@@ -61,9 +54,7 @@ export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
   };
 
   const handleCustomApply = () => {
-    const fromMs = new Date(`${startDate}T${startTime}`).getTime();
-    const toMs = new Date(`${endDate}T${endTime}`).getTime();
-    if (fromMs >= toMs) return;
+    if (!customRangeIsValid) return;
     onChange({
       from: String(fromMs),
       to: String(toMs),
@@ -74,42 +65,35 @@ export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
   };
 
   return (
-    <div className="relative" ref={dropdownRef}>
-      <button
-        type="button"
-        onClick={() => setIsOpen(!isOpen)}
-        className={clsx(
-          "inline-flex items-center gap-2 px-3 py-2 text-sm rounded-lg border border-border",
-          "bg-card text-foreground hover:bg-border/50 transition-colors",
-        )}
-      >
-        <Calendar className="w-4 h-4 text-muted" />
-        <span className="max-w-48 truncate">{value.label}</span>
-        <ChevronDown className="w-3 h-3 text-muted" />
-      </button>
-
-      {isOpen && (
-        <div className="absolute top-full left-0 mt-1 z-50 min-w-64 bg-card border border-border rounded-lg shadow-lg">
+    <Popover
+      className="min-w-64 p-0"
+      onOpenChange={setIsOpen}
+      open={isOpen}
+      trigger={
+        <Button
+          leftIcon={<Calendar className="w-4 h-4 text-muted" aria-hidden="true" />}
+          rightIcon={<ChevronDown className="w-3 h-3 text-muted" aria-hidden="true" />}
+        >
+          <span className="max-w-48 truncate">{value.label}</span>
+        </Button>
+      }
+    >
           {/* Preset ranges */}
           <div className="p-2">
             <div className="text-xs font-medium text-muted px-2 py-1 uppercase tracking-wide">
               Quick ranges
             </div>
             {PRESETS.map((preset) => (
-              <button
+              <Button
                 key={preset.from}
-                type="button"
                 onClick={() => handlePreset(preset)}
-                className={clsx(
-                  "w-full text-left px-3 py-1.5 text-sm rounded-md",
-                  "hover:bg-border/50 transition-colors",
-                  value.label === preset.label
-                    ? "text-accent font-medium"
-                    : "text-foreground",
-                )}
+                className={value.label === preset.label ? "justify-start text-accent" : "justify-start"}
+                fullWidth
+                size="sm"
+                variant="ghost"
               >
                 {preset.label}
-              </button>
+              </Button>
             ))}
           </div>
 
@@ -117,27 +101,31 @@ export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
 
           {/* Custom range toggle */}
           <div className="p-2">
-            <button
-              type="button"
+            <Button
               onClick={() => setShowCustom(!showCustom)}
-              className="w-full text-left px-3 py-1.5 text-sm rounded-md hover:bg-border/50 transition-colors text-foreground inline-flex items-center gap-2"
+              className="justify-start"
+              fullWidth
+              leftIcon={<Clock className="w-3.5 h-3.5 text-muted" aria-hidden="true" />}
+              size="sm"
+              variant="ghost"
             >
-              <Clock className="w-3.5 h-3.5 text-muted" />
               Custom range...
-            </button>
+            </Button>
 
             {showCustom && (
               <div className="mt-2 px-2 space-y-3">
                 <div>
-                  <label className="block text-xs text-muted mb-1">From</label>
+                  <span className="block text-xs text-muted mb-1">From</span>
                   <div className="flex gap-2">
-                    <input
+                    <Input
+                      aria-label="Start date"
                       type="date"
                       value={startDate}
                       onChange={(e) => setStartDate(e.target.value)}
                       className="flex-1 px-2 py-1.5 text-sm bg-background border border-border rounded-md text-foreground"
                     />
-                    <input
+                    <Input
+                      aria-label="Start time"
                       type="time"
                       value={startTime}
                       onChange={(e) => setStartTime(e.target.value)}
@@ -146,15 +134,17 @@ export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
                   </div>
                 </div>
                 <div>
-                  <label className="block text-xs text-muted mb-1">To</label>
+                  <span className="block text-xs text-muted mb-1">To</span>
                   <div className="flex gap-2">
-                    <input
+                    <Input
+                      aria-label="End date"
                       type="date"
                       value={endDate}
                       onChange={(e) => setEndDate(e.target.value)}
                       className="flex-1 px-2 py-1.5 text-sm bg-background border border-border rounded-md text-foreground"
                     />
-                    <input
+                    <Input
+                      aria-label="End time"
                       type="time"
                       value={endTime}
                       onChange={(e) => setEndTime(e.target.value)}
@@ -162,27 +152,31 @@ export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
                     />
                   </div>
                 </div>
+                {!customRangeIsValid ? (
+                  <p className="text-xs text-negative" role="alert">
+                    The end of the range must be after the start.
+                  </p>
+                ) : null}
                 <div className="flex gap-2 justify-end pb-1">
-                  <button
-                    type="button"
+                  <Button
                     onClick={() => setShowCustom(false)}
-                    className="px-3 py-1.5 text-xs rounded-md border border-border text-muted hover:text-foreground transition-colors"
+                    size="sm"
+                    variant="outline"
                   >
                     Cancel
-                  </button>
-                  <button
-                    type="button"
+                  </Button>
+                  <Button
+                    disabled={!customRangeIsValid}
                     onClick={handleCustomApply}
-                    className="px-3 py-1.5 text-xs rounded-md bg-accent text-background font-medium hover:opacity-90 transition-opacity"
+                    size="sm"
+                    variant="primary"
                   >
                     Apply
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}
           </div>
-        </div>
-      )}
-    </div>
+    </Popover>
   );
 }

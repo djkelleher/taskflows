@@ -22,7 +22,7 @@
   --color-positive: #00FF52;
   --color-negative: #FF3366;
 
-  /* Semantic tokens required by @danklab/shared-ui (light mode defaults). */
+  /* Semantic tokens required by @danklab/ui-comps (light mode defaults). */
   --color-warning: #F5A623;
   --color-info: #00AEFF;
   --color-surface: #f5f5f5;
@@ -47,7 +47,7 @@
 }
 
 /* Generate utilities from the package while retaining Taskflows' semantic palette. */
-@source "../node_modules/@danklab/shared-ui/dist";
+@source "../node_modules/@danklab/ui-comps/dist";
 
 /* Dark mode overrides */
 .dark {
