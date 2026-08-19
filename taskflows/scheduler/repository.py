@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -46,11 +46,18 @@ class SchedulerRepository:
     """SQLite source of truth for portable schedules and run history."""
 
     def __init__(self, database_path: str | Path | None = None) -> None:
-        self.database_path = Path(database_path or (services_data_dir / "scheduler.sqlite3"))
+        configured_database = services_data_dir / "scheduler.sqlite3"
+        self.database_path = Path(database_path or configured_database)
+        parent_existed = self.database_path.parent.exists()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        if database_path is None:
+        if database_path is None or self.database_path.resolve() == configured_database.resolve():
+            # The configured Taskflows data directory has an owner-only
+            # contract, including when the native installer pins this exact
+            # database path on the daemon command line.
             ensure_data_dir()
-        if os.name != "nt":
+        elif os.name != "nt" and not parent_existed:
+            # Secure directories we create, but never change permissions on an
+            # existing directory owned or managed by the caller.
             os.chmod(self.database_path.parent, 0o700)
         self._initialize()
 
@@ -276,7 +283,9 @@ class SchedulerRepository:
         with self.connect() as db:
             rows = db.execute(query, params).fetchall()
         tasks = [self._task_from_row(row) for row in rows]
-        return [task for task in tasks if not match or fnmatch(task.name, match)]
+        # Keep portable registry matching consistent with SQLite's case-sensitive
+        # task names. ``fnmatch`` silently becomes case-insensitive on Windows.
+        return [task for task in tasks if not match or fnmatchcase(task.name, match)]
 
     def set_enabled(
         self, identifier: str, enabled: bool, *, expected_revision: int | None = None

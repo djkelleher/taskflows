@@ -87,24 +87,35 @@ def execute_scheduled_task(
     planned_at = parse_datetime(scheduled_for) if scheduled_for else utc_now()
     run_id = repository.begin_run(task, planned_at, allow_disabled=allow_disabled)
     if run_id is None:
+        # APScheduler has consumed a DateTrigger once it dispatches, even when
+        # a concurrent manual run occupies the registry-level overlap slot.
+        # Consume the definition too so a restart cannot retry it unexpectedly.
+        if task.schedule.kind == "date" and not allow_disabled:
+            with suppress(KeyError):
+                repository.set_enabled(task.id, False, expected_revision=task.revision)
         logger.warning(f"Scheduled task {task.name} reached max_instances={task.max_instances}")
         return None
 
-    # Claim one-time schedules before starting so the reconcile loop cannot
-    # recreate a DateTrigger after APScheduler removes it.
-    # A manual `schedule run` must not consume a future one-time schedule.
-    if task.schedule.kind == "date" and task.enabled and not allow_disabled:
-        repository.set_enabled(task.id, False, expected_revision=task.revision)
-
     log_dir = repository.database_path.parent / "runs" / task.id
-    log_dir.mkdir(parents=True, exist_ok=True)
-    if os.name != "nt":
-        os.chmod(log_dir, 0o700)
     stdout_path = log_dir / f"{run_id}.stdout.log"
     stderr_path = log_dir / f"{run_id}.stderr.log"
     process: subprocess.Popen[Any] | None = None
 
     try:
+        # Claim one-time schedules before starting so the reconcile loop cannot
+        # recreate a DateTrigger after APScheduler removes it. A manual
+        # `schedule run` must not consume a future one-time schedule.
+        if task.schedule.kind == "date" and task.enabled and not allow_disabled:
+            with suppress(KeyError):
+                repository.set_enabled(task.id, False, expected_revision=task.revision)
+
+        # Setup belongs inside the guarded section: permission or filesystem
+        # failures must finish the durable run record rather than strand it in
+        # the running state until the next daemon restart.
+        log_dir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(log_dir, 0o700)
+
         environment = os.environ.copy()
         environment.update(task.environment)
         popen_kwargs: dict[str, Any] = {

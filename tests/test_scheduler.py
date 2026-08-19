@@ -21,10 +21,11 @@ from taskflows.admin.cli import cli
 from taskflows.admin.models import PortableScheduleRequest
 from taskflows.schedule import Calendar
 from taskflows.scheduler import installer
+from taskflows.scheduler import repository as repository_module
 from taskflows.scheduler.daemon import SchedulerDaemon
 from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, utc_now
 from taskflows.scheduler.repository import SchedulerRepository
-from taskflows.scheduler.runner import run_now
+from taskflows.scheduler.runner import execute_scheduled_task, run_now
 
 
 def make_repository(tmp_path: Path) -> SchedulerRepository:
@@ -122,6 +123,33 @@ def test_repository_add_is_atomic_and_replacements_increment_current_revision(tm
     assert {task.id for task in replacements} == {saved.id}
 
 
+def test_custom_database_does_not_chmod_existing_parent(tmp_path, monkeypatch):
+    chmod_calls = []
+    monkeypatch.setattr(
+        repository_module.os,
+        "chmod",
+        lambda path, mode: chmod_calls.append((Path(path), mode)),
+    )
+
+    SchedulerRepository(tmp_path / "scheduler.sqlite3")
+
+    assert all(path != tmp_path for path, _mode in chmod_calls)
+
+
+def test_custom_database_secures_parent_it_creates(tmp_path, monkeypatch):
+    database_path = tmp_path / "new" / "scheduler.sqlite3"
+    chmod_calls = []
+    monkeypatch.setattr(
+        repository_module.os,
+        "chmod",
+        lambda path, mode: chmod_calls.append((Path(path), mode)),
+    )
+
+    SchedulerRepository(database_path)
+
+    assert (database_path.parent, 0o700) in chmod_calls
+
+
 def _capture_add(add):
     try:
         return add()
@@ -140,6 +168,14 @@ def test_set_enabled_is_idempotent(tmp_path):
     assert unchanged.revision == task.revision
 
 
+def test_repository_name_matching_is_case_sensitive(tmp_path):
+    repository = make_repository(tmp_path)
+    repository.add(ScheduledTask.create("Backup", ["echo", "ok"], ScheduleSpec.interval(60)))
+
+    assert [task.name for task in repository.list(match="B*")] == ["Backup"]
+    assert repository.list(match="b*") == []
+
+
 def test_repository_prevents_overlapping_manual_runs(tmp_path):
     repository = make_repository(tmp_path)
     task = repository.add(ScheduledTask.create("single", ["echo", "ok"], ScheduleSpec.interval(60)))
@@ -148,6 +184,32 @@ def test_repository_prevents_overlapping_manual_runs(tmp_path):
     assert first is not None
     assert second is None
     assert [run["status"] for run in repository.history("single")] == ["skipped", "running"]
+
+
+def test_overlapping_scheduled_one_shot_is_consumed(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "single-date",
+            ["echo", "ok"],
+            ScheduleSpec.once(utc_now() + timedelta(minutes=1)),
+        )
+    )
+    manual_run = repository.begin_run(task, utc_now())
+    assert manual_run is not None
+
+    assert (
+        execute_scheduled_task(
+            str(repository.database_path),
+            task.id,
+            task.revision,
+            scheduled_for=utc_now().isoformat(),
+        )
+        is None
+    )
+
+    assert repository.resolve(task.id).enabled is False
+    assert [run["status"] for run in repository.history(task.id)] == ["skipped", "running"]
 
 
 def test_repository_rejects_run_reservation_for_stale_revision(tmp_path):
@@ -253,6 +315,29 @@ def test_runner_enforces_timeout(tmp_path):
     run_now(repository.database_path, task.id)
     assert time.monotonic() - started < 3
     assert repository.history(task.id)[0]["status"] == "timed_out"
+
+
+def test_runner_finishes_reservation_when_log_setup_fails(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("log-failure", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    log_dir = repository.database_path.parent / "runs" / task.id
+    original_mkdir = Path.mkdir
+
+    def fail_log_setup(path, *args, **kwargs):
+        if path == log_dir:
+            raise PermissionError("cannot create logs")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_log_setup)
+
+    assert run_now(repository.database_path, task.id) == 1
+
+    run = repository.history(task.id)[0]
+    assert run["status"] == "failed"
+    assert run["finished_at"] is not None
+    assert run["error"] == "cannot create logs"
 
 
 def test_daemon_executes_and_disables_one_time_task(tmp_path):
@@ -454,6 +539,8 @@ def test_macos_installer_writes_launch_agent(tmp_path, monkeypatch):
     assert definition["KeepAlive"] == {"SuccessfulExit": False}
     assert definition["ProgramArguments"][1:3] == ["-m", "taskflows.scheduler.daemon"]
     assert definition["ProgramArguments"][-1] == str(tmp_path / "data" / "scheduler.sqlite3")
+    assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
+    assert (tmp_path / "data" / "logs").stat().st_mode & 0o777 == 0o700
     assert any(command[:2] == ["launchctl", "bootstrap"] for command in calls)
 
 

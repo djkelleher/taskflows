@@ -80,13 +80,17 @@ def install_macos() -> Path:
     uid = os.getuid()
     agents_dir = _home_dir() / "Library" / "LaunchAgents"
     agents_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = services_data_dir / "logs"
+    data_dir = services_data_dir.resolve()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(data_dir, 0o700)
+    log_dir = data_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(log_dir, 0o700)
     plist_path = agents_dir / f"{MACOS_LABEL}.plist"
     definition = {
         "Label": MACOS_LABEL,
         "ProgramArguments": _daemon_command(),
-        "EnvironmentVariables": {"TASKFLOWS_DATA_DIR": str(services_data_dir.resolve())},
+        "EnvironmentVariables": {"TASKFLOWS_DATA_DIR": str(data_dir)},
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
         "ProcessType": "Background",

@@ -10,6 +10,21 @@ from taskflows.alerts.components import Table
 from taskflows.systemd import dbus, units
 
 
+@pytest.mark.parametrize(
+    ("unit_type", "match", "expected"),
+    [
+        ("service", "worker.service", "*taskflows-worker.service"),
+        ("timer", "worker.timer", "*taskflows-worker.timer"),
+        (None, "worker.service", "*taskflows-worker.service"),
+        (None, "worker.*", "*taskflows-worker.*"),
+        ("service", "worker", "*taskflows-worker.service"),
+        (None, "worker", "*taskflows-worker.*"),
+    ],
+)
+def test_unit_match_pattern_preserves_explicit_suffix(unit_type, match, expected):
+    assert units._make_unit_match_pattern(unit_type=unit_type, match=match) == expected
+
+
 @pytest.mark.asyncio
 async def test_cached_systemd_manager_has_no_per_call_health_round_trip(monkeypatch):
     manager = object()

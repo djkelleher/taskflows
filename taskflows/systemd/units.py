@@ -231,9 +231,11 @@ def _make_unit_match_pattern(
     unit_type: Literal["service", "timer"] | None = None, match: str | None = None
 ) -> str:
     pattern = match or "*"
-    if unit_type and not pattern.endswith(f".{unit_type}"):
-        pattern += f".{unit_type}"
-    else:
+    if unit_type:
+        suffix = f".{unit_type}"
+        if not pattern.endswith(suffix):
+            pattern += suffix
+    elif not pattern.endswith((".service", ".timer", ".*")):
         pattern += ".*"
     if _SYSTEMD_FILE_PREFIX not in pattern:
         pattern = f"*{_SYSTEMD_FILE_PREFIX}{pattern}"
