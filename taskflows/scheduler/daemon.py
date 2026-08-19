@@ -303,11 +303,18 @@ class SchedulerDaemon:
     def shutdown(self) -> None:
         if not self._started:
             return
-        terminate_active_runs()
-        self.scheduler.shutdown(wait=True)
-        self.repository.mark_interrupted_runs()
-        self.repository.clear_daemon_state(pid=os.getpid())
-        self._started = False
+        try:
+            terminate_active_runs()
+            self.scheduler.shutdown(wait=True)
+        finally:
+            # Cleanup must happen even if APScheduler reports an executor or
+            # job-store error while stopping. Otherwise status would retain a
+            # stale heartbeat and a later daemon could appear unhealthy.
+            try:
+                self.repository.mark_interrupted_runs()
+            finally:
+                self.repository.clear_daemon_state(pid=os.getpid())
+                self._started = False
 
 
 def main(argv: list[str] | None = None) -> None:

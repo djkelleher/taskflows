@@ -45,6 +45,14 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
     except subprocess.TimeoutExpired:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
+    else:
+        # The leader can exit promptly while a descendant ignores SIGTERM.
+        # In that case waiting on the leader alone would leave the rest of
+        # the process group orphaned.  A group whose leader has exited is
+        # still safe to address by its original PGID; if it no longer exists,
+        # killpg raises ProcessLookupError and there is nothing left to do.
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
 
 
 def terminate_active_runs() -> None:

@@ -328,7 +328,10 @@ def test_runner_enforces_timeout(tmp_path):
 def test_runner_timeout_terminates_child_process_tree(tmp_path):
     repository = make_repository(tmp_path)
     marker = tmp_path / "orphaned-child.txt"
-    child = f"import time; from pathlib import Path; time.sleep(1); Path({str(marker)!r}).touch()"
+    child = (
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"from pathlib import Path; time.sleep(1); Path({str(marker)!r}).touch()"
+    )
     parent = (
         "import subprocess, sys, time; "
         f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
@@ -426,6 +429,24 @@ def test_daemon_shutdown_clears_its_heartbeat(tmp_path):
     daemon.shutdown()
 
     assert repository.daemon_state() is None
+
+
+def test_daemon_shutdown_cleans_heartbeat_when_scheduler_stop_fails(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    daemon = SchedulerDaemon(repository.database_path)
+    daemon.heartbeat()
+    daemon._started = True
+    monkeypatch.setattr(
+        daemon.scheduler,
+        "shutdown",
+        lambda wait: (_ for _ in ()).throw(RuntimeError("stop failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        daemon.shutdown()
+
+    assert repository.daemon_state() is None
+    assert daemon._started is False
 
 
 def test_daemon_start_cleans_up_when_initial_reconcile_fails(tmp_path, monkeypatch):
@@ -570,6 +591,7 @@ def test_linux_installer_writes_one_user_service(tmp_path, monkeypatch):
     assert "taskflows.scheduler.daemon" in content
     assert str(tmp_path / "data%%dir" / "scheduler.sqlite3") in content
     assert f"TASKFLOWS_DATA_DIR={tmp_path / 'data%%dir'}" in content
+    assert unit_path.stat().st_mode & 0o777 == 0o600
     assert "Restart=on-failure" in content
     assert calls[-1] == ["systemctl", "--user", "enable", "--now", installer.LINUX_UNIT_NAME]
 

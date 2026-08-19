@@ -10,9 +10,10 @@ daemon.
 | macOS | `~/Library/LaunchAgents/com.taskflows.scheduler.plist` |
 | Windows | per-user Task Scheduler logon task |
 
-The macOS launch agent is written atomically with owner-only permissions and is
-registered in the installing user's GUI domain. Reinstalling re-enables and
-restarts a previously loaded or manually disabled agent.
+The macOS launch agent and Linux user unit are written atomically with
+owner-only permissions. The macOS agent is registered in the installing user's
+GUI domain; reinstalling re-enables and restarts a previously loaded or
+manually disabled agent.
 
 The Windows daemon intentionally runs as the installing interactive user. Its
 principal and logon trigger are scoped to that account, it runs with least

@@ -75,7 +75,10 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 """
-    unit_path.write_text(content)
+    # systemd may reload the unit while an upgrade is in progress.  Keep the
+    # definition owner-readable only and replace it atomically, just as the
+    # macOS LaunchAgent definition is handled below.
+    secure_write_text(unit_path, content)
     _run(["systemctl", "--user", "daemon-reload"])
     _run(["systemctl", "--user", "enable", "--now", LINUX_UNIT_NAME])
     return unit_path
