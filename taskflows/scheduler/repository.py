@@ -31,6 +31,8 @@ def _pid_is_running(pid: int | None) -> bool:
     """Return whether a recorded runner process still exists."""
     if pid is None or pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_pid_is_running(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -40,6 +42,46 @@ def _pid_is_running(pid: int | None) -> bool:
     except OSError:
         return False
     return True
+
+
+def _windows_pid_is_running(pid: int) -> bool:
+    """Check a Windows PID without using ``os.kill``.
+
+    Windows implements every ``os.kill`` signal other than the console
+    control events with ``TerminateProcess``. In particular, ``os.kill(pid,
+    0)`` is not the POSIX existence probe and can terminate a live runner.
+    Opening a query handle and polling it avoids that destructive behavior.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    SYNCHRONIZE = 0x00100000
+    WAIT_TIMEOUT = 0x00000102
+    ERROR_ACCESS_DENIED = 5
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+        False,
+        pid,
+    )
+    if not handle:
+        # A protected process may reject the query even while it exists. Treat
+        # access denial conservatively so a live runner is not duplicated.
+        error_code = int(ctypes.get_last_error())  # type: ignore[attr-defined]
+        return error_code == ERROR_ACCESS_DENIED
+    try:
+        return bool(kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 class SchedulerRepository:
