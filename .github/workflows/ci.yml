@@ -59,6 +59,19 @@ jobs:
           tests/test_entrypoints.py
           tests/test_import_hygiene.py
           --timeout=120
+      - name: Exercise the real native daemon lifecycle
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          TASKFLOWS_DATA_DIR: ${{ runner.temp }}/taskflows-native-lifecycle
+        run: |
+          cleanup() { uv run --no-sources tf scheduler uninstall --timeout 30s || true; }
+          trap cleanup EXIT
+          uv run --no-sources tf scheduler install --timeout 30s
+          uv run --no-sources tf scheduler status
+          uv run --no-sources tf scheduler restart --timeout 30s
+          uv run --no-sources tf scheduler stop --timeout 30s
+          uv run --no-sources tf scheduler start --timeout 30s
 
   install-smoke:
     runs-on: ubuntu-latest

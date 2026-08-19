@@ -54,8 +54,10 @@ A Python library for cross-platform scheduled tasks, Linux service management, a
 - **Portable scheduling** on Linux, macOS, and Windows:
   - One-time, interval, and five-field cron schedules
   - Persistent schedules and missed-run handling
+  - Durable, recoverable occurrence handoff before trigger advancement
   - Process-tree timeouts, overlap limits, and captured output
   - SQLite-backed bulk status and run history
+  - Cross-platform lifecycle, command preflight, and native log diagnostics
 
 - **Environments**: Run services in:
   - Conda/Mamba virtual environments

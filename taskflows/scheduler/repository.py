@@ -20,7 +20,7 @@ from taskflows.exceptions import RevisionConflict
 
 from .models import ScheduledTask, ScheduleSpec, parse_datetime, utc_now
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,16 @@ class HistoryPruneResult:
     runs_deleted: int
     log_files_deleted: int
     log_errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class QueuedOccurrence:
+    """One durable scheduler occurrence waiting for a worker."""
+
+    run_id: str
+    task_id: str
+    revision: int
+    scheduled_for: datetime
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -227,9 +237,30 @@ class SchedulerRepository:
                     f"this Taskflows version supports ({SCHEMA_VERSION})"
                 )
             db.execute("PRAGMA journal_mode=WAL")
-            db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS scheduled_tasks (
+            if schema_version == SCHEMA_VERSION:
+                # Repository objects are intentionally cheap: the runner and
+                # API create them per operation. Once the version marker says
+                # the schema is current, avoid repeating every CREATE/PRAGMA
+                # inspection on each scheduled command.
+                current_schema = True
+            else:
+                current_schema = False
+                # The API, CLI, and daemon can all be the first process to open
+                # a registry after an upgrade. Serialize the entire migration,
+                # then re-read the marker in case another process completed it
+                # while this connection waited for the write lock.
+                db.execute("BEGIN IMMEDIATE")
+                schema_version = int(db.execute("PRAGMA user_version").fetchone()[0])
+                if schema_version > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"scheduler database schema {schema_version} is newer than "
+                        f"this Taskflows version supports ({SCHEMA_VERSION})"
+                    )
+                current_schema = schema_version == SCHEMA_VERSION
+
+            if not current_schema:
+                db.execute(
+                    """CREATE TABLE IF NOT EXISTS scheduled_tasks (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE,
                     command_json TEXT NOT NULL,
@@ -245,8 +276,10 @@ class SchedulerRepository:
                     updated_at TEXT NOT NULL,
                     revision INTEGER NOT NULL DEFAULT 1,
                     next_run_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS task_runs (
+                )"""
+                )
+                db.execute(
+                    """CREATE TABLE IF NOT EXISTS task_runs (
                     id TEXT PRIMARY KEY,
                     task_id TEXT,
                     task_name TEXT NOT NULL,
@@ -260,32 +293,37 @@ class SchedulerRepository:
                     error TEXT,
                     runner_pid INTEGER,
                     runner_identity TEXT,
+                    task_revision INTEGER,
+                    occurrence_key TEXT,
                     FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE SET NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_task_runs_task_started
-                    ON task_runs(task_id, started_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status);
-                CREATE TABLE IF NOT EXISTS scheduler_state (
+                )"""
+                )
+                db.execute(
+                    """CREATE INDEX IF NOT EXISTS idx_task_runs_task_started
+                    ON task_runs(task_id, started_at DESC)"""
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status)")
+                db.execute(
+                    """CREATE TABLE IF NOT EXISTS scheduler_state (
                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
                     pid INTEGER NOT NULL,
                     hostname TEXT NOT NULL,
                     started_at TEXT NOT NULL,
                     heartbeat_at TEXT NOT NULL,
                     process_identity TEXT
-                );
-                """
-            )
-            run_columns = {row[1] for row in db.execute("PRAGMA table_info(task_runs)")}
-            foreign_keys = list(db.execute("PRAGMA foreign_key_list(task_runs)"))
-            cascades_on_delete = any(str(row[6]).upper() == "CASCADE" for row in foreign_keys)
-            if "task_name" not in run_columns or cascades_on_delete:
-                # Version 1 deleted history together with a task definition.
-                # Preserve existing rows while rebuilding the foreign key.
-                db.execute("PRAGMA foreign_keys=OFF")
-                db.execute("ALTER TABLE task_runs RENAME TO task_runs_v1")
-                db.executescript(
-                    """
-                    CREATE TABLE task_runs (
+                )"""
+                )
+                run_columns = {row[1] for row in db.execute("PRAGMA table_info(task_runs)")}
+                foreign_keys = list(db.execute("PRAGMA foreign_key_list(task_runs)"))
+                cascades_on_delete = any(str(row[6]).upper() == "CASCADE" for row in foreign_keys)
+                if "task_name" not in run_columns or cascades_on_delete:
+                    # Version 1 deleted history together with a task
+                    # definition. The rebuild is part of the same write
+                    # transaction as the version marker, so readers never see
+                    # a half-migrated history table.
+                    db.execute("ALTER TABLE task_runs RENAME TO task_runs_v1")
+                    db.execute(
+                        """CREATE TABLE task_runs (
                         id TEXT PRIMARY KEY,
                         task_id TEXT,
                         task_name TEXT NOT NULL,
@@ -299,42 +337,51 @@ class SchedulerRepository:
                         error TEXT,
                         runner_pid INTEGER,
                         runner_identity TEXT,
+                        task_revision INTEGER,
+                        occurrence_key TEXT,
                         FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE SET NULL
-                    );
-                    """
-                )
-                old_columns = {row[1] for row in db.execute("PRAGMA table_info(task_runs_v1)")}
-                name_expression = (
-                    "COALESCE(r.task_name, t.name, '<deleted>')"
-                    if "task_name" in old_columns
-                    else "COALESCE(t.name, '<deleted>')"
-                )
-                db.execute(
-                    f"""INSERT INTO task_runs
+                    )"""
+                    )
+                    old_columns = {row[1] for row in db.execute("PRAGMA table_info(task_runs_v1)")}
+                    name_expression = (
+                        "COALESCE(r.task_name, t.name, '<deleted>')"
+                        if "task_name" in old_columns
+                        else "COALESCE(t.name, '<deleted>')"
+                    )
+                    db.execute(
+                        f"""INSERT INTO task_runs
                         (id, task_id, task_name, scheduled_for, started_at, finished_at,
                          status, exit_code, stdout_path, stderr_path, error, runner_pid,
-                         runner_identity)
+                         runner_identity, task_revision, occurrence_key)
                         SELECT r.id, r.task_id, {name_expression}, r.scheduled_for,
                                r.started_at, r.finished_at, r.status, r.exit_code,
-                               r.stdout_path, r.stderr_path, r.error, NULL, NULL
+                               r.stdout_path, r.stderr_path, r.error, NULL, NULL, NULL, NULL
                         FROM task_runs_v1 r
                         LEFT JOIN scheduled_tasks t ON t.id=r.task_id"""
-                )
-                db.execute("DROP TABLE task_runs_v1")
+                    )
+                    db.execute("DROP TABLE task_runs_v1")
+                    db.execute(
+                        """CREATE INDEX idx_task_runs_task_started
+                        ON task_runs(task_id, started_at DESC)"""
+                    )
+                    db.execute("CREATE INDEX idx_task_runs_status ON task_runs(status)")
+                run_columns = {row[1] for row in db.execute("PRAGMA table_info(task_runs)")}
+                if "runner_pid" not in run_columns:
+                    db.execute("ALTER TABLE task_runs ADD COLUMN runner_pid INTEGER")
+                if "runner_identity" not in run_columns:
+                    db.execute("ALTER TABLE task_runs ADD COLUMN runner_identity TEXT")
+                if "task_revision" not in run_columns:
+                    db.execute("ALTER TABLE task_runs ADD COLUMN task_revision INTEGER")
+                if "occurrence_key" not in run_columns:
+                    db.execute("ALTER TABLE task_runs ADD COLUMN occurrence_key TEXT")
                 db.execute(
-                    "CREATE INDEX idx_task_runs_task_started ON task_runs(task_id, started_at DESC)"
+                    """CREATE UNIQUE INDEX IF NOT EXISTS idx_task_runs_occurrence
+                   ON task_runs(occurrence_key) WHERE occurrence_key IS NOT NULL"""
                 )
-                db.execute("CREATE INDEX idx_task_runs_status ON task_runs(status)")
-                db.execute("PRAGMA foreign_keys=ON")
-            run_columns = {row[1] for row in db.execute("PRAGMA table_info(task_runs)")}
-            if "runner_pid" not in run_columns:
-                db.execute("ALTER TABLE task_runs ADD COLUMN runner_pid INTEGER")
-            if "runner_identity" not in run_columns:
-                db.execute("ALTER TABLE task_runs ADD COLUMN runner_identity TEXT")
-            state_columns = {row[1] for row in db.execute("PRAGMA table_info(scheduler_state)")}
-            if "process_identity" not in state_columns:
-                db.execute("ALTER TABLE scheduler_state ADD COLUMN process_identity TEXT")
-            db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                state_columns = {row[1] for row in db.execute("PRAGMA table_info(scheduler_state)")}
+                if "process_identity" not in state_columns:
+                    db.execute("ALTER TABLE scheduler_state ADD COLUMN process_identity TEXT")
+                db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if os.name != "nt":
             os.chmod(self.database_path, 0o600)
 
@@ -556,7 +603,8 @@ class SchedulerRepository:
             ):
                 return None
             running = db.execute(
-                "SELECT COUNT(*) FROM task_runs WHERE task_id=? AND status='running'",
+                """SELECT COUNT(*) FROM task_runs
+                   WHERE task_id=? AND status IN ('starting', 'running')""",
                 (task.id,),
             ).fetchone()[0]
             if running >= current["max_instances"]:
@@ -570,8 +618,8 @@ class SchedulerRepository:
             db.execute(
                 """INSERT INTO task_runs
                    (id, task_id, task_name, scheduled_for, started_at, status,
-                    runner_pid, runner_identity)
-                   VALUES (?, ?, ?, ?, ?, 'running', ?, ?)""",
+                    runner_pid, runner_identity, task_revision)
+                   VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
                 (
                     run_id,
                     task.id,
@@ -580,9 +628,176 @@ class SchedulerRepository:
                     _iso(now),
                     os.getpid(),
                     _process_identity(os.getpid()),
+                    task.revision,
                 ),
             )
         return run_id
+
+    @staticmethod
+    def _occurrence_key(task: ScheduledTask, scheduled_for: datetime) -> str:
+        return f"{task.id}:{task.revision}:{_iso(scheduled_for)}"
+
+    def reserve_occurrences(
+        self,
+        task: ScheduledTask,
+        scheduled_times: builtins.list[datetime],
+    ) -> builtins.list[QueuedOccurrence]:
+        """Persist due occurrences before APScheduler advances their trigger."""
+        if not scheduled_times:
+            return []
+        owner_pid = os.getpid()
+        owner_identity = _process_identity(owner_pid)
+        reserved: list[QueuedOccurrence] = []
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute(
+                "SELECT name, enabled, revision FROM scheduled_tasks WHERE id=?",
+                (task.id,),
+            ).fetchone()
+            if (
+                current is None
+                or not bool(current["enabled"])
+                or current["revision"] != task.revision
+            ):
+                return []
+            for scheduled_for in scheduled_times:
+                run_id = str(uuid4())
+                cursor = db.execute(
+                    """INSERT OR IGNORE INTO task_runs
+                       (id, task_id, task_name, task_revision, occurrence_key,
+                        scheduled_for, status, runner_pid, runner_identity)
+                       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
+                    (
+                        run_id,
+                        task.id,
+                        current["name"],
+                        task.revision,
+                        self._occurrence_key(task, scheduled_for),
+                        _iso(scheduled_for),
+                        owner_pid,
+                        owner_identity,
+                    ),
+                )
+                if cursor.rowcount:
+                    reserved.append(QueuedOccurrence(run_id, task.id, task.revision, scheduled_for))
+        return reserved
+
+    def release_queued_owners(self, run_ids: builtins.list[str]) -> None:
+        """Make occurrences recoverable when executor submission fails."""
+        if not run_ids:
+            return
+        with self.connect() as db:
+            db.executemany(
+                """UPDATE task_runs SET runner_pid=NULL, runner_identity=NULL
+                   WHERE id=? AND status='queued'""",
+                [(run_id,) for run_id in run_ids],
+            )
+
+    def adopt_orphaned_occurrences(self) -> builtins.list[QueuedOccurrence]:
+        """Claim queued work whose owning daemon no longer exists."""
+        owner_pid = os.getpid()
+        owner_identity = _process_identity(owner_pid)
+        adopted: list[QueuedOccurrence] = []
+        owner_liveness: dict[tuple[int | None, str | None], bool] = {}
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                """SELECT id, task_id, task_revision, scheduled_for,
+                          runner_pid, runner_identity
+                   FROM task_runs WHERE status IN ('queued', 'starting')
+                   ORDER BY scheduled_for, id"""
+            ).fetchall()
+            for row in rows:
+                owner = (row["runner_pid"], row["runner_identity"])
+                if owner not in owner_liveness:
+                    owner_liveness[owner] = _pid_matches_identity(
+                        row["runner_pid"], row["runner_identity"]
+                    )
+                is_live = owner_liveness[owner]
+                if is_live:
+                    continue
+                if (
+                    row["task_id"] is None
+                    or row["task_revision"] is None
+                    or row["scheduled_for"] is None
+                ):
+                    db.execute(
+                        """UPDATE task_runs SET status='skipped', finished_at=?,
+                           error='scheduled definition no longer exists'
+                           WHERE id=? AND status IN ('queued', 'starting')""",
+                        (_iso(utc_now()), row["id"]),
+                    )
+                    continue
+                db.execute(
+                    """UPDATE task_runs SET status='queued', runner_pid=?, runner_identity=?
+                       WHERE id=? AND status IN ('queued', 'starting')""",
+                    (owner_pid, owner_identity, row["id"]),
+                )
+                adopted.append(
+                    QueuedOccurrence(
+                        row["id"],
+                        row["task_id"],
+                        row["task_revision"],
+                        parse_datetime(row["scheduled_for"]),
+                    )
+                )
+        return adopted
+
+    def claim_occurrence(self, run_id: str, task: ScheduledTask) -> bool:
+        """Transition one queued occurrence to running under overlap limits."""
+        now = _iso(utc_now())
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status, task_id, task_revision FROM task_runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None or row["status"] != "queued":
+                return False
+            current = db.execute(
+                "SELECT revision, max_instances FROM scheduled_tasks WHERE id=?",
+                (task.id,),
+            ).fetchone()
+            if (
+                row["task_id"] != task.id
+                or row["task_revision"] != task.revision
+                or current is None
+                or current["revision"] != task.revision
+            ):
+                db.execute(
+                    """UPDATE task_runs SET status='skipped', finished_at=?,
+                       error='scheduled definition changed before dispatch'
+                       WHERE id=? AND status='queued'""",
+                    (now, run_id),
+                )
+                return False
+            running = db.execute(
+                """SELECT COUNT(*) FROM task_runs
+                   WHERE task_id=? AND status IN ('starting', 'running')""",
+                (task.id,),
+            ).fetchone()[0]
+            if running >= current["max_instances"]:
+                db.execute(
+                    """UPDATE task_runs SET status='skipped', started_at=?, finished_at=?,
+                       error='maximum concurrent instances reached'
+                       WHERE id=? AND status='queued'""",
+                    (now, now, run_id),
+                )
+                return False
+            cursor = db.execute(
+                """UPDATE task_runs SET status='starting', started_at=?
+                   WHERE id=? AND status='queued'""",
+                (now, run_id),
+            )
+            return cursor.rowcount > 0
+
+    def skip_queued_occurrence(self, run_id: str, reason: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                """UPDATE task_runs SET status='skipped', finished_at=?, error=?
+                   WHERE id=? AND status='queued'""",
+                (_iso(utc_now()), reason, run_id),
+            )
 
     def set_runner_pid(
         self,
@@ -595,8 +810,9 @@ class SchedulerRepository:
         identity = process_identity if process_identity is not None else _process_identity(pid)
         with self.connect() as db:
             db.execute(
-                """UPDATE task_runs SET runner_pid=?, runner_identity=?
-                   WHERE id=? AND status='running'""",
+                """UPDATE task_runs
+                   SET runner_pid=?, runner_identity=?, status='running'
+                   WHERE id=? AND status IN ('starting', 'running')""",
                 (pid, identity, run_id),
             )
 
@@ -633,21 +849,24 @@ class SchedulerRepository:
             ).fetchone()
             if current is None or current["revision"] != task.revision:
                 return False
-            db.execute(
-                """INSERT INTO task_runs
-                   (id, task_id, task_name, scheduled_for, started_at, finished_at, status, error)
-                   VALUES (?, ?, ?, ?, ?, ?, 'missed', ?)""",
+            cursor = db.execute(
+                """INSERT OR IGNORE INTO task_runs
+                   (id, task_id, task_name, task_revision, occurrence_key, scheduled_for,
+                    started_at, finished_at, status, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'missed', ?)""",
                 (
                     str(uuid4()),
                     task.id,
                     task.name,
+                    task.revision,
+                    self._occurrence_key(task, scheduled_for),
                     _iso(scheduled_for),
                     _iso(now),
                     _iso(now),
                     reason,
                 ),
             )
-        return True
+        return cursor.rowcount > 0
 
     def mark_interrupted_runs(self) -> int:
         now = _iso(utc_now())
@@ -669,6 +888,19 @@ class SchedulerRepository:
                     [(now, run_id) for run_id in stale_ids],
                 )
         return len(stale_ids)
+
+    def active_run_counts(self) -> dict[str, int]:
+        """Return stable active-state counts for status and diagnostics."""
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT CASE WHEN status='starting' THEN 'queued' ELSE status END AS state,
+                          COUNT(*) AS count
+                   FROM task_runs WHERE status IN ('queued', 'starting', 'running')
+                   GROUP BY state"""
+            ).fetchall()
+        counts = {"queued": 0, "running": 0}
+        counts.update({row["state"]: row["count"] for row in rows})
+        return counts
 
     def history(
         self, identifier: str | None = None, *, limit: int = 100

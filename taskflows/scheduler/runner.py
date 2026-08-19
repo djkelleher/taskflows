@@ -13,7 +13,7 @@ from typing import Any, BinaryIO
 from taskflows.common import logger
 from taskflows.exceptions import RevisionConflict
 
-from .models import parse_datetime, utc_now
+from .models import merge_environment, parse_datetime, utc_now
 from .repository import SchedulerRepository
 
 _active_processes: dict[str, subprocess.Popen[Any]] = {}
@@ -96,6 +96,7 @@ def execute_scheduled_task(
     task_id: str,
     revision: int,
     *,
+    run_id: str | None = None,
     scheduled_for: str | None = None,
     allow_disabled: bool = False,
 ) -> int | None:
@@ -108,25 +109,37 @@ def execute_scheduled_task(
     repository = SchedulerRepository(database_path)
     task = repository.get(task_id)
     if task is None:
+        if run_id is not None:
+            repository.skip_queued_occurrence(run_id, "scheduled definition no longer exists")
         logger.warning(f"Scheduled task {task_id} no longer exists")
         return None
     if not task.enabled and not allow_disabled:
+        if run_id is not None:
+            repository.skip_queued_occurrence(run_id, "scheduled definition is disabled")
         logger.info(f"Scheduled task {task.name} is disabled; skipping")
         return None
     if task.revision != revision and not allow_disabled:
+        if run_id is not None:
+            repository.skip_queued_occurrence(
+                run_id, "scheduled definition changed before dispatch"
+            )
         logger.info(f"Ignoring stale revision of scheduled task {task.name}")
         return None
 
     planned_at = parse_datetime(scheduled_for) if scheduled_for else utc_now()
-    run_id = repository.begin_run(task, planned_at, allow_disabled=allow_disabled)
-    if run_id is None:
+    if run_id is not None:
+        claimed = repository.claim_occurrence(run_id, task)
+    else:
+        run_id = repository.begin_run(task, planned_at, allow_disabled=allow_disabled)
+        claimed = run_id is not None
+    if not claimed or run_id is None:
         # APScheduler has consumed a DateTrigger once it dispatches, even when
         # a concurrent manual run occupies the registry-level overlap slot.
         # Consume the definition too so a restart cannot retry it unexpectedly.
         if task.schedule.kind == "date" and not allow_disabled:
             with suppress(KeyError, RevisionConflict):
                 repository.set_enabled(task.id, False, expected_revision=task.revision)
-        logger.warning(f"Scheduled task {task.name} reached max_instances={task.max_instances}")
+        logger.warning(f"Scheduled task {task.name} was not claimed for execution")
         return None
 
     log_dir = repository.database_path.parent / "runs" / task.id
@@ -149,8 +162,7 @@ def execute_scheduled_task(
         if os.name != "nt":
             os.chmod(log_dir, 0o700)
 
-        environment = os.environ.copy()
-        environment.update(task.environment)
+        environment = merge_environment(os.environ, task.environment)
         popen_kwargs: dict[str, Any] = {
             "cwd": task.cwd,
             "env": environment,

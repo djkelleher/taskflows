@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   REST endpoints, and `tf schedule`/`tf scheduler` commands. One native daemon
   definition is installed through systemd, a macOS LaunchAgent, or Windows
   Task Scheduler instead of creating an OS unit for every job.
-- Native scheduler supervision now exposes one common install/start/stop/
-  restart/status lifecycle across systemd, launchd, and Windows Task Scheduler.
+- Native scheduler supervision now exposes one common install/uninstall/start/
+  stop/restart/status lifecycle across systemd, launchd, and Windows Task Scheduler.
   Scheduler status includes native state and heartbeat health with a useful
   non-zero unhealthy exit code.
 - Portable schedule ergonomics now include human durations, interval start
@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both UTC and schedule-local occurrences through CLI and REST. Durable daemon
   and runner records include process-creation identities to reject recycled
   PIDs during crash recovery.
+- Due occurrences are now persisted as deduplicated queued records before
+  APScheduler advances their triggers, then adopted by a replacement daemon if
+  dispatch is interrupted. Status and diagnostics expose queued/running counts,
+  CLI lifecycle commands wait for combined native/runtime health by default,
+  and authenticated REST clients can install, uninstall, start, stop, or
+  restart the daemon. Registry upgrades are serialized transactionally across
+  concurrent daemon/API/CLI startup and skip migration DDL on current schemas.
+- Scheduler preflight diagnostics now report missing working directories and
+  executables with platform-specific native log hints. New task working
+  directories are stored absolutely, and case-insensitive environment aliases
+  are normalized consistently before execution on every operating system.
 - **Faster service status:** systemd properties are fetched in bulk with
   bounded concurrency, repeated manager health probes and duplicate unit loads
   are removed, and independent remote servers are queried concurrently.

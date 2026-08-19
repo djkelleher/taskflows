@@ -13,7 +13,9 @@ from .status import (
     SchedulerRuntimeStatus,
     SchedulerStatus,
     diagnose_scheduler,
+    operate_scheduler,
     scheduler_status,
+    wait_for_scheduler,
 )
 from .supervisor import SchedulerSupervisor, SupervisorStatus, get_supervisor
 
@@ -29,6 +31,8 @@ __all__ = [
     "SupervisorStatus",
     "diagnose_scheduler",
     "get_supervisor",
+    "operate_scheduler",
     "schedule_preview",
     "scheduler_status",
+    "wait_for_scheduler",
 ]

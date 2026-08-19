@@ -35,10 +35,11 @@ APScheduler's persistent SQLAlchemy job store retains dispatch times during a
 daemon outage. The `scheduled_tasks` table remains authoritative: startup and
 runtime reconciliation removes stale scheduler jobs and updates changed ones.
 Exactly-once execution cannot be guaranteed across machine crashes, so commands
-should be idempotent. Once the stable runner reserves an attempt, it receives a
-durable run record. A hard crash in the hand-off from APScheduler to the runner
-can lose or duplicate an occurrence; this limitation is reported explicitly
-rather than claiming stronger delivery semantics.
+should be idempotent. Before APScheduler advances a due trigger, Taskflows
+persists a deduplicated `queued` occurrence containing its real scheduled fire
+time. A replacement daemon adopts queued work left by a dead owner. The small
+process-launch/finish ambiguity can still cause a retry after a machine-level
+crash, so this is a durable handoff rather than an exactly-once claim.
 
 ## Execution
 
@@ -46,10 +47,16 @@ The scheduler stores only the task ID and definition revision in APScheduler.
 At dispatch, the stable runner loads the current definition, reserves a run
 slot transactionally, and starts the command without a shell. Taskflows:
 
-- overlays configured environment values on the daemon environment;
+- overlays configured environment values case-insensitively on the daemon
+  environment, preventing `PATH`/`Path` aliases from behaving differently on
+  Windows and POSIX;
 - uses a dedicated process group and terminates the process tree on timeout;
 - captures stdout and stderr in owner-only run directories;
-- records success, failure, timeout, missed, skipped, and interrupted states;
+- records queued, starting, running, success, failure, timeout, missed, skipped,
+  and interrupted states; orphaned pre-launch `starting` work returns to the
+  durable queue;
+- preserves the actual scheduled fire time separately from worker start time;
+- adopts orphaned queued occurrences after an interrupted dispatch;
 - marks orphaned `running` records interrupted on daemon startup and keeps
   checking them during reconciliation, releasing overlap slots after orphaned
   children exit without requiring another daemon restart;
@@ -62,7 +69,7 @@ run logs are created with owner-only permissions on POSIX systems.
 ## Operations
 
 ```bash
-tf scheduler install
+tf scheduler install [--wait/--no-wait] [--timeout 15s]
 tf scheduler status
 tf scheduler start
 tf scheduler stop
@@ -90,8 +97,14 @@ tf schedule remove NAME
 
 `tf scheduler status --json` returns the shared `SchedulerStatus` contract. It
 combines native manager state and automatic-start configuration with heartbeat,
-registry identity, and task counts. `tf scheduler doctor` adds registration,
-SQLite integrity/permission, heartbeat, and dispatch-readiness checks with
+registry identity, task counts, and queued/running occurrence counts. Lifecycle
+commands wait for the combined contract by default instead of reporting success
+as soon as the native command returns; `--no-wait` is available for automation
+that intentionally wants fire-and-forget behavior. Readiness requires both the
+native manager and the registry heartbeat, so an unrelated foreground daemon
+cannot make a native start appear complete. `tf scheduler doctor` adds
+registration, SQLite integrity/permission, heartbeat, task working-directory/
+executable preflight, native log hints, and dispatch-readiness checks with
 concrete remedies. Unhealthy results exit non-zero, making both commands useful
 in shell scripts and monitoring checks.
 
@@ -111,8 +124,10 @@ services. Use `tf status --details` when last/next activation and timer
 properties are needed for every matched service.
 
 REST clients can use `/api/schedules`, `/api/schedule-runs`,
-`/api/scheduler/status`, and `/api/scheduler/diagnostics`. These endpoints use
-the existing HMAC/JWT authentication middleware. Schedule representations
+`/api/scheduler/status`, `/api/scheduler/diagnostics`, and authenticated
+`POST /api/scheduler/install|uninstall|start|stop|restart` lifecycle operations.
+Python callers use the same `operate_scheduler()` entry point. These endpoints
+use the existing HMAC/JWT authentication middleware. Schedule representations
 include a `revision`; clients can send `expected_revision` when enabling or
 disabling, replacing, or deleting a definition and receive HTTP 409 instead of
 silently overwriting a concurrent change. CLI replacements offer the same
@@ -131,6 +146,13 @@ files are resolved and copied into the registry when `schedule add` runs; they
 are not re-read for every occurrence. Explicit `--env KEY=VALUE` options take
 precedence. Public output includes environment variable names for diagnostics
 but never their values.
+
+New definitions resolve their working directory to an absolute path at creation
+time. Native supervisors have different default directories, so persisting a
+relative `cwd` would otherwise make the same schedule platform-dependent.
+Registry schema upgrades take one SQLite write lock and commit atomically;
+current-schema opens use a fast path because the daemon, API, CLI, and each
+runner may all create repository clients concurrently.
 
 ## Native services
 

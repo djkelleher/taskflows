@@ -164,6 +164,14 @@ CLI and REST schedule previews call the same APScheduler trigger objects as the
 daemon, so time-zone and DST behavior is not reimplemented by clients. Runtime
 recovery persists native process-creation identities alongside PIDs to reject
 recycled processes on Linux, macOS, and Windows.
+The custom executor persists a deduplicated queued occurrence before APScheduler
+advances its trigger. Replacement daemons adopt orphaned queue entries, while
+the runner atomically applies definition revisions and overlap limits when work
+actually begins.
+`operate_scheduler()` centralizes install/uninstall/start/stop/restart readiness
+for Python, CLI, and REST clients. Repository schema changes are serialized in
+one SQLite transaction, while current-schema clients avoid repeated migration
+inspection. Diagnostics preflight enabled commands and expose native log hints.
 
 The older `Calendar` and `Periodic` objects compile to systemd timers and remain
 available for Linux `Service` objects.

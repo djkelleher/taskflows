@@ -26,6 +26,7 @@ from taskflows.admin.api import (
     get_portable_schedule,
     list_portable_schedules,
     list_servers_endpoint,
+    operate_portable_scheduler,
     portable_schedule_history,
     portable_scheduler_diagnostics,
     portable_scheduler_status,
@@ -40,7 +41,14 @@ from taskflows.schedule import Calendar
 from taskflows.scheduler import installer, supervisor
 from taskflows.scheduler import repository as repository_module
 from taskflows.scheduler.daemon import DaemonAlreadyRunning, SchedulerDaemon, _SingletonLock
-from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, schedule_preview, utc_now
+from taskflows.scheduler.models import (
+    ScheduledTask,
+    ScheduleSpec,
+    merge_environment,
+    parse_datetime,
+    schedule_preview,
+    utc_now,
+)
 from taskflows.scheduler.repository import (
     SchedulerRepository,
     _pid_is_running,
@@ -48,7 +56,14 @@ from taskflows.scheduler.repository import (
     _process_identity,
 )
 from taskflows.scheduler.runner import execute_scheduled_task, run_now
-from taskflows.scheduler.status import DiagnosticCheck, runtime_status, scheduler_status
+from taskflows.scheduler.status import (
+    DiagnosticCheck,
+    diagnose_scheduler,
+    operate_scheduler,
+    runtime_status,
+    scheduler_status,
+    wait_for_scheduler,
+)
 from taskflows.scheduler.supervisor import SupervisorStatus
 
 
@@ -145,6 +160,34 @@ def test_task_rejects_string_commands_and_unsafe_names_and_freezes_environment()
         task.environment["MODE"] = "mutated"
 
 
+def test_environment_overrides_are_case_insensitive_for_portable_execution():
+    merged = merge_environment(
+        {"PATH": "host-path", "path": "host-alias", "UNCHANGED": "yes"},
+        {"Path": "task-path", "MODE": "scheduled"},
+    )
+
+    assert merged == {
+        "Path": "task-path",
+        "UNCHANGED": "yes",
+        "MODE": "scheduled",
+    }
+
+
+def test_new_tasks_persist_absolute_working_directories(tmp_path, monkeypatch):
+    working_directory = tmp_path / "relative-work"
+    working_directory.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    task = ScheduledTask.create(
+        "absolute-cwd",
+        [sys.executable, "-c", "pass"],
+        ScheduleSpec.interval(60),
+        cwd="relative-work",
+    )
+
+    assert task.cwd == str(working_directory.resolve())
+
+
 def test_legacy_calendar_datetime_preserves_fractional_seconds():
     schedule = Calendar.from_datetime(datetime.fromisoformat("2026-08-19T10:00:00.500000+00:00"))
     assert schedule.schedule == "Wed 2026-08-19 10:00:00.500000 UTC"
@@ -196,6 +239,27 @@ def test_repository_add_is_atomic_and_replacements_increment_current_revision(tm
     saved = SchedulerRepository(database_path).resolve("racing")
     assert saved.revision == 3
     assert {task.id for task in replacements} == {saved.id}
+
+
+def test_repository_initialization_is_safe_across_concurrent_clients(tmp_path):
+    database_path = tmp_path / "scheduler.sqlite3"
+
+    # The daemon, REST API, and CLI can all open a new or upgraded registry at
+    # once. Every client should either perform or observe the same complete
+    # migration rather than racing individual ALTER/CREATE statements.
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        repositories = list(executor.map(lambda _: SchedulerRepository(database_path), range(24)))
+
+    assert all(repository.database_path == database_path for repository in repositories)
+    with sqlite3.connect(database_path) as database:
+        assert (
+            database.execute("PRAGMA user_version").fetchone()[0]
+            == repository_module.SCHEMA_VERSION
+        )
+        tables = {
+            row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert {"scheduled_tasks", "task_runs", "scheduler_state"} <= tables
 
 
 def test_repository_replacement_can_require_the_current_revision(tmp_path):
@@ -310,6 +374,64 @@ def test_repository_prevents_overlapping_manual_runs(tmp_path):
     assert [run["status"] for run in repository.history("single")] == ["skipped", "running"]
 
 
+def test_repository_deduplicates_and_adopts_durable_occurrences(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("durable", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    scheduled_for = utc_now() - timedelta(seconds=5)
+
+    reserved = repository.reserve_occurrences(task, [scheduled_for])
+
+    assert len(reserved) == 1
+    assert repository.reserve_occurrences(task, [scheduled_for]) == []
+    queued = repository.history(task.id)[0]
+    assert queued["status"] == "queued"
+    assert queued["scheduled_for"] == scheduled_for.isoformat()
+
+    repository.release_queued_owners([reserved[0].run_id])
+    adopted = repository.adopt_orphaned_occurrences()
+    assert adopted == reserved
+    assert repository.adopt_orphaned_occurrences() == []
+
+    assert repository.claim_occurrence(adopted[0].run_id, task) is True
+    assert repository.history(task.id)[0]["status"] == "starting"
+    with repository.connect() as db:
+        db.execute(
+            "UPDATE task_runs SET runner_pid=NULL, runner_identity=NULL WHERE id=?",
+            (adopted[0].run_id,),
+        )
+    assert repository.adopt_orphaned_occurrences() == adopted
+    assert repository.history(task.id)[0]["status"] == "queued"
+
+
+def test_reserved_occurrence_records_the_actual_fire_time(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "planned-time",
+            [sys.executable, "-c", "pass"],
+            ScheduleSpec.interval(60),
+        )
+    )
+    scheduled_for = utc_now() - timedelta(minutes=2)
+    occurrence = repository.reserve_occurrences(task, [scheduled_for])[0]
+
+    exit_code = execute_scheduled_task(
+        str(repository.database_path),
+        task.id,
+        task.revision,
+        run_id=occurrence.run_id,
+        scheduled_for=scheduled_for.isoformat(),
+    )
+
+    run = repository.history(task.id)[0]
+    assert exit_code == 0
+    assert run["status"] == "succeeded"
+    assert run["scheduled_for"] == scheduled_for.isoformat()
+    assert parse_datetime(run["started_at"]) > scheduled_for
+
+
 def test_reconcile_recovers_finished_orphan_reservations_without_restart(tmp_path, monkeypatch):
     daemon = SchedulerDaemon(make_repository(tmp_path).database_path)
     calls = []
@@ -318,6 +440,36 @@ def test_reconcile_recovers_finished_orphan_reservations_without_restart(tmp_pat
     daemon.reconcile()
 
     assert calls == [True]
+
+
+def test_daemon_recovers_queued_occurrence_from_dead_owner(tmp_path):
+    repository = make_repository(tmp_path)
+    marker = tmp_path / "recovered"
+    task = repository.add(
+        ScheduledTask.create(
+            "recover-queued",
+            [
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; Path({str(marker)!r}).touch()",
+            ],
+            ScheduleSpec.interval(3600, start_at=utc_now() + timedelta(hours=1)),
+        )
+    )
+    occurrence = repository.reserve_occurrences(task, [utc_now() - timedelta(seconds=10)])[0]
+    repository.release_queued_owners([occurrence.run_id])
+    daemon = SchedulerDaemon(repository.database_path, reconcile_interval=0.05)
+
+    daemon.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        daemon.shutdown()
+
+    assert marker.exists()
+    assert repository.history(task.id)[0]["status"] == "succeeded"
 
 
 def test_overlapping_scheduled_one_shot_is_consumed(tmp_path):
@@ -899,7 +1051,94 @@ def test_portable_status_combines_native_runtime_and_registry(tmp_path):
     assert status.runtime.pid_running is True
     assert status.task_count == 2
     assert status.enabled_task_count == 1
+    assert status.queued_occurrence_count == 0
+    assert status.running_run_count == 0
     assert status.to_dict()["supervisor"]["automatic"] is True
+
+
+def test_wait_for_scheduler_uses_combined_cross_platform_health(tmp_path):
+    repository = make_repository(tmp_path)
+    native = SupervisorStatus(backend="systemd", installed=True, state="running")
+    fake_supervisor = SimpleNamespace(status=lambda: native)
+
+    with pytest.raises(TimeoutError, match="did not become running"):
+        wait_for_scheduler(
+            "running",
+            repository,
+            fake_supervisor,
+            timeout=0.01,
+            poll_interval=0.001,
+        )
+
+    repository.heartbeat(pid=os.getpid(), hostname=socket.gethostname(), started_at=utc_now())
+    assert (
+        wait_for_scheduler("running", repository, fake_supervisor, timeout=0.1).state == "running"
+    )
+
+    # A foreground or orphaned daemon heartbeat must not make a native start
+    # operation look complete while the OS manager still reports it stopped.
+    stopped_supervisor = SimpleNamespace(
+        status=lambda: SupervisorStatus(backend="systemd", installed=True, state="stopped")
+    )
+    with pytest.raises(TimeoutError, match="did not become running"):
+        wait_for_scheduler(
+            "running",
+            repository,
+            stopped_supervisor,
+            timeout=0.01,
+            poll_interval=0.001,
+        )
+
+
+@pytest.mark.parametrize(
+    ("operation", "target_state"),
+    [
+        ("install", "running"),
+        ("start", "running"),
+        ("restart", "running"),
+        ("stop", "stopped"),
+        ("uninstall", "not-installed"),
+    ],
+)
+def test_operate_scheduler_normalizes_every_native_lifecycle(tmp_path, operation, target_state):
+    repository = make_repository(tmp_path)
+    calls = []
+    state = "stopped"
+
+    def apply(next_state):
+        def action():
+            nonlocal state
+            calls.append(operation)
+            state = next_state
+            if next_state == "running":
+                repository.heartbeat(
+                    pid=os.getpid(), hostname=socket.gethostname(), started_at=utc_now()
+                )
+            else:
+                repository.clear_daemon_state(pid=os.getpid())
+
+        return action
+
+    fake_supervisor = SimpleNamespace(
+        install=apply("running"),
+        uninstall=apply("not-installed"),
+        start=apply("running"),
+        stop=apply("stopped"),
+        restart=apply("running"),
+        status=lambda: SupervisorStatus(
+            backend="systemd", installed=state != "not-installed", state=state
+        ),
+    )
+
+    result = operate_scheduler(
+        operation,
+        repository,
+        fake_supervisor,
+        timeout=0.1,
+    )
+
+    assert calls == [operation]
+    assert result.state == target_state
 
 
 def test_scheduler_doctor_has_stable_actionable_json(tmp_path, monkeypatch):
@@ -921,7 +1160,36 @@ def test_scheduler_doctor_has_stable_actionable_json(tmp_path, monkeypatch):
         "registry",
         "heartbeat",
         "dispatch-readiness",
+        "task-definitions",
     }
+
+
+def test_scheduler_doctor_preflights_enabled_commands_and_working_directories(tmp_path):
+    repository = make_repository(tmp_path)
+    repository.add(
+        ScheduledTask.create(
+            "missing-command",
+            ["taskflows-command-that-does-not-exist"],
+            ScheduleSpec.interval(60),
+        )
+    )
+    repository.add(
+        ScheduledTask.create(
+            "disabled-invalid-cwd",
+            ["also-missing"],
+            ScheduleSpec.interval(60),
+            cwd=str(tmp_path / "missing-directory"),
+            enabled=False,
+        )
+    )
+    native = SupervisorStatus(backend="systemd", installed=True, state="stopped")
+
+    _, checks = diagnose_scheduler(repository, SimpleNamespace(status=lambda: native))
+    definitions = next(check for check in checks if check.name == "task-definitions")
+
+    assert definitions.level == "error"
+    assert "missing-command" in definitions.message
+    assert "disabled-invalid-cwd" not in definitions.message
 
 
 def test_runtime_status_has_stable_empty_shape(tmp_path):
@@ -1105,6 +1373,26 @@ async def test_scheduler_api_reuses_portable_status_contract(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_scheduler_api_uses_common_native_lifecycle(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    repository.heartbeat(pid=os.getpid(), hostname=socket.gethostname(), started_at=utc_now())
+    calls = []
+    native = SupervisorStatus(backend="systemd", installed=True, state="running")
+    current = scheduler_status(repository, SimpleNamespace(status=lambda: native))
+
+    def fake_operate(operation, *, wait, timeout):
+        calls.append((operation, wait, timeout))
+        return current
+
+    monkeypatch.setattr("taskflows.admin.api.operate_scheduler", fake_operate)
+
+    result = await operate_portable_scheduler("restart", wait=False, timeout=1)
+
+    assert calls == [("restart", False, 1)]
+    assert result["state"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_list_servers_endpoint_uses_core_signature(monkeypatch):
     expected = {"servers": [], "hostname": "test"}
 
@@ -1161,6 +1449,7 @@ def test_systemd_supervisor_reports_native_state(tmp_path, monkeypatch):
     assert status.state == "running"
     assert status.backend == "systemd"
     assert status.automatic is True
+    assert "journalctl --user" in status.log_hint
 
 
 def test_launchd_supervisor_distinguishes_loaded_but_stopped(tmp_path, monkeypatch):
@@ -1181,6 +1470,7 @@ def test_launchd_supervisor_distinguishes_loaded_but_stopped(tmp_path, monkeypat
 
     assert status.installed is True
     assert status.state == "stopped"
+    assert "scheduler.stdout.log" in status.log_hint
 
 
 def test_launchd_stop_preserves_login_autostart_and_reports_last_failure(tmp_path, monkeypatch):
@@ -1231,6 +1521,25 @@ def test_windows_supervisor_normalizes_task_states(native_state, expected, monke
 
     assert status.installed is True
     assert status.state == expected
+    assert "Taskflows > Scheduler" in status.log_hint
+
+
+def test_windows_supervisor_reports_trigger_autostart_and_last_failure(monkeypatch):
+    trigger = SimpleNamespace(Type=installer._TASK_TRIGGER_LOGON, Enabled=False)
+    triggers = SimpleNamespace(Count=1, Item=lambda index: trigger)
+    task = SimpleNamespace(
+        State=3,
+        Enabled=True,
+        LastTaskResult=7,
+        Definition=SimpleNamespace(Triggers=triggers),
+    )
+    monkeypatch.setattr(supervisor, "_windows_registered_task", lambda: task)
+
+    status = supervisor.WindowsTaskSupervisor().status()
+
+    assert status.automatic is False
+    assert status.last_exit_code == 7
+    assert status.state == "failed"
 
 
 def test_launchd_restart_bootstraps_an_unloaded_agent(tmp_path, monkeypatch):

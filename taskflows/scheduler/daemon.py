@@ -20,13 +20,13 @@ from apscheduler.events import (
     EVENT_JOB_SUBMITTED,
     JobExecutionEvent,
 )
-from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from taskflows.common import logger
 from taskflows.exceptions import RevisionConflict
 
+from .executor import DurableThreadPoolExecutor
 from .models import ScheduledTask, parse_datetime, utc_now
 from .repository import SchedulerRepository, _process_identity
 from .runner import execute_scheduled_task, terminate_active_runs
@@ -123,6 +123,7 @@ class SchedulerDaemon:
         self._known_date_revisions: dict[str, int] = {}
         self._known_revisions: dict[str, int] = {}
         database_url = f"sqlite:///{self.database_path.as_posix()}"
+        self.executor = DurableThreadPoolExecutor(str(self.database_path), max_workers=max_workers)
         self.scheduler = BackgroundScheduler(
             jobstores={
                 "default": SQLAlchemyJobStore(
@@ -130,7 +131,7 @@ class SchedulerDaemon:
                     engine_options={"connect_args": {"timeout": 10}},
                 )
             },
-            executors={"default": ThreadPoolExecutor(max_workers=max_workers)},
+            executors={"default": self.executor},
             timezone=UTC,
         )
         self.scheduler.add_listener(
@@ -301,6 +302,7 @@ class SchedulerDaemon:
         # child exists; once it exits, release the stale slot without requiring
         # yet another daemon restart.
         self.repository.mark_interrupted_runs()
+        self.executor.submit_recovered(self.repository.adopt_orphaned_occurrences())
         tasks = self.repository.list()
         desired_ids = {self._job_id(task.id) for task in tasks if task.enabled}
         jobs = {job.id: job for job in self.scheduler.get_jobs() if job.id.startswith(JOB_PREFIX)}

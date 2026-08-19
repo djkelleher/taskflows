@@ -4,7 +4,7 @@ import threading
 import time
 import traceback
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 import click
 
@@ -65,7 +65,7 @@ from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
 from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, schedule_preview
 from taskflows.scheduler.repository import SchedulerRepository
 from taskflows.scheduler.runner import run_now as run_scheduled_now
-from taskflows.scheduler.status import diagnose_scheduler, scheduler_status
+from taskflows.scheduler.status import diagnose_scheduler, operate_scheduler, scheduler_status
 from taskflows.service import RestartPolicy, Service, Venv
 
 config = Config()
@@ -831,6 +831,26 @@ async def portable_scheduler_diagnostics() -> dict[str, Any]:
         "status": current.to_dict(),
         "checks": [check.to_dict() for check in checks],
     }
+
+
+@app.post("/api/scheduler/{operation}")
+async def operate_portable_scheduler(
+    operation: Literal["install", "uninstall", "start", "stop", "restart"],
+    wait: bool = Query(True),
+    timeout: float = Query(15.0, gt=0, le=120),
+) -> dict[str, Any]:
+    """Apply the same normalized native lifecycle used by the scheduler CLI."""
+
+    def operate() -> dict[str, Any]:
+        return operate_scheduler(operation, wait=wait, timeout=timeout).to_dict()
+
+    try:
+        return await asyncio.to_thread(operate)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"could not {operation} scheduler: {exc}",
+        ) from exc
 
 
 # Batch operations endpoint

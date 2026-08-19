@@ -9,14 +9,16 @@ from inventing subtly different health semantics.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import sqlite3
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from .models import parse_datetime
+from .models import ScheduledTask, merge_environment, parse_datetime
 from .repository import SchedulerRepository, _pid_matches_identity
 from .supervisor import SchedulerSupervisor, SupervisorStatus, get_supervisor
 
@@ -25,6 +27,8 @@ OverallSchedulerState = Literal[
     "running", "starting", "stopped", "failed", "unresponsive", "not-installed", "unknown"
 ]
 CheckLevel = Literal["ok", "warning", "error"]
+WaitTarget = Literal["running", "stopped"]
+SchedulerOperation = Literal["install", "uninstall", "start", "stop", "restart"]
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,8 @@ class SchedulerStatus:
     database_path: str
     task_count: int
     enabled_task_count: int
+    queued_occurrence_count: int
+    running_run_count: int
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -123,6 +129,7 @@ def scheduler_status(
     native = (supervisor or get_supervisor()).status()
     runtime = runtime_status(repository, heartbeat_timeout=heartbeat_timeout)
     tasks = repository.list()
+    active_runs = repository.active_run_counts()
     if runtime.healthy:
         state: OverallSchedulerState = "running"
     elif native.state in {"not-installed", "starting", "failed", "unknown"}:
@@ -138,7 +145,78 @@ def scheduler_status(
         database_path=str(repository.database_path.resolve()),
         task_count=len(tasks),
         enabled_task_count=sum(task.enabled for task in tasks),
+        queued_occurrence_count=active_runs["queued"],
+        running_run_count=active_runs["running"],
     )
+
+
+def wait_for_scheduler(
+    target: WaitTarget,
+    repository: SchedulerRepository | None = None,
+    supervisor: SchedulerSupervisor | None = None,
+    *,
+    timeout: float = 15.0,
+    poll_interval: float = 0.2,
+) -> SchedulerStatus:
+    """Wait for the combined native/runtime contract to reach a lifecycle target."""
+    if timeout <= 0:
+        raise ValueError("timeout must be greater than zero")
+    repository = repository or SchedulerRepository()
+    supervisor = supervisor or get_supervisor()
+    deadline = time.monotonic() + timeout
+    current = scheduler_status(repository, supervisor)
+    while True:
+        reached = (
+            current.runtime.healthy and current.supervisor.state == "running"
+            if target == "running"
+            else (
+                current.supervisor.state not in {"running", "starting"}
+                and not current.runtime.healthy
+            )
+        )
+        if reached:
+            return current
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"scheduler did not become {target} within {timeout:g}s "
+                f"(current state: {current.state})"
+            )
+        time.sleep(min(poll_interval, max(deadline - time.monotonic(), 0)))
+        current = scheduler_status(repository, supervisor)
+
+
+def operate_scheduler(
+    operation: SchedulerOperation,
+    repository: SchedulerRepository | None = None,
+    supervisor: SchedulerSupervisor | None = None,
+    *,
+    wait: bool = True,
+    timeout: float = 15.0,
+) -> SchedulerStatus:
+    """Apply one normalized native lifecycle operation.
+
+    Keeping lifecycle dispatch and readiness waiting here gives Python, CLI,
+    and REST clients identical install/start/stop semantics on every supported
+    operating system.
+    """
+    repository = repository or SchedulerRepository()
+    supervisor = supervisor or get_supervisor()
+    operations = {
+        "install": supervisor.install,
+        "uninstall": supervisor.uninstall,
+        "start": supervisor.start,
+        "stop": supervisor.stop,
+        "restart": supervisor.restart,
+    }
+    try:
+        action = operations[operation]
+    except KeyError as exc:
+        raise ValueError(f"unsupported scheduler operation: {operation}") from exc
+    action()
+    if not wait:
+        return scheduler_status(repository, supervisor)
+    target: WaitTarget = "stopped" if operation in {"stop", "uninstall"} else "running"
+    return wait_for_scheduler(target, repository, supervisor, timeout=timeout)
 
 
 def diagnose_scheduler(
@@ -197,12 +275,17 @@ def diagnose_scheduler(
         detail = f": {status.supervisor.detail}" if status.supervisor.detail else ""
         if status.supervisor.last_exit_code not in (None, 0):
             detail += f" (last exit code {status.supervisor.last_exit_code})"
+        log_remedy = (
+            f"inspect {status.supervisor.log_hint}"
+            if status.supervisor.log_hint
+            else "inspect the native supervisor logs"
+        )
         checks.append(
             DiagnosticCheck(
                 "native-process",
                 "error",
                 f"native supervisor reports {status.supervisor.state}{detail}",
-                "run 'tf scheduler start', then inspect the native supervisor logs",
+                f"run 'tf scheduler start', then {log_remedy}",
             )
         )
 
@@ -258,6 +341,31 @@ def diagnose_scheduler(
             )
         )
 
+    enabled_tasks = repository.list(enabled=True)
+    definition_errors = _task_definition_errors(enabled_tasks)
+    if definition_errors:
+        shown = "; ".join(definition_errors[:5])
+        omitted = len(definition_errors) - 5
+        if omitted:
+            shown += f"; and {omitted} more"
+        checks.append(
+            DiagnosticCheck(
+                "task-definitions",
+                "error",
+                shown,
+                "replace invalid definitions with an existing working directory and "
+                "an absolute executable path",
+            )
+        )
+    else:
+        checks.append(
+            DiagnosticCheck(
+                "task-definitions",
+                "ok",
+                f"{len(enabled_tasks)} enabled schedule definitions are locally executable",
+            )
+        )
+
     if status.enabled_task_count and status.state != "running":
         checks.append(
             DiagnosticCheck(
@@ -275,4 +383,50 @@ def diagnose_scheduler(
                 f"{status.enabled_task_count} of {status.task_count} task(s) enabled",
             )
         )
+
+    if status.queued_occurrence_count:
+        checks.append(
+            DiagnosticCheck(
+                "queued-occurrences",
+                "ok" if status.state == "running" else "warning",
+                f"{status.queued_occurrence_count} durable occurrence(s) awaiting a worker",
+                None
+                if status.state == "running"
+                else "start the scheduler; queued occurrences will be recovered automatically",
+            )
+        )
     return status, checks
+
+
+def _task_definition_errors(tasks: list[ScheduledTask]) -> list[str]:
+    """Return portable preflight failures without executing user commands."""
+    errors: list[str] = []
+    for task in tasks:
+        working_directory = Path(task.cwd) if task.cwd else None
+        if working_directory is not None and not working_directory.is_dir():
+            errors.append(f"{task.name}: working directory does not exist ({working_directory})")
+            # A relative executable cannot be evaluated against an invalid cwd.
+            continue
+
+        executable = task.command[0]
+        has_separator = any(
+            separator and separator in executable for separator in (os.sep, os.altsep)
+        )
+        if has_separator or Path(executable).is_absolute():
+            executable_path = Path(executable)
+            if not executable_path.is_absolute():
+                executable_path = (working_directory or Path.cwd()) / executable_path
+            if not executable_path.is_file():
+                errors.append(f"{task.name}: executable does not exist ({executable_path})")
+            elif os.name != "nt" and not os.access(executable_path, os.X_OK):
+                errors.append(f"{task.name}: executable is not runnable ({executable_path})")
+            continue
+
+        environment = merge_environment(os.environ, task.environment)
+        path_value = next(
+            (value for name, value in environment.items() if name.casefold() == "path"),
+            None,
+        )
+        if shutil.which(executable, path=path_value) is None:
+            errors.append(f"{task.name}: executable is not on PATH ({executable})")
+    return errors

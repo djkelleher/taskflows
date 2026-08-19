@@ -29,6 +29,24 @@ def parse_datetime(value: str | datetime) -> datetime:
     return parsed
 
 
+def merge_environment(base: Mapping[str, str], overrides: Mapping[str, str]) -> dict[str, str]:
+    """Overlay environment values without cross-platform name aliases.
+
+    Windows treats names case-insensitively while POSIX does not. Removing an
+    existing case-folded alias before applying each override makes definitions
+    such as ``Path=...`` behave consistently and avoids handing Windows two
+    conflicting PATH entries.
+    """
+    merged = dict(base)
+    for name, value in overrides.items():
+        folded_name = name.casefold()
+        for previous in tuple(merged):
+            if previous != name and previous.casefold() == folded_name:
+                merged.pop(previous)
+        merged[name] = value
+    return merged
+
+
 @dataclass(frozen=True)
 class ScheduleSpec:
     """Portable date, interval, or five-field cron schedule."""
@@ -276,6 +294,12 @@ class ScheduledTask:
         now = utc_now()
         if schedule.kind == "interval" and schedule.start_at is None:
             schedule = replace(schedule, start_at=now.isoformat())
+        # Native supervisors do not share a guaranteed working directory.
+        # Persist an absolute creation-time path so a definition behaves the
+        # same under systemd, launchd, Task Scheduler, foreground mode, and
+        # manual API execution.
+        if kwargs.get("cwd") is not None:
+            kwargs["cwd"] = str(Path(kwargs["cwd"]).expanduser().resolve())
         return cls(
             id=str(uuid4()),
             name=name,

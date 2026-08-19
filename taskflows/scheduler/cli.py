@@ -4,7 +4,7 @@ import json
 import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import click
 from dotenv import dotenv_values
@@ -12,11 +12,16 @@ from dotenv import dotenv_values
 from taskflows.exceptions import RevisionConflict
 
 from .daemon import SchedulerDaemon
-from .installer import install, uninstall
 from .models import ScheduledTask, ScheduleSpec, schedule_preview, utc_now
 from .repository import SchedulerRepository
 from .runner import run_now
-from .status import diagnose_scheduler, runtime_status, scheduler_status
+from .status import (
+    SchedulerOperation,
+    diagnose_scheduler,
+    operate_scheduler,
+    runtime_status,
+    scheduler_status,
+)
 from .supervisor import get_supervisor
 
 _DURATION_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?\s*$")
@@ -457,34 +462,41 @@ def run_daemon() -> None:
 
 
 @scheduler_cli.command("install")
-def install_daemon() -> None:
+@click.option("--wait/--no-wait", default=True, show_default=True)
+@click.option("--timeout", type=DURATION, default=15.0, show_default="15s")
+def install_daemon(wait: bool, timeout: float) -> None:
     """Install and start one native OS-managed scheduler daemon."""
     try:
-        path = install()
+        status = operate_scheduler(
+            "install", _repository(), get_supervisor(), wait=wait, timeout=timeout
+        )
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
+    path = status.supervisor.definition_path
     click.echo(f"Scheduler installed{f' at {path}' if path else ''}")
 
 
 @scheduler_cli.command("uninstall")
-def uninstall_daemon() -> None:
+@click.option("--wait/--no-wait", default=True, show_default=True)
+@click.option("--timeout", type=DURATION, default=15.0, show_default="15s")
+def uninstall_daemon(wait: bool, timeout: float) -> None:
     """Stop and remove the native scheduler daemon definition."""
     try:
-        uninstall()
+        operate_scheduler("uninstall", _repository(), get_supervisor(), wait=wait, timeout=timeout)
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo("Scheduler uninstalled")
 
 
-def _supervisor_operation(operation: Literal["start", "stop", "restart"]) -> None:
+def _supervisor_operation(operation: SchedulerOperation, *, wait: bool, timeout: float) -> None:
     try:
-        supervisor = get_supervisor()
-        operations = {
-            "start": supervisor.start,
-            "stop": supervisor.stop,
-            "restart": supervisor.restart,
-        }
-        operations[operation]()
+        operate_scheduler(
+            operation,
+            _repository(),
+            get_supervisor(),
+            wait=wait,
+            timeout=timeout,
+        )
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
     completed = {"start": "started", "stop": "stopped", "restart": "restarted"}
@@ -492,21 +504,27 @@ def _supervisor_operation(operation: Literal["start", "stop", "restart"]) -> Non
 
 
 @scheduler_cli.command("start")
-def start_daemon() -> None:
+@click.option("--wait/--no-wait", default=True, show_default=True)
+@click.option("--timeout", type=DURATION, default=15.0, show_default="15s")
+def start_daemon(wait: bool, timeout: float) -> None:
     """Start the installed native scheduler daemon."""
-    _supervisor_operation("start")
+    _supervisor_operation("start", wait=wait, timeout=timeout)
 
 
 @scheduler_cli.command("stop")
-def stop_daemon() -> None:
+@click.option("--wait/--no-wait", default=True, show_default=True)
+@click.option("--timeout", type=DURATION, default=15.0, show_default="15s")
+def stop_daemon(wait: bool, timeout: float) -> None:
     """Stop the installed native scheduler daemon without uninstalling it."""
-    _supervisor_operation("stop")
+    _supervisor_operation("stop", wait=wait, timeout=timeout)
 
 
 @scheduler_cli.command("restart")
-def restart_daemon() -> None:
+@click.option("--wait/--no-wait", default=True, show_default=True)
+@click.option("--timeout", type=DURATION, default=15.0, show_default="15s")
+def restart_daemon(wait: bool, timeout: float) -> None:
     """Restart the installed native scheduler daemon."""
-    _supervisor_operation("restart")
+    _supervisor_operation("restart", wait=wait, timeout=timeout)
 
 
 @scheduler_cli.command("status")
@@ -525,6 +543,11 @@ def daemon_status(context: click.Context, as_json: bool) -> None:
             f"Registry: {status.database_path} "
             f"({status.enabled_task_count}/{status.task_count} tasks enabled)"
         )
+        if status.queued_occurrence_count or status.running_run_count:
+            click.echo(
+                f"Active runs: {status.running_run_count} running, "
+                f"{status.queued_occurrence_count} queued"
+            )
         if status.runtime.heartbeat_at:
             age = status.runtime.heartbeat_age_seconds
             age_text = (
@@ -540,6 +563,8 @@ def daemon_status(context: click.Context, as_json: bool) -> None:
             )
         if status.supervisor.detail and status.state != "running":
             click.echo(f"Native detail: {status.supervisor.detail}")
+        if status.supervisor.log_hint and status.state != "running":
+            click.echo(f"Native logs: {status.supervisor.log_hint}")
     if status.state != "running":
         context.exit(1)
 

@@ -26,6 +26,7 @@ class SupervisorStatus:
     automatic: bool | None = None
     definition_path: str | None = None
     last_exit_code: int | None = None
+    log_hint: str | None = None
     detail: str | None = None
 
 
@@ -57,6 +58,10 @@ class SystemdSupervisor:
     def definition_path(self) -> Path:
         return native._home_dir() / ".config" / "systemd" / "user" / native.LINUX_UNIT_NAME
 
+    @property
+    def log_hint(self) -> str:
+        return f"journalctl --user -u {native.LINUX_UNIT_NAME} -n 200"
+
     def install(self) -> Path:
         return native.install_linux()
 
@@ -80,6 +85,7 @@ class SystemdSupervisor:
                 installed=False,
                 state="not-installed",
                 definition_path=str(self.definition_path),
+                log_hint=self.log_hint,
             )
         try:
             result = native._run(
@@ -91,6 +97,7 @@ class SystemdSupervisor:
                 installed=True,
                 state="unknown",
                 definition_path=str(self.definition_path),
+                log_hint=self.log_hint,
                 detail=str(exc),
             )
         detail = _completed_detail(result)
@@ -124,6 +131,7 @@ class SystemdSupervisor:
             state=state,
             automatic=automatic,
             definition_path=str(self.definition_path),
+            log_hint=self.log_hint,
             detail=detail,
         )
 
@@ -142,6 +150,11 @@ class LaunchdSupervisor:
     @property
     def service_target(self) -> str:
         return f"{self.domain}/{native.MACOS_LABEL}"
+
+    @property
+    def log_hint(self) -> str:
+        log_dir = native.services_data_dir.resolve() / "logs"
+        return f"{log_dir / 'scheduler.stdout.log'} and {log_dir / 'scheduler.stderr.log'}"
 
     def install(self) -> Path:
         return native.install_macos()
@@ -176,6 +189,7 @@ class LaunchdSupervisor:
                 installed=False,
                 state="not-installed",
                 definition_path=str(self.definition_path),
+                log_hint=self.log_hint,
             )
         try:
             result = native._run(["launchctl", "print", self.service_target], check=False)
@@ -185,6 +199,7 @@ class LaunchdSupervisor:
                 installed=True,
                 state="unknown",
                 definition_path=str(self.definition_path),
+                log_hint=self.log_hint,
                 detail=str(exc),
             )
         detail = _completed_detail(result)
@@ -220,6 +235,7 @@ class LaunchdSupervisor:
             automatic=automatic,
             definition_path=str(self.definition_path),
             last_exit_code=last_exit_code,
+            log_hint=self.log_hint,
             detail=detail,
         )
 
@@ -244,6 +260,10 @@ class WindowsTaskSupervisor:
 
     def uninstall(self) -> None:
         native.uninstall_windows()
+
+    @property
+    def log_hint(self) -> str:
+        return "Task Scheduler Library > Taskflows > Scheduler > History"
 
     def start(self) -> None:
         task = _windows_registered_task()
@@ -270,15 +290,32 @@ class WindowsTaskSupervisor:
                 backend="windows-task-scheduler",
                 installed=False,
                 state="unknown",
+                log_hint=self.log_hint,
                 detail=str(exc),
             )
         if task is None:
             return SupervisorStatus(
-                backend="windows-task-scheduler", installed=False, state="not-installed"
+                backend="windows-task-scheduler",
+                installed=False,
+                state="not-installed",
+                log_hint=self.log_hint,
             )
         task_state = int(getattr(task, "State", 0))
         enabled_value = getattr(task, "Enabled", None)
         automatic = bool(enabled_value) if enabled_value is not None else None
+        try:
+            triggers = task.Definition.Triggers
+            logon_triggers = [
+                triggers.Item(index)
+                for index in range(1, int(triggers.Count) + 1)
+                if int(getattr(triggers.Item(index), "Type", -1)) == native._TASK_TRIGGER_LOGON
+            ]
+        except Exception:
+            logon_triggers = []
+        if logon_triggers:
+            automatic = bool(enabled_value) and any(
+                bool(getattr(trigger, "Enabled", False)) for trigger in logon_triggers
+            )
         result_value = getattr(task, "LastTaskResult", None)
         last_exit_code = int(result_value) if isinstance(result_value, int) else None
         # TASK_STATE_RUNNING=4, READY=3, QUEUED=2, DISABLED=1, UNKNOWN=0.
@@ -287,12 +324,22 @@ class WindowsTaskSupervisor:
             state = "starting"
         if task_state == 0:
             state = "unknown"
+        # 0x413xx values are Task Scheduler lifecycle statuses (not process
+        # failures), including "has not yet run" and "currently running".
+        result_failed = (
+            last_exit_code != 0 and not 0x41300 <= last_exit_code <= 0x413FF
+            if last_exit_code is not None
+            else False
+        )
+        if state == "stopped" and result_failed:
+            state = "failed"
         return SupervisorStatus(
             backend="windows-task-scheduler",
             installed=True,
             state=state,
             automatic=automatic,
             last_exit_code=last_exit_code,
+            log_hint=self.log_hint,
             detail=f"Task Scheduler state {task_state}",
         )
 

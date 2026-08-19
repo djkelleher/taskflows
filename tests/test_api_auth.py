@@ -98,6 +98,9 @@ class TestAPIAuthentication(unittest.TestCase):
             ("GET", "/api/schedule-runs"),
             ("GET", "/api/scheduler/status"),
             ("GET", "/api/scheduler/diagnostics"),
+            ("POST", "/api/scheduler/install", {}),
+            ("POST", "/api/scheduler/restart", {}),
+            ("POST", "/api/scheduler/uninstall", {}),
             ("POST", "/api/schedules/example/run", {}),
         ]
 

@@ -34,8 +34,10 @@ _SYMBOL_MODULES = {
     "SupervisorStatus": "scheduler",
     "diagnose_scheduler": "scheduler",
     "get_supervisor": "scheduler",
+    "operate_scheduler": "scheduler",
     "schedule_preview": "scheduler",
     "scheduler_status": "scheduler",
+    "wait_for_scheduler": "scheduler",
     # docker environments
     "ContainerLimits": "docker",
     "DockerContainer": "docker",
@@ -105,8 +107,10 @@ if TYPE_CHECKING:
         SupervisorStatus,
         diagnose_scheduler,
         get_supervisor,
+        operate_scheduler,
         schedule_preview,
         scheduler_status,
+        wait_for_scheduler,
     )
     from .serialization import load_services_from_yaml, save_services_to_yaml
     from .service import RestartPolicy, Service, ServiceRegistry, Venv, Watchdog
