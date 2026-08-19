@@ -14,7 +14,7 @@ export default defineConfig({
     preserveSymlinks: true,
   },
   ssr: {
-    noExternal: ["@danklab/shared-ui"],
+    noExternal: ["@danklab/ui-comps"],
   },
   test: {
     globals: true,
@@ -33,7 +33,7 @@ export default defineConfig({
         "src/vite-env.d.ts",
       ],
       thresholds: {
-        // Shared primitive implementation and tests live in @danklab/shared-ui.
+        // Shared primitive implementation and tests live in @danklab/ui-comps.
         // Keep these at the measured Taskflows-only baseline and ratchet upward.
         lines: 24,
         branches: 16,

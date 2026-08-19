@@ -325,7 +325,9 @@ The frontend has comprehensive test coverage using **Vitest**, **React Testing L
 ### Test Coverage
 
 - Application tests cover core functionality; shared primitive behavior is tested in
-  `@danklab/shared-ui` rather than duplicated in this repository.
+  `@danklab/ui-comps` rather than duplicated in this repository.
+- The shared package is pinned to the versioned artifact under `vendor/`, so clean CI installs do
+  not depend on a sibling checkout.
 - **Application coverage thresholds enforced**:
   - Lines: 24%
   - Branches: 16%

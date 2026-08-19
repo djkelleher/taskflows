@@ -8,4 +8,4 @@ export {
   Skeleton, SkeletonText, StatusBadge, Switch, Tab, Table, TabList, TabPanel, Tabs,
   Textarea, ThemeProvider, ThemeToggle, ToastProvider, Toolbar, ToolbarSpacer,
   Tooltip, useConfirm, useTheme, useToast,
-} from "@danklab/shared-ui";
+} from "@danklab/ui-comps";
