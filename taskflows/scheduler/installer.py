@@ -80,7 +80,11 @@ WantedBy=default.target
     # macOS LaunchAgent definition is handled below.
     secure_write_text(unit_path, content)
     _run(["systemctl", "--user", "daemon-reload"])
-    _run(["systemctl", "--user", "enable", "--now", LINUX_UNIT_NAME])
+    # ``enable --now`` does not restart an already-active unit.  Restart after
+    # enabling so reinstalling also applies an updated interpreter, database
+    # path, or environment without waiting for the next login.
+    _run(["systemctl", "--user", "enable", LINUX_UNIT_NAME])
+    _run(["systemctl", "--user", "restart", LINUX_UNIT_NAME])
     return unit_path
 
 

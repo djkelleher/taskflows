@@ -13,7 +13,8 @@ daemon.
 The macOS launch agent and Linux user unit are written atomically with
 owner-only permissions. The macOS agent is registered in the installing user's
 GUI domain; reinstalling re-enables and restarts a previously loaded or
-manually disabled agent.
+manually disabled agent. Reinstalling the Linux unit also restarts an active
+daemon so updated paths and environment settings take effect immediately.
 
 The Windows daemon intentionally runs as the installing interactive user. Its
 principal and logon trigger are scoped to that account, it runs with least
