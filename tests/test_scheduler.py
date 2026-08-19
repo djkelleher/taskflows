@@ -1,3 +1,4 @@
+import os
 import plistlib
 import sqlite3
 import sys
@@ -22,7 +23,7 @@ from taskflows.admin.models import PortableScheduleRequest
 from taskflows.schedule import Calendar
 from taskflows.scheduler import installer
 from taskflows.scheduler import repository as repository_module
-from taskflows.scheduler.daemon import SchedulerDaemon
+from taskflows.scheduler.daemon import DaemonAlreadyRunning, SchedulerDaemon, _SingletonLock
 from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, utc_now
 from taskflows.scheduler.repository import SchedulerRepository
 from taskflows.scheduler.runner import execute_scheduled_task, run_now
@@ -68,6 +69,13 @@ def test_task_rejects_non_finite_timeout_and_invalid_environment():
             ScheduledTask.create(
                 "invalid-environment", ["echo", "ok"], schedule, environment=environment
             )
+    with pytest.raises(ValueError, match="unique ignoring case"):
+        ScheduledTask.create(
+            "ambiguous-windows-environment",
+            ["echo", "ok"],
+            schedule,
+            environment={"PATH": "first", "Path": "second"},
+        )
 
 
 def test_legacy_calendar_datetime_preserves_fractional_seconds():
@@ -317,6 +325,31 @@ def test_runner_enforces_timeout(tmp_path):
     assert repository.history(task.id)[0]["status"] == "timed_out"
 
 
+def test_runner_timeout_terminates_child_process_tree(tmp_path):
+    repository = make_repository(tmp_path)
+    marker = tmp_path / "orphaned-child.txt"
+    child = f"import time; from pathlib import Path; time.sleep(1); Path({str(marker)!r}).touch()"
+    parent = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        "time.sleep(10)"
+    )
+    task = repository.add(
+        ScheduledTask.create(
+            "process-tree",
+            [sys.executable, "-c", parent],
+            ScheduleSpec.interval(60),
+            timeout=0.1,
+        )
+    )
+
+    run_now(repository.database_path, task.id)
+    time.sleep(1.25)
+
+    assert not marker.exists()
+    assert repository.history(task.id)[0]["status"] == "timed_out"
+
+
 def test_runner_finishes_reservation_when_log_setup_fails(tmp_path, monkeypatch):
     repository = make_repository(tmp_path)
     task = repository.add(
@@ -404,6 +437,22 @@ def test_daemon_start_cleans_up_when_initial_reconcile_fails(tmp_path, monkeypat
 
     assert daemon._started is False
     assert daemon.scheduler.running is False
+
+
+def test_scheduler_singleton_lock_uses_native_platform_lock(tmp_path):
+    lock_path = tmp_path / "scheduler.lock"
+
+    with (
+        _SingletonLock(lock_path),
+        pytest.raises(DaemonAlreadyRunning),
+        _SingletonLock(lock_path),
+    ):
+        pass
+
+    # The native lock must be released when the first context exits.
+    with _SingletonLock(lock_path):
+        pass
+    assert lock_path.read_text() == str(os.getpid())
 
 
 def test_stale_scheduler_event_does_not_disable_replacement(tmp_path):
@@ -539,27 +588,39 @@ def test_macos_installer_writes_launch_agent(tmp_path, monkeypatch):
     assert definition["KeepAlive"] == {"SuccessfulExit": False}
     assert definition["ProgramArguments"][1:3] == ["-m", "taskflows.scheduler.daemon"]
     assert definition["ProgramArguments"][-1] == str(tmp_path / "data" / "scheduler.sqlite3")
+    assert plist_path.stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "data").stat().st_mode & 0o777 == 0o700
     assert (tmp_path / "data" / "logs").stat().st_mode & 0o777 == 0o700
-    assert any(command[:2] == ["launchctl", "bootstrap"] for command in calls)
+    enable_index = next(
+        i for i, command in enumerate(calls) if command[:2] == ["launchctl", "enable"]
+    )
+    bootstrap_index = next(
+        i for i, command in enumerate(calls) if command[:2] == ["launchctl", "bootstrap"]
+    )
+    assert enable_index < bootstrap_index
 
 
 def test_windows_installer_registers_per_user_task(tmp_path, monkeypatch):
     settings = SimpleNamespace()
+    trigger = SimpleNamespace()
     definition = SimpleNamespace(
         RegistrationInfo=SimpleNamespace(),
         Principal=SimpleNamespace(),
         Settings=settings,
-        Triggers=SimpleNamespace(Create=lambda kind: SimpleNamespace(kind=kind)),
+        Triggers=SimpleNamespace(Create=lambda kind: trigger),
     )
     action = SimpleNamespace()
     definition.Actions = SimpleNamespace(Create=lambda kind: action)
 
     class FakeTask:
         ran = False
+        stopped = False
 
         def Run(self, argument):
             self.ran = True
+
+        def Stop(self, flags):
+            self.stopped = True
 
     task = FakeTask()
 
@@ -591,6 +652,10 @@ def test_windows_installer_registers_per_user_task(tmp_path, monkeypatch):
     client.Dispatch = lambda name: scheduler
     package = ModuleType("win32com")
     package.client = client
+    win32api = ModuleType("win32api")
+    win32api.NameSamCompatible = 2
+    win32api.GetUserNameEx = lambda name_format: "EXAMPLE\\scheduler-user"
+    monkeypatch.setitem(sys.modules, "win32api", win32api)
     monkeypatch.setitem(sys.modules, "win32com", package)
     monkeypatch.setitem(sys.modules, "win32com.client", client)
     monkeypatch.setattr(installer, "services_data_dir", tmp_path / "custom-data")
@@ -598,9 +663,53 @@ def test_windows_installer_registers_per_user_task(tmp_path, monkeypatch):
     installer.install_windows()
 
     assert folder.registered[0] == installer.WINDOWS_TASK_NAME
+    assert folder.registered[3] == "EXAMPLE\\scheduler-user"
+    assert folder.registered[5] == installer._TASK_LOGON_INTERACTIVE_TOKEN
+    assert definition.Principal.UserId == "EXAMPLE\\scheduler-user"
     assert definition.Principal.LogonType == 3
+    assert trigger.UserId == "EXAMPLE\\scheduler-user"
+    assert trigger.Enabled is True
     assert definition.Settings.ExecutionTimeLimit == "PT0S"
+    assert definition.Settings.DisallowStartIfOnBatteries is False
+    assert definition.Settings.StopIfGoingOnBatteries is False
+    assert definition.Settings.RunOnlyIfIdle is False
+    assert definition.Settings.RunOnlyIfNetworkAvailable is False
+    assert definition.Settings.AllowDemandStart is True
     assert action.Path == sys.executable
     assert "taskflows.scheduler.daemon" in action.Arguments
     assert str(tmp_path / "custom-data" / "scheduler.sqlite3") in action.Arguments
+    assert task.stopped
     assert task.ran
+
+
+def test_windows_uninstaller_deletes_task_even_when_stop_fails(monkeypatch):
+    class FakeTask:
+        def Stop(self, flags):
+            raise RuntimeError("task is not running")
+
+    class FakeFolder:
+        deleted = False
+
+        def GetTask(self, name):
+            assert name == installer.WINDOWS_TASK_NAME
+            return FakeTask()
+
+        def DeleteTask(self, name, flags):
+            assert name == installer.WINDOWS_TASK_NAME
+            self.deleted = True
+
+    folder = FakeFolder()
+    scheduler = SimpleNamespace(
+        Connect=lambda: None,
+        GetFolder=lambda name: folder,
+    )
+    client = ModuleType("win32com.client")
+    client.Dispatch = lambda name: scheduler
+    package = ModuleType("win32com")
+    package.client = client
+    monkeypatch.setitem(sys.modules, "win32com", package)
+    monkeypatch.setitem(sys.modules, "win32com.client", client)
+
+    installer.uninstall_windows()
+
+    assert folder.deleted

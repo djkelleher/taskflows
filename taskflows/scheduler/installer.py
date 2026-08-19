@@ -5,14 +5,26 @@ import plistlib
 import shlex
 import subprocess
 import sys
+from contextlib import suppress
+from importlib import import_module
 from pathlib import Path
+from typing import Any
 
-from taskflows.common import services_data_dir
+from taskflows.common import secure_write_text, services_data_dir
 
 LINUX_UNIT_NAME = "taskflows-scheduler.service"
 MACOS_LABEL = "com.taskflows.scheduler"
 WINDOWS_TASK_FOLDER = "Taskflows"
 WINDOWS_TASK_NAME = "Scheduler"
+
+# Task Scheduler COM constants. Keeping the names beside the numeric values
+# makes this module readable without importing platform-only modules on POSIX.
+_TASK_ACTION_EXEC = 0
+_TASK_CREATE_OR_UPDATE = 6
+_TASK_INSTANCES_IGNORE_NEW = 2
+_TASK_LOGON_INTERACTIVE_TOKEN = 3
+_TASK_RUNLEVEL_LUA = 0
+_TASK_TRIGGER_LOGON = 9
 
 
 def _home_dir() -> Path:
@@ -97,12 +109,17 @@ def install_macos() -> Path:
         "StandardOutPath": str(log_dir / "scheduler.stdout.log"),
         "StandardErrorPath": str(log_dir / "scheduler.stderr.log"),
     }
-    with plist_path.open("wb") as stream:
-        plistlib.dump(definition, stream)
+    # launchd can observe this file at login while an upgrade is writing it.
+    # Replace a complete owner-only plist atomically instead of exposing a
+    # partial definition.
+    plist = plistlib.dumps(definition, fmt=plistlib.FMT_XML).decode("utf-8")
+    secure_write_text(plist_path, plist)
     domain = f"gui/{uid}"
     _run(["launchctl", "bootout", domain, str(plist_path)], check=False)
-    _run(["launchctl", "bootstrap", domain, str(plist_path)])
+    # `disable` state persists independently of the plist. Re-enable before
+    # bootstrap so reinstall also repairs a manually disabled agent.
     _run(["launchctl", "enable", f"{domain}/{MACOS_LABEL}"])
+    _run(["launchctl", "bootstrap", domain, str(plist_path)])
     _run(["launchctl", "kickstart", "-k", f"{domain}/{MACOS_LABEL}"])
     return plist_path
 
@@ -122,6 +139,8 @@ def install_windows() -> None:
     """
     import win32com.client
 
+    windows_api: Any = import_module("win32api")
+
     scheduler = win32com.client.Dispatch("Schedule.Service")
     scheduler.Connect()
     root = scheduler.GetFolder("\\")
@@ -132,24 +151,48 @@ def install_windows() -> None:
 
     definition = scheduler.NewTask(0)
     definition.RegistrationInfo.Description = "Taskflows portable scheduler daemon"
-    definition.Principal.LogonType = 3  # TASK_LOGON_INTERACTIVE_TOKEN
-    definition.Principal.RunLevel = 0  # TASK_RUNLEVEL_LUA (least privilege)
+    # A SAM-compatible name scopes both the task principal and logon trigger
+    # to the installing user. An unscoped logon trigger fires for every user.
+    user_id = windows_api.GetUserNameEx(windows_api.NameSamCompatible)
+    definition.Principal.UserId = user_id
+    definition.Principal.LogonType = _TASK_LOGON_INTERACTIVE_TOKEN
+    definition.Principal.RunLevel = _TASK_RUNLEVEL_LUA
     settings = definition.Settings
     settings.Enabled = True
     settings.StartWhenAvailable = True
+    # The scheduler is a lightweight supervisor and must not disappear when a
+    # laptop starts or switches to battery power.
+    settings.DisallowStartIfOnBatteries = False
+    settings.StopIfGoingOnBatteries = False
+    settings.RunOnlyIfIdle = False
+    settings.RunOnlyIfNetworkAvailable = False
+    settings.AllowDemandStart = True
     settings.ExecutionTimeLimit = "PT0S"
     settings.RestartCount = 3
     settings.RestartInterval = "PT1M"
-    settings.MultipleInstances = 2  # TASK_INSTANCES_IGNORE_NEW
+    settings.MultipleInstances = _TASK_INSTANCES_IGNORE_NEW
 
-    definition.Triggers.Create(9)  # TASK_TRIGGER_LOGON
-    action = definition.Actions.Create(0)  # TASK_ACTION_EXEC
+    trigger = definition.Triggers.Create(_TASK_TRIGGER_LOGON)
+    trigger.UserId = user_id
+    trigger.Enabled = True
+    action = definition.Actions.Create(_TASK_ACTION_EXEC)
     command = _daemon_command()
     action.Path = command[0]
     action.Arguments = subprocess.list2cmdline(command[1:])
     action.WorkingDirectory = str(_home_dir())
-    # TASK_CREATE_OR_UPDATE, current interactive user, no stored password.
-    folder.RegisterTaskDefinition(WINDOWS_TASK_NAME, definition, 6, "", "", 3)
+    # Apply an updated interpreter/database path immediately instead of leaving
+    # an old instance running until the next login.
+    with suppress(Exception):
+        folder.GetTask(WINDOWS_TASK_NAME).Stop(0)
+    # Current interactive user, with no stored password.
+    folder.RegisterTaskDefinition(
+        WINDOWS_TASK_NAME,
+        definition,
+        _TASK_CREATE_OR_UPDATE,
+        user_id,
+        "",
+        _TASK_LOGON_INTERACTIVE_TOKEN,
+    )
     folder.GetTask(WINDOWS_TASK_NAME).Run("")
 
 
@@ -160,10 +203,14 @@ def uninstall_windows() -> None:
     scheduler.Connect()
     try:
         folder = scheduler.GetFolder(f"\\{WINDOWS_TASK_FOLDER}")
-        folder.GetTask(WINDOWS_TASK_NAME).Stop(0)
-        folder.DeleteTask(WINDOWS_TASK_NAME, 0)
+        task = folder.GetTask(WINDOWS_TASK_NAME)
     except Exception:
         return
+    # Stopping an already-finished instance may fail on some Task Scheduler
+    # versions. Deletion must still be attempted.
+    with suppress(Exception):
+        task.Stop(0)
+    folder.DeleteTask(WINDOWS_TASK_NAME, 0)
 
 
 def install() -> Path | None:

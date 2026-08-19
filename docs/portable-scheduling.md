@@ -10,9 +10,15 @@ daemon.
 | macOS | `~/Library/LaunchAgents/com.taskflows.scheduler.plist` |
 | Windows | per-user Task Scheduler logon task |
 
-The Windows daemon intentionally runs as the interactive user. A LocalSystem
-service would use a different home directory and would run user commands with
-unnecessary privileges.
+The macOS launch agent is written atomically with owner-only permissions and is
+registered in the installing user's GUI domain. Reinstalling re-enables and
+restarts a previously loaded or manually disabled agent.
+
+The Windows daemon intentionally runs as the installing interactive user. Its
+principal and logon trigger are scoped to that account, it runs with least
+privilege, and it remains active when a laptop switches to battery power. A
+LocalSystem service would use a different home directory and would run user
+commands with unnecessary privileges.
 
 ## Schedule semantics
 

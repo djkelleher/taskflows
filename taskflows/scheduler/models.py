@@ -177,11 +177,19 @@ class ScheduledTask:
             raise ValueError("revision must be at least one")
         if self.cwd is not None and (not str(self.cwd).strip() or "\x00" in str(self.cwd)):
             raise ValueError("cwd cannot be empty or contain NUL bytes")
+        environment_names: set[str] = set()
         for key, value in self.environment.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise TypeError("environment keys and values must be strings")
             if not key or "=" in key or "\x00" in key or "\x00" in value:
                 raise ValueError("environment variables must have valid, NUL-free names and values")
+            # Windows environment names are case-insensitive. Reject aliases
+            # such as PATH/Path everywhere so a portable definition cannot
+            # have platform-dependent or order-dependent behavior.
+            normalized_key = key.casefold()
+            if normalized_key in environment_names:
+                raise ValueError("environment variable names must be unique ignoring case")
+            environment_names.add(normalized_key)
 
     @classmethod
     def create(

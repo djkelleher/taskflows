@@ -67,25 +67,37 @@ class _SingletonLock(AbstractContextManager):
             self.file.close()
             self.file = None
             raise DaemonAlreadyRunning("another Taskflows scheduler daemon is running") from exc
-        self.file.seek(0)
-        self.file.truncate()
-        self.file.write(str(os.getpid()))
-        self.file.flush()
+        try:
+            self.file.seek(0)
+            self.file.truncate()
+            self.file.write(str(os.getpid()))
+            self.file.flush()
+        except Exception:
+            # __exit__ is not called when __enter__ fails. Closing the handle
+            # releases either native lock and prevents a permanent in-process
+            # lock leak on a filesystem error.
+            self.file.close()
+            self.file = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self.file is not None:
-            if platform.system() == "Windows":
-                from importlib import import_module
+            try:
+                if platform.system() == "Windows":
+                    from importlib import import_module
 
-                windows_lock: Any = import_module("msvcrt")
-                self.file.seek(0)
-                windows_lock.locking(self.file.fileno(), windows_lock.LK_UNLCK, 1)
-            else:
-                import fcntl
+                    windows_lock: Any = import_module("msvcrt")
+                    self.file.seek(0)
+                    windows_lock.locking(self.file.fileno(), windows_lock.LK_UNLCK, 1)
+                else:
+                    import fcntl
 
-                fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
-            self.file.close()
+                    fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+            finally:
+                # Never leak the file descriptor if an OS unlock call fails.
+                self.file.close()
+                self.file = None
         return False
 
 
