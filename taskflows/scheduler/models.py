@@ -126,6 +126,69 @@ class ScheduleSpec:
             )
         return f"cron {self.value} ({self.timezone})"
 
+    def next_fire_times(
+        self,
+        *,
+        after: str | datetime | None = None,
+        count: int = 5,
+    ) -> tuple[datetime, ...]:
+        """Preview upcoming occurrences using the actual portable trigger.
+
+        This deliberately asks APScheduler's trigger rather than duplicating
+        cron, interval, DST, or one-shot calculations in each CLI/API client.
+        ``after`` is inclusive, matching APScheduler's trigger contract.
+        """
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError("count must be at least one")
+        if count > 1000:
+            raise ValueError("count cannot exceed 1000")
+
+        cursor = parse_datetime(after) if after is not None else utc_now()
+        trigger = self.to_trigger()
+        previous: datetime | None = None
+        occurrences: list[datetime] = []
+        while len(occurrences) < count:
+            next_fire = trigger.get_next_fire_time(previous, cursor)
+            if next_fire is None:
+                break
+            if next_fire < cursor:
+                # DateTrigger returns its single date on the first query even
+                # when ``now`` is later. Consume that past occurrence so a
+                # preview never advertises an already-expired one-off.
+                previous = next_fire
+                continue
+            occurrences.append(next_fire)
+            previous = next_fire
+            cursor = next_fire
+        return tuple(occurrences)
+
+
+def schedule_preview(
+    task: ScheduledTask,
+    *,
+    after: str | datetime | None = None,
+    count: int = 5,
+) -> dict[str, Any]:
+    """Return one stable CLI/REST projection of upcoming task occurrences."""
+    preview_from = parse_datetime(after) if after is not None else utc_now()
+    occurrences = task.schedule.next_fire_times(after=preview_from, count=count)
+    timezone = ZoneInfo(task.schedule.timezone)
+    return {
+        "id": task.id,
+        "name": task.name,
+        "revision": task.revision,
+        "enabled": task.enabled,
+        "timezone": task.schedule.timezone,
+        "from": preview_from.astimezone(UTC).isoformat(),
+        "occurrences": [
+            {
+                "utc": occurrence.astimezone(UTC).isoformat(),
+                "local": occurrence.astimezone(timezone).isoformat(),
+            }
+            for occurrence in occurrences
+        ],
+    }
+
 
 @dataclass(frozen=True)
 class ScheduledTask:

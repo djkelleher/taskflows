@@ -160,6 +160,10 @@ uninstall, start, stop, restart, and status lifecycle. The supervisor controls
 only the daemon; portable task scheduling remains inside Taskflows.
 `SchedulerStatus` is the higher-level common contract, combining normalized
 native and automatic-start state with registry heartbeat health and task counts.
+CLI and REST schedule previews call the same APScheduler trigger objects as the
+daemon, so time-zone and DST behavior is not reimplemented by clients. Runtime
+recovery persists native process-creation identities alongside PIDs to reject
+recycled processes on Linux, macOS, and Windows.
 
 The older `Calendar` and `Periodic` objects compile to systemd timers and remain
 available for Linux `Service` objects.

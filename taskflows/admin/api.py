@@ -62,7 +62,7 @@ from taskflows.admin.utils import with_hostname
 from taskflows.common import Config, logger
 from taskflows.exceptions import RevisionConflict
 from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
-from taskflows.scheduler.models import ScheduledTask, ScheduleSpec
+from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, schedule_preview
 from taskflows.scheduler.repository import SchedulerRepository
 from taskflows.scheduler.runner import run_now as run_scheduled_now
 from taskflows.scheduler.status import diagnose_scheduler, scheduler_status
@@ -662,6 +662,22 @@ async def get_portable_schedule(identifier: str) -> dict[str, Any]:
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return _portable_task_data(task)
+
+
+@app.get("/api/schedules/{identifier}/preview")
+async def preview_portable_schedule(
+    identifier: str,
+    count: int = Query(5, ge=1, le=1000),
+    from_time: str | None = Query(None, alias="from"),
+) -> dict[str, Any]:
+    """Preview occurrences with the same trigger implementation as the daemon."""
+    try:
+        task = await asyncio.to_thread(SchedulerRepository().resolve, identifier)
+        return schedule_preview(task, after=from_time, count=count)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @app.post("/api/schedules", status_code=status.HTTP_201_CREATED)

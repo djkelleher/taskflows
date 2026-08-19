@@ -52,7 +52,9 @@ slot transactionally, and starts the command without a shell. Taskflows:
 - records success, failure, timeout, missed, skipped, and interrupted states;
 - marks orphaned `running` records interrupted on daemon startup and keeps
   checking them during reconciliation, releasing overlap slots after orphaned
-  children exit without requiring another daemon restart.
+  children exit without requiring another daemon restart;
+- records native process-creation identities as well as PIDs, so PID reuse
+  cannot make an unrelated process look like a live daemon or command.
 
 Environment values are never returned from list APIs. The SQLite database and
 run logs are created with owner-only permissions on POSIX systems.
@@ -76,6 +78,7 @@ tf schedule add NAME --cron EXPRESSION --timezone ZONE -- COMMAND [ARGS...]
 tf schedule add NAME --interval 1h --env-file .env --env MODE=prod -- COMMAND
 tf schedule list --json
 tf schedule show NAME [--json]
+tf schedule preview NAME [--count 5] [--from TIMESTAMP] [--json]
 tf schedule history [NAME]
 tf schedule logs NAME [--stream stdout|stderr|both] [--lines 200]
 tf schedule prune [--older-than 30d] [--keep-latest 10] [--dry-run]
@@ -116,6 +119,12 @@ silently overwriting a concurrent change. CLI replacements offer the same
 guard through `--replace --revision N`. `GET /api/schedules/{id-or-name}`
 returns the same non-secret representation used by CLI JSON output. Interval
 requests may provide an offset-aware `start_at` timestamp.
+
+`tf schedule preview` and `GET /api/schedules/{id-or-name}/preview` calculate
+upcoming occurrences with the exact APScheduler trigger used by the daemon.
+Both UTC and schedule-local timestamps are returned, making cron time zones,
+DST transitions, interval anchors, and expired one-offs inspectable before a
+definition is relied upon.
 
 Human durations (`30s`, `5m`, `1.5h`, `2d`) are accepted by the CLI. Environment
 files are resolved and copied into the registry when `schedule add` runs; they

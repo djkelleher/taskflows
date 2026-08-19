@@ -29,6 +29,7 @@ from taskflows.admin.api import (
     portable_schedule_history,
     portable_scheduler_diagnostics,
     portable_scheduler_status,
+    preview_portable_schedule,
     run_portable_schedule,
     set_portable_schedule_enabled,
 )
@@ -39,8 +40,13 @@ from taskflows.schedule import Calendar
 from taskflows.scheduler import installer, supervisor
 from taskflows.scheduler import repository as repository_module
 from taskflows.scheduler.daemon import DaemonAlreadyRunning, SchedulerDaemon, _SingletonLock
-from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, utc_now
-from taskflows.scheduler.repository import SchedulerRepository, _pid_is_running
+from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, schedule_preview, utc_now
+from taskflows.scheduler.repository import (
+    SchedulerRepository,
+    _pid_is_running,
+    _pid_matches_identity,
+    _process_identity,
+)
 from taskflows.scheduler.runner import execute_scheduled_task, run_now
 from taskflows.scheduler.status import DiagnosticCheck, runtime_status, scheduler_status
 from taskflows.scheduler.supervisor import SupervisorStatus
@@ -74,6 +80,34 @@ def test_schedule_specs_are_portable_and_validated():
     for invalid in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError, match="greater than zero"):
             ScheduleSpec.interval(invalid)
+
+
+def test_schedule_preview_reuses_real_trigger_and_reports_local_and_utc_times():
+    task = ScheduledTask.create(
+        "preview",
+        ["echo", "ok"],
+        ScheduleSpec.cron("0 9 * * mon-fri", timezone="America/New_York"),
+    )
+
+    result = schedule_preview(task, after="2026-08-19T10:00:00Z", count=2)
+
+    assert result["timezone"] == "America/New_York"
+    assert result["occurrences"] == [
+        {
+            "utc": "2026-08-19T13:00:00+00:00",
+            "local": "2026-08-19T09:00:00-04:00",
+        },
+        {
+            "utc": "2026-08-20T13:00:00+00:00",
+            "local": "2026-08-20T09:00:00-04:00",
+        },
+    ]
+    assert (
+        ScheduleSpec.once("2026-08-19T09:00:00Z").next_fire_times(after="2026-08-19T10:00:00Z")
+        == ()
+    )
+    with pytest.raises(ValueError, match="cannot exceed"):
+        task.schedule.next_fire_times(count=1001)
 
 
 def test_task_rejects_non_finite_timeout_and_invalid_environment():
@@ -341,6 +375,25 @@ def test_interrupted_run_cleanup_preserves_live_manual_runner(tmp_path):
     assert repository.history(task.id)[0]["status"] == "interrupted"
 
 
+def test_interrupted_cleanup_rejects_recycled_pid_identity(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("recycled", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    run_id = repository.begin_run(task, utc_now())
+    assert run_id is not None
+    with repository.connect() as db:
+        db.execute(
+            "UPDATE task_runs SET runner_pid=123, runner_identity='linux:old' WHERE id=?",
+            (run_id,),
+        )
+    monkeypatch.setattr(repository_module, "_pid_is_running", lambda pid: True)
+    monkeypatch.setattr(repository_module, "_process_identity", lambda pid: "linux:new")
+
+    assert repository.mark_interrupted_runs() == 1
+    assert repository.history(task.id)[0]["status"] == "interrupted"
+
+
 def test_windows_runner_liveness_does_not_use_destructive_os_kill(monkeypatch):
     monkeypatch.setattr(repository_module.os, "name", "nt")
     monkeypatch.setattr(repository_module, "_windows_pid_is_running", lambda pid: True)
@@ -351,6 +404,14 @@ def test_windows_runner_liveness_does_not_use_destructive_os_kill(monkeypatch):
     )
 
     assert _pid_is_running(1234) is True
+
+
+def test_current_process_has_a_reusable_native_identity():
+    identity = _process_identity(os.getpid())
+
+    assert identity is not None
+    assert _pid_matches_identity(os.getpid(), identity) is True
+    assert _pid_matches_identity(os.getpid(), f"{identity}:different") is False
 
 
 def test_repository_migrates_v1_run_history_without_losing_rows(tmp_path):
@@ -383,6 +444,11 @@ def test_repository_migrates_v1_run_history_without_losing_rows(tmp_path):
 
     migrated = SchedulerRepository(repository.database_path)
     assert migrated.history()[0]["task_name"] == "legacy"
+    assert "runner_identity" in migrated.history()[0]
+    with migrated.connect() as db:
+        assert "process_identity" in {
+            row[1] for row in db.execute("PRAGMA table_info(scheduler_state)")
+        }
     migrated.delete(task.id)
     assert migrated.history()[0]["task_name"] == "legacy"
 
@@ -770,6 +836,36 @@ def test_schedule_cli_accepts_human_durations_env_files_and_reads_logs(tmp_path,
     assert logs.output.strip() == "explicit"
 
 
+def test_schedule_cli_previews_portable_occurrences(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    repository.add(
+        ScheduledTask.create(
+            "daily",
+            ["echo", "ok"],
+            ScheduleSpec.cron("0 9 * * *", timezone="America/New_York"),
+        )
+    )
+    monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "schedule",
+            "preview",
+            "daily",
+            "--from",
+            "2026-08-19T10:00:00Z",
+            "--count",
+            "1",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["occurrences"][0]["local"] == "2026-08-19T09:00:00-04:00"
+
+
 def test_scheduler_status_rejects_future_heartbeat(tmp_path, monkeypatch):
     repository = make_repository(tmp_path)
     future = utc_now() + timedelta(days=1)
@@ -846,6 +942,24 @@ def test_runtime_status_rejects_a_fresh_heartbeat_owned_by_another_host(tmp_path
     assert status.pid_running is False
 
 
+def test_runtime_status_rejects_a_recycled_daemon_pid(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    repository.heartbeat(
+        pid=123,
+        hostname=socket.gethostname(),
+        started_at=utc_now(),
+        process_identity="linux:old",
+    )
+    monkeypatch.setattr(repository_module, "_pid_is_running", lambda pid: True)
+    monkeypatch.setattr(repository_module, "_process_identity", lambda pid: "linux:new")
+
+    status = runtime_status(repository)
+
+    assert status.healthy is False
+    assert status.pid_running is False
+    assert status.process_identity == "linux:old"
+
+
 def test_history_retention_keeps_latest_and_removes_owned_logs(tmp_path, monkeypatch):
     repository = make_repository(tmp_path)
     task = repository.add(
@@ -906,6 +1020,7 @@ async def test_portable_schedule_api_uses_bulk_registry(tmp_path, monkeypatch):
             f"from pathlib import Path; Path({str(marker)!r}).touch()",
         ],
         interval_seconds=3600,
+        start_at="2026-08-19T10:00:00Z",
     )
     created = await create_portable_schedule(request)
     listed = await list_portable_schedules(None)
@@ -917,6 +1032,10 @@ async def test_portable_schedule_api_uses_bulk_registry(tmp_path, monkeypatch):
     assert marker.exists()
     history = await portable_schedule_history("api-job", 10)
     assert history["runs"][0]["status"] == "succeeded"
+
+    preview = await preview_portable_schedule("api-job", count=2, from_time="2026-08-19T10:00:00Z")
+    assert len(preview["occurrences"]) == 2
+    assert preview["occurrences"][0]["utc"] == "2026-08-19T10:00:00+00:00"
 
 
 @pytest.mark.asyncio

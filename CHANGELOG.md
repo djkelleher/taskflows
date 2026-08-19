@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   automatic-start state, SQLite integrity checks, and an actionable
   `tf scheduler doctor` command. `tf schedule prune` applies safe history/log
   retention, and orphan reservations are rechecked during reconciliation.
+- Schedule previews now use the daemon's real trigger implementation and show
+  both UTC and schedule-local occurrences through CLI and REST. Durable daemon
+  and runner records include process-creation identities to reject recycled
+  PIDs during crash recovery.
 - **Faster service status:** systemd properties are fetched in bulk with
   bounded concurrency, repeated manager health probes and duplicate unit loads
   are removed, and independent remote servers are queried concurrently.

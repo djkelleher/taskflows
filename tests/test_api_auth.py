@@ -94,6 +94,7 @@ class TestAPIAuthentication(unittest.TestCase):
             ("POST", "/remove", {"match": "test"}),
             ("GET", "/show/test"),
             ("GET", "/api/schedules"),
+            ("GET", "/api/schedules/example/preview"),
             ("GET", "/api/schedule-runs"),
             ("GET", "/api/scheduler/status"),
             ("GET", "/api/scheduler/diagnostics"),

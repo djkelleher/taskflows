@@ -13,7 +13,7 @@ from taskflows.exceptions import RevisionConflict
 
 from .daemon import SchedulerDaemon
 from .installer import install, uninstall
-from .models import ScheduledTask, ScheduleSpec, utc_now
+from .models import ScheduledTask, ScheduleSpec, schedule_preview, utc_now
 from .repository import SchedulerRepository
 from .runner import run_now
 from .status import diagnose_scheduler, runtime_status, scheduler_status
@@ -252,6 +252,35 @@ def show_schedule(identifier: str, as_json: bool) -> None:
     names = data["environment_names"]
     click.echo(f"Environment names: {', '.join(names) if names else '-'}")
     click.echo(f"Revision: {data['revision']}")
+
+
+@schedule_cli.command("preview")
+@click.argument("identifier")
+@click.option("--count", type=click.IntRange(min=1, max=1000), default=5, show_default=True)
+@click.option(
+    "--from",
+    "from_time",
+    help="Offset-aware ISO timestamp to preview from; defaults to now.",
+)
+@click.option("--json", "as_json", is_flag=True)
+def preview_schedule(identifier: str, count: int, from_time: str | None, as_json: bool) -> None:
+    """Preview real trigger occurrences, including DST and time-zone effects."""
+    try:
+        task = _repository().resolve(identifier)
+        data = schedule_preview(task, after=from_time, count=count)
+    except (KeyError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        click.echo(json.dumps(data, indent=2))
+        return
+    if not data["occurrences"]:
+        click.echo("No future occurrences")
+        return
+    for occurrence in data["occurrences"]:
+        if data["timezone"] == "UTC":
+            click.echo(occurrence["utc"])
+        else:
+            click.echo(f"{occurrence['local']}\t{occurrence['utc']} UTC")
 
 
 def _set_enabled(identifier: str, enabled: bool) -> None:

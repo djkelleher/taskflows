@@ -3,7 +3,9 @@ from __future__ import annotations
 import builtins
 import json
 import os
+import platform
 import sqlite3
+import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -18,7 +20,7 @@ from taskflows.exceptions import RevisionConflict
 
 from .models import ScheduledTask, ScheduleSpec, parse_datetime, utc_now
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,93 @@ def _windows_pid_is_running(pid: int) -> bool:
         return bool(kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT)
     finally:
         kernel32.CloseHandle(handle)
+
+
+def _windows_process_identity(pid: int) -> str | None:
+    """Return the Windows process creation timestamp for PID-reuse detection."""
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        created = wintypes.FILETIME()
+        exited = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return None
+        value = (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+        return f"windows:{value}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _process_identity(pid: int | None) -> str | None:
+    """Return a stable creation identity for a currently existing process.
+
+    PIDs are recycled. Persisting the native creation identity prevents a new,
+    unrelated process from keeping an orphaned scheduler run or heartbeat alive.
+    Failure to query identity remains conservative and falls back to PID liveness.
+    """
+    if pid is None or pid <= 0:
+        return None
+    if os.name == "nt":
+        return _windows_process_identity(pid)
+    if platform.system() == "Linux":
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            # Field 2 (comm) is parenthesized and may contain spaces. Fields
+            # after its final ')' begin with state (field 3); starttime is 22.
+            fields = stat[stat.rfind(")") + 2 :].split()
+            return f"linux:{fields[19]}"
+        except (IndexError, OSError, UnicodeError):
+            return None
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    created = " ".join(result.stdout.split())
+    return f"ps:{created}" if result.returncode == 0 and created else None
+
+
+def _pid_matches_identity(pid: int | None, identity: str | None) -> bool:
+    """Return whether PID is live and, when available, is the same process."""
+    if not _pid_is_running(pid):
+        return False
+    if identity is None:
+        return True
+    current = _process_identity(pid)
+    # If the platform temporarily refuses an identity query, preserve the run
+    # rather than risk overlapping a still-live command.
+    return current is None or current == identity
 
 
 class SchedulerRepository:
@@ -170,6 +259,7 @@ class SchedulerRepository:
                     stderr_path TEXT,
                     error TEXT,
                     runner_pid INTEGER,
+                    runner_identity TEXT,
                     FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE SET NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_runs_task_started
@@ -180,7 +270,8 @@ class SchedulerRepository:
                     pid INTEGER NOT NULL,
                     hostname TEXT NOT NULL,
                     started_at TEXT NOT NULL,
-                    heartbeat_at TEXT NOT NULL
+                    heartbeat_at TEXT NOT NULL,
+                    process_identity TEXT
                 );
                 """
             )
@@ -207,6 +298,7 @@ class SchedulerRepository:
                         stderr_path TEXT,
                         error TEXT,
                         runner_pid INTEGER,
+                        runner_identity TEXT,
                         FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE SET NULL
                     );
                     """
@@ -220,10 +312,11 @@ class SchedulerRepository:
                 db.execute(
                     f"""INSERT INTO task_runs
                         (id, task_id, task_name, scheduled_for, started_at, finished_at,
-                         status, exit_code, stdout_path, stderr_path, error, runner_pid)
+                         status, exit_code, stdout_path, stderr_path, error, runner_pid,
+                         runner_identity)
                         SELECT r.id, r.task_id, {name_expression}, r.scheduled_for,
                                r.started_at, r.finished_at, r.status, r.exit_code,
-                               r.stdout_path, r.stderr_path, r.error, NULL
+                               r.stdout_path, r.stderr_path, r.error, NULL, NULL
                         FROM task_runs_v1 r
                         LEFT JOIN scheduled_tasks t ON t.id=r.task_id"""
                 )
@@ -236,6 +329,11 @@ class SchedulerRepository:
             run_columns = {row[1] for row in db.execute("PRAGMA table_info(task_runs)")}
             if "runner_pid" not in run_columns:
                 db.execute("ALTER TABLE task_runs ADD COLUMN runner_pid INTEGER")
+            if "runner_identity" not in run_columns:
+                db.execute("ALTER TABLE task_runs ADD COLUMN runner_identity TEXT")
+            state_columns = {row[1] for row in db.execute("PRAGMA table_info(scheduler_state)")}
+            if "process_identity" not in state_columns:
+                db.execute("ALTER TABLE scheduler_state ADD COLUMN process_identity TEXT")
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if os.name != "nt":
             os.chmod(self.database_path, 0o600)
@@ -471,8 +569,9 @@ class SchedulerRepository:
                 return None
             db.execute(
                 """INSERT INTO task_runs
-                   (id, task_id, task_name, scheduled_for, started_at, status, runner_pid)
-                   VALUES (?, ?, ?, ?, ?, 'running', ?)""",
+                   (id, task_id, task_name, scheduled_for, started_at, status,
+                    runner_pid, runner_identity)
+                   VALUES (?, ?, ?, ?, ?, 'running', ?, ?)""",
                 (
                     run_id,
                     task.id,
@@ -480,16 +579,25 @@ class SchedulerRepository:
                     _iso(scheduled_for),
                     _iso(now),
                     os.getpid(),
+                    _process_identity(os.getpid()),
                 ),
             )
         return run_id
 
-    def set_runner_pid(self, run_id: str, pid: int) -> None:
-        """Record the command process after a reserved run is launched."""
+    def set_runner_pid(
+        self,
+        run_id: str,
+        pid: int,
+        *,
+        process_identity: str | None = None,
+    ) -> None:
+        """Record the command process and its creation identity after launch."""
+        identity = process_identity if process_identity is not None else _process_identity(pid)
         with self.connect() as db:
             db.execute(
-                "UPDATE task_runs SET runner_pid=? WHERE id=? AND status='running'",
-                (pid, run_id),
+                """UPDATE task_runs SET runner_pid=?, runner_identity=?
+                   WHERE id=? AND status='running'""",
+                (pid, identity, run_id),
             )
 
     def finish_run(
@@ -545,9 +653,14 @@ class SchedulerRepository:
         now = _iso(utc_now())
         with self.connect() as db:
             running = db.execute(
-                "SELECT id, runner_pid FROM task_runs WHERE status='running'"
+                """SELECT id, runner_pid, runner_identity
+                   FROM task_runs WHERE status='running'"""
             ).fetchall()
-            stale_ids = [row["id"] for row in running if not _pid_is_running(row["runner_pid"])]
+            stale_ids = [
+                row["id"]
+                for row in running
+                if not _pid_matches_identity(row["runner_pid"], row["runner_identity"])
+            ]
             if stale_ids:
                 db.executemany(
                     """UPDATE task_runs SET status='interrupted', finished_at=?,
@@ -647,17 +760,26 @@ class SchedulerRepository:
             log_errors=tuple(errors),
         )
 
-    def heartbeat(self, *, pid: int, hostname: str, started_at: datetime) -> None:
+    def heartbeat(
+        self,
+        *,
+        pid: int,
+        hostname: str,
+        started_at: datetime,
+        process_identity: str | None = None,
+    ) -> None:
         now = _iso(utc_now())
+        identity = process_identity if process_identity is not None else _process_identity(pid)
         with self.connect() as db:
             db.execute(
                 """INSERT INTO scheduler_state
-                   (singleton, pid, hostname, started_at, heartbeat_at)
-                   VALUES (1, ?, ?, ?, ?)
+                   (singleton, pid, hostname, started_at, heartbeat_at, process_identity)
+                   VALUES (1, ?, ?, ?, ?, ?)
                    ON CONFLICT(singleton) DO UPDATE SET pid=excluded.pid,
                    hostname=excluded.hostname, started_at=excluded.started_at,
-                   heartbeat_at=excluded.heartbeat_at""",
-                (pid, hostname, _iso(started_at), now),
+                   heartbeat_at=excluded.heartbeat_at,
+                   process_identity=excluded.process_identity""",
+                (pid, hostname, _iso(started_at), now, identity),
             )
 
     def daemon_state(self) -> dict[str, Any] | None:
@@ -665,7 +787,14 @@ class SchedulerRepository:
             row = db.execute("SELECT * FROM scheduler_state WHERE singleton=1").fetchone()
         return dict(row) if row else None
 
-    def clear_daemon_state(self, *, pid: int) -> None:
+    def clear_daemon_state(self, *, pid: int, process_identity: str | None = None) -> None:
         """Remove this daemon's heartbeat without erasing a newer owner's state."""
         with self.connect() as db:
-            db.execute("DELETE FROM scheduler_state WHERE singleton=1 AND pid=?", (pid,))
+            if process_identity is None:
+                db.execute("DELETE FROM scheduler_state WHERE singleton=1 AND pid=?", (pid,))
+            else:
+                db.execute(
+                    """DELETE FROM scheduler_state
+                       WHERE singleton=1 AND pid=? AND process_identity=?""",
+                    (pid, process_identity),
+                )

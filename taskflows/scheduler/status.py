@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .models import parse_datetime
-from .repository import SchedulerRepository, _pid_is_running
+from .repository import SchedulerRepository, _pid_matches_identity
 from .supervisor import SchedulerSupervisor, SupervisorStatus, get_supervisor
 
 DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 5.0
@@ -34,6 +34,7 @@ class SchedulerRuntimeStatus:
     healthy: bool
     pid: int | None = None
     pid_running: bool | None = None
+    process_identity: str | None = None
     hostname: str | None = None
     started_at: str | None = None
     heartbeat_at: str | None = None
@@ -93,12 +94,16 @@ def runtime_status(
     pid = pid_value if isinstance(pid_value, int) and not isinstance(pid_value, bool) else None
     hostname = state.get("hostname")
     local_owner = isinstance(hostname, str) and hostname == socket.gethostname()
-    pid_running = _pid_is_running(pid) if pid is not None and local_owner else False
+    process_identity = state.get("process_identity")
+    pid_running = (
+        _pid_matches_identity(pid, process_identity) if pid is not None and local_owner else False
+    )
     healthy = age is not None and 0 <= age < heartbeat_timeout and pid_running is True
     return SchedulerRuntimeStatus(
         healthy=healthy,
         pid=pid,
         pid_running=pid_running,
+        process_identity=process_identity,
         hostname=hostname,
         started_at=state.get("started_at"),
         heartbeat_at=heartbeat_value,

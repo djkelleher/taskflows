@@ -28,7 +28,7 @@ from taskflows.common import logger
 from taskflows.exceptions import RevisionConflict
 
 from .models import ScheduledTask, parse_datetime, utc_now
-from .repository import SchedulerRepository
+from .repository import SchedulerRepository, _process_identity
 from .runner import execute_scheduled_task, terminate_active_runs
 
 JOB_PREFIX = "taskflows:"
@@ -116,6 +116,7 @@ class SchedulerDaemon:
         self.database_path = self.repository.database_path.resolve()
         self.reconcile_interval = reconcile_interval
         self.started_at = utc_now()
+        self.process_identity = _process_identity(os.getpid())
         self.stop_event = threading.Event()
         self._submitted_date_jobs: dict[str, int] = {}
         self._submitted_lock = threading.RLock()
@@ -324,7 +325,10 @@ class SchedulerDaemon:
 
     def heartbeat(self) -> None:
         self.repository.heartbeat(
-            pid=os.getpid(), hostname=socket.gethostname(), started_at=self.started_at
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            started_at=self.started_at,
+            process_identity=self.process_identity,
         )
 
     def request_stop(self, signum: int | None = None, frame: FrameType | None = None) -> None:
@@ -355,7 +359,9 @@ class SchedulerDaemon:
             try:
                 self.repository.mark_interrupted_runs()
             finally:
-                self.repository.clear_daemon_state(pid=os.getpid())
+                self.repository.clear_daemon_state(
+                    pid=os.getpid(), process_identity=self.process_identity
+                )
                 self._started = False
 
 

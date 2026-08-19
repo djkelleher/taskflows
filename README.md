@@ -162,6 +162,7 @@ tf schedule add report --cron '0 9 * * mon-fri' \
 
 tf schedule list
 tf schedule show report
+tf schedule preview report --count 5
 tf schedule history report
 tf schedule logs report
 tf schedule prune --older-than 30d --keep-latest 10

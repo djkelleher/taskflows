@@ -6,7 +6,7 @@ APScheduler, so their schedule semantics are the same on Linux, macOS and
 Windows.
 """
 
-from .models import ScheduledTask, ScheduleSpec
+from .models import ScheduledTask, ScheduleSpec, schedule_preview
 from .repository import HistoryPruneResult, SchedulerRepository
 from .status import (
     DiagnosticCheck,
@@ -29,5 +29,6 @@ __all__ = [
     "SupervisorStatus",
     "diagnose_scheduler",
     "get_supervisor",
+    "schedule_preview",
     "scheduler_status",
 ]
