@@ -18,6 +18,7 @@ export {
   deleteEnvironment,
   getSchedules,
   createSchedule,
+  updateSchedule,
   setScheduleEnabled,
   deleteSchedule,
   runSchedule,

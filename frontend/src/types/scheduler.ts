@@ -70,8 +70,22 @@ export interface CreateScheduleRequest {
   command: string[];
   run_at?: string;
   interval_seconds?: number;
+  start_at?: string;
   cron?: string;
   timezone: string;
+  timeout?: number;
+  no_timeout?: boolean;
+}
+
+export interface UpdateScheduleRequest {
+  expected_revision: number;
+  name?: string;
+  command?: string[];
+  run_at?: string;
+  interval_seconds?: number;
+  start_at?: string;
+  cron?: string;
+  timezone?: string;
   timeout?: number;
   no_timeout?: boolean;
 }

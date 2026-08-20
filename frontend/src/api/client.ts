@@ -9,6 +9,7 @@ import type {
   RefreshResponse,
   SchedulerStatus,
   ScheduleRun,
+  UpdateScheduleRequest,
 } from "@/types";
 
 // Mutex to prevent concurrent token refreshes
@@ -332,6 +333,22 @@ export async function createSchedule(
     body: JSON.stringify(request),
   });
   if (!response.ok) throw await apiError(response, "Failed to create schedule");
+  return response.json();
+}
+
+export async function updateSchedule(
+  id: string,
+  request: UpdateScheduleRequest,
+): Promise<PortableSchedule> {
+  const response = await fetchWithAuth(
+    `/api/schedules/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!response.ok) throw await apiError(response, "Failed to update schedule");
   return response.json();
 }
 

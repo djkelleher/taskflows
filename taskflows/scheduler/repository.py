@@ -1150,7 +1150,11 @@ class SchedulerRepository:
                 """WITH ranked AS (
                        SELECT id, stdout_path, stderr_path, finished_at,
                               ROW_NUMBER() OVER (
-                                  PARTITION BY COALESCE(task_id, 'deleted:' || task_name)
+                                  PARTITION BY COALESCE(
+                                      task_definition_id,
+                                      task_id,
+                                      'deleted:' || task_name
+                                  )
                                   ORDER BY COALESCE(started_at, scheduled_for, finished_at) DESC,
                                            id DESC
                               ) AS newest_rank

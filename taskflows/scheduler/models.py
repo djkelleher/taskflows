@@ -68,6 +68,21 @@ def merge_environment(base: Mapping[str, str], overrides: Mapping[str, str]) -> 
     return merged
 
 
+def resolve_working_directory(value: str | Path | None = None) -> str:
+    """Return the absolute working directory persisted by every client.
+
+    Native supervisors start in different directories.  Centralizing this
+    normalization keeps creates and partial updates from accidentally restoring
+    platform-dependent relative-path behavior.
+    """
+
+    try:
+        path = Path(value).expanduser() if value is not None else Path.cwd()
+        return str(path.resolve())
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"could not resolve working directory: {exc}") from exc
+
+
 @dataclass(frozen=True)
 class ScheduleSpec:
     """Portable date, interval, or five-field cron schedule."""
@@ -172,6 +187,13 @@ class ScheduleSpec:
             )
         return f"cron {self.value} ({self.timezone})"
 
+    def with_stable_anchor(self, now: datetime | None = None) -> ScheduleSpec:
+        """Persist an interval anchor so reconciliation never shifts its cadence."""
+
+        if self.kind != "interval" or self.start_at is not None:
+            return self
+        return replace(self, start_at=(now or utc_now()).isoformat())
+
     def next_fire_times(
         self,
         *,
@@ -263,8 +285,10 @@ class ScheduledTask:
             raise ValueError("task name cannot have leading or trailing whitespace")
         if any(ord(character) < 32 or ord(character) == 127 for character in self.id + self.name):
             raise ValueError("task id and name cannot contain control characters")
-        if not self.command or any(not isinstance(part, str) or not part for part in self.command):
-            raise ValueError("command must contain at least one non-empty argument")
+        if not self.command or not isinstance(self.command[0], str) or not self.command[0]:
+            raise ValueError("command must start with a non-empty executable")
+        if any(not isinstance(part, str) for part in self.command):
+            raise TypeError("command arguments must be strings")
         if any("\x00" in part for part in self.command):
             raise ValueError("command arguments cannot contain NUL bytes")
         if self.timeout is not None and (
@@ -320,20 +344,12 @@ class ScheduledTask:
         if isinstance(command, (str, bytes)):
             raise TypeError("command must be a sequence of arguments, not a string")
         now = utc_now()
-        if schedule.kind == "interval" and schedule.start_at is None:
-            schedule = replace(schedule, start_at=now.isoformat())
+        schedule = schedule.with_stable_anchor(now)
         # Native supervisors do not share a guaranteed working directory.
         # Persist an absolute creation-time path even when the caller omits
         # ``cwd`` so relative command arguments behave the same under systemd,
         # launchd, Task Scheduler, foreground mode, and manual execution.
-        configured_cwd = kwargs.get("cwd")
-        try:
-            working_directory = (
-                Path(configured_cwd).expanduser() if configured_cwd is not None else Path.cwd()
-            ).resolve()
-        except (OSError, RuntimeError) as exc:
-            raise ValueError(f"could not resolve working directory: {exc}") from exc
-        kwargs["cwd"] = str(working_directory)
+        kwargs["cwd"] = resolve_working_directory(kwargs.get("cwd"))
         return cls(
             id=str(uuid4()),
             name=name,

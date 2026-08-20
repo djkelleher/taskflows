@@ -70,6 +70,7 @@ from taskflows.scheduler.models import (
     ScheduledTask,
     ScheduleSpec,
     merge_environment,
+    resolve_working_directory,
     schedule_preview,
 )
 from taskflows.scheduler.repository import SchedulerRepository
@@ -785,17 +786,23 @@ async def patch_portable_schedule(
             if len(chosen) != 1:
                 raise ValueError("provide exactly one of run_at, interval_seconds, or cron")
             kind, value = chosen[0]
-            timezone = request.timezone or current.schedule.timezone
+            timezone = (
+                request.timezone if request.timezone is not None else current.schedule.timezone
+            )
+            if request.start_at is not None and kind != "interval":
+                raise ValueError("start_at can only be used with an interval schedule")
             if kind == "date":
                 schedule = ScheduleSpec.once(str(value), timezone=timezone)
             elif kind == "interval":
                 schedule = ScheduleSpec.interval(
                     float(value), start_at=request.start_at, timezone=timezone
-                )
+                ).with_stable_anchor()
             else:
                 schedule = ScheduleSpec.cron(str(value), timezone=timezone)
         elif fields & {"timezone", "start_at"}:
-            timezone = request.timezone or current.schedule.timezone
+            timezone = (
+                request.timezone if request.timezone is not None else current.schedule.timezone
+            )
             if current.schedule.kind == "date":
                 if "start_at" in fields:
                     raise ValueError("start_at can only be used with an interval schedule")
@@ -840,7 +847,7 @@ async def patch_portable_schedule(
             schedule=schedule,
             enabled=request.enabled if request.enabled is not None else current.enabled,
             timeout=timeout,
-            cwd=request.cwd if "cwd" in fields else current.cwd,
+            cwd=resolve_working_directory(request.cwd) if "cwd" in fields else current.cwd,
             environment=environment,
             misfire_grace_time=request.misfire_grace_time
             if "misfire_grace_time" in fields

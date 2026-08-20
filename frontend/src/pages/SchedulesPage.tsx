@@ -13,11 +13,13 @@ import {
   previewSchedule,
   runSchedule,
   setScheduleEnabled,
+  updateSchedule,
 } from "@/api";
 import type {
   CreateScheduleRequest,
   PortableSchedule,
   ScheduleRun,
+  UpdateScheduleRequest,
 } from "@/types";
 
 type ScheduleKind = "interval" | "cron" | "date";
@@ -45,6 +47,7 @@ export function SchedulesPage() {
     Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
   );
   const [timeout, setTimeout] = useState("3600");
+  const [editing, setEditing] = useState<PortableSchedule | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [preview, setPreview] = useState<string[]>([]);
   const [logs, setLogs] = useState<{
@@ -88,6 +91,24 @@ export function SchedulesPage() {
     onError: (error: Error) => setMessage(error.message),
   });
 
+  const updateMutation = useMutation({
+    mutationFn: ({
+      id,
+      request,
+    }: {
+      id: string;
+      request: UpdateScheduleRequest;
+    }) => updateSchedule(id, request),
+    onSuccess: async () => {
+      setEditing(null);
+      setName("");
+      setCommand("");
+      setMessage("Schedule updated");
+      await refresh();
+    },
+    onError: (error: Error) => setMessage(error.message),
+  });
+
   const recentRunsByTask = useMemo(() => {
     const result = new Map<string, ScheduleRun>();
     for (const run of runsQuery.data?.runs || []) {
@@ -97,24 +118,67 @@ export function SchedulesPage() {
   }, [runsQuery.data]);
 
   const submit = () => {
-    const args = command
-      .split("\n")
-      .map((part) => part.trim())
-      .filter(Boolean);
+    const args =
+      editing && command === editing.command.join("\n")
+        ? editing.command
+        : command
+            .split("\n")
+            .map((part) => part.trim())
+            .filter(Boolean);
     if (!name.trim() || args.length === 0) {
       setMessage("Enter a name and one command argument per line");
+      return;
+    }
+    const timeoutSeconds = Number(timeout);
+    if (
+      timeout.trim() &&
+      (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0)
+    ) {
+      setMessage("Timeout must be a positive number or blank for no timeout");
       return;
     }
     const request: CreateScheduleRequest = {
       name: name.trim(),
       command: args,
       timezone,
-      timeout: Number(timeout),
+      ...(timeout.trim() ? { timeout: timeoutSeconds } : { no_timeout: true }),
     };
-    if (kind === "interval") request.interval_seconds = Number(scheduleValue);
+    if (kind === "interval") {
+      const seconds = Number(scheduleValue);
+      if (!Number.isFinite(seconds) || seconds < 1) {
+        setMessage("Interval must be at least one second");
+        return;
+      }
+      request.interval_seconds = seconds;
+      if (editing?.schedule.kind === "interval" && editing.schedule.start_at) {
+        request.start_at = editing.schedule.start_at;
+      }
+    }
     if (kind === "cron") request.cron = scheduleValue;
     if (kind === "date") request.run_at = scheduleValue;
-    mutation.mutate(request);
+    if (editing) {
+      updateMutation.mutate({
+        id: editing.id,
+        request: { ...request, expected_revision: editing.revision },
+      });
+    } else {
+      mutation.mutate(request);
+    }
+  };
+
+  const edit = (schedule: PortableSchedule) => {
+    setEditing(schedule);
+    setName(schedule.name);
+    setCommand(schedule.command.join("\n"));
+    setKind(schedule.schedule.kind);
+    setScheduleValue(String(schedule.schedule.value));
+    setTimezone(schedule.schedule.timezone);
+    setTimeout(schedule.timeout === null ? "" : String(schedule.timeout));
+    setPreview([]);
+    setMessage(
+      `Editing ${schedule.name}; secret environment values will be preserved`,
+    );
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const act = async (action: () => Promise<unknown>, success: string) => {
@@ -221,7 +285,24 @@ export function SchedulesPage() {
       </section>
 
       <section className="rounded border border-border bg-card p-5 space-y-4">
-        <h3 className="font-semibold">Create schedule</h3>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="font-semibold">
+            {editing ? `Edit ${editing.name}` : "Create schedule"}
+          </h3>
+          {editing && (
+            <button
+              className="text-sm text-muted hover:text-foreground"
+              onClick={() => {
+                setEditing(null);
+                setName("");
+                setCommand("");
+                setMessage(null);
+              }}
+            >
+              Cancel edit
+            </button>
+          )}
+        </div>
         <div className="grid md:grid-cols-2 gap-4">
           <label className="text-sm">
             Name
@@ -274,7 +355,7 @@ export function SchedulesPage() {
             />
           </label>
           <label className="text-sm">
-            Timeout seconds
+            Timeout seconds (blank for none)
             <input
               type="number"
               min="1"
@@ -285,11 +366,15 @@ export function SchedulesPage() {
           </label>
         </div>
         <button
-          disabled={mutation.isPending}
+          disabled={mutation.isPending || updateMutation.isPending}
           className="px-4 py-2 rounded bg-electric-blue text-black disabled:opacity-50"
           onClick={submit}
         >
-          {mutation.isPending ? "Creating…" : "Create schedule"}
+          {mutation.isPending || updateMutation.isPending
+            ? "Saving…"
+            : editing
+              ? "Save changes"
+              : "Create schedule"}
         </button>
       </section>
 
@@ -349,6 +434,7 @@ export function SchedulesPage() {
                         <button onClick={() => void showPreview(schedule)}>
                           Preview
                         </button>
+                        <button onClick={() => edit(schedule)}>Edit</button>
                         <button
                           onClick={() =>
                             void act(

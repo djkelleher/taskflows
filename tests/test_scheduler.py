@@ -57,7 +57,14 @@ from taskflows.scheduler.repository import (
     _pid_matches_identity,
     _process_identity,
 )
-from taskflows.scheduler.runner import cancel_run, execute_scheduled_task, run_now, submit_now
+from taskflows.scheduler.runner import (
+    _assign_windows_job,
+    _finish_process_tree,
+    cancel_run,
+    execute_scheduled_task,
+    run_now,
+    submit_now,
+)
 from taskflows.scheduler.status import (
     DiagnosticCheck,
     diagnose_scheduler,
@@ -88,6 +95,91 @@ def test_schedule_specs_are_portable_and_validated():
 
     with pytest.raises(ValueError, match="UTC offset"):
         ScheduleSpec.once("2026-08-19T10:00:00")
+
+
+def test_commands_preserve_empty_non_executable_arguments(tmp_path):
+    repository = make_repository(tmp_path)
+    output = tmp_path / "argument.txt"
+    task = repository.add(
+        ScheduledTask.create(
+            "empty-argument",
+            [
+                sys.executable,
+                "-c",
+                f"import pathlib, sys; pathlib.Path({str(output)!r}).write_text(repr(sys.argv[1]))",
+                "",
+            ],
+            ScheduleSpec.interval(60),
+        )
+    )
+
+    assert run_now(repository.database_path, task.id) == 0
+    assert output.read_text() == "''"
+
+    with pytest.raises(ValueError, match="non-empty executable"):
+        ScheduledTask.create("missing-executable", ["", "argument"], ScheduleSpec.interval(60))
+
+
+def test_short_lived_command_cannot_leave_a_descendant_running(tmp_path):
+    repository = make_repository(tmp_path)
+    escaped = tmp_path / "escaped.txt"
+    child = (
+        "import pathlib, time; time.sleep(0.8); "
+        f"pathlib.Path({str(escaped)!r}).write_text('escaped')"
+    )
+    parent = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); print('parent finished')"
+    )
+    task = repository.add(
+        ScheduledTask.create(
+            "no-escaped-descendant",
+            [sys.executable, "-c", parent],
+            ScheduleSpec.interval(60),
+        )
+    )
+
+    started = time.monotonic()
+    assert run_now(repository.database_path, task.id) == 0
+    elapsed = time.monotonic() - started
+    time.sleep(1)
+
+    assert elapsed < 5
+    assert not escaped.exists()
+
+
+def test_windows_job_object_is_assigned_before_process_resumes(monkeypatch):
+    calls: list[tuple[str, object]] = []
+    job = object()
+    information = {"BasicLimitInformation": {"LimitFlags": 0}}
+    win32api = ModuleType("win32api")
+    win32api.CloseHandle = lambda handle: calls.append(("close", handle))
+    win32job = ModuleType("win32job")
+    win32job.JobObjectExtendedLimitInformation = 9
+    win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    win32job.CreateJobObject = lambda security, name: job
+    win32job.QueryInformationJobObject = lambda handle, kind: information
+    win32job.SetInformationJobObject = lambda handle, kind, value: calls.append(
+        ("configure", handle)
+    )
+    win32job.AssignProcessToJobObject = lambda handle, process: calls.append(("assign", process))
+    win32process = ModuleType("win32process")
+    win32process.ResumeThread = lambda thread: calls.append(("resume", thread))
+    monkeypatch.setitem(sys.modules, "win32api", win32api)
+    monkeypatch.setitem(sys.modules, "win32job", win32job)
+    monkeypatch.setitem(sys.modules, "win32process", win32process)
+    process = SimpleNamespace(pid=123, _handle="process", _thread="thread")
+
+    handle = _assign_windows_job(process)
+    _finish_process_tree(process, handle)
+
+    assert information["BasicLimitInformation"]["LimitFlags"] == 0x2000
+    assert calls == [
+        ("configure", job),
+        ("assign", "process"),
+        ("resume", "thread"),
+        ("close", job),
+    ]
     with pytest.raises(ValueError, match="five fields"):
         ScheduleSpec.cron("0 9 *")
     with pytest.raises(ValueError, match="greater than zero"):
@@ -1406,6 +1498,34 @@ def test_history_retention_keeps_latest_and_removes_owned_logs(tmp_path, monkeyp
     assert paths[2].exists()
 
 
+def test_history_retention_keeps_latest_per_deleted_definition(tmp_path):
+    repository = make_repository(tmp_path)
+    definition_ids: list[str] = []
+    old = utc_now() - timedelta(days=90)
+
+    for _ in range(2):
+        task = repository.add(
+            ScheduledTask.create("recreated-name", ["echo", "ok"], ScheduleSpec.interval(60))
+        )
+        definition_ids.append(task.id)
+        for offset in range(2):
+            scheduled_for = old + timedelta(minutes=offset)
+            run_id = repository.begin_run(task, scheduled_for)
+            assert run_id is not None
+            repository.finish_run(run_id, status="succeeded", exit_code=0)
+            with repository.connect() as db:
+                db.execute(
+                    "UPDATE task_runs SET started_at=?, finished_at=? WHERE id=?",
+                    (scheduled_for.isoformat(), scheduled_for.isoformat(), run_id),
+                )
+        repository.delete(task.id)
+
+    result = repository.prune_history(before=utc_now() - timedelta(days=30), keep_latest=1)
+
+    assert result.runs_deleted == 2
+    assert [len(repository.history(definition_id)) for definition_id in definition_ids] == [1, 1]
+
+
 @pytest.mark.asyncio
 async def test_portable_schedule_api_uses_bulk_registry(tmp_path, monkeypatch):
     repository = make_repository(tmp_path)
@@ -1871,6 +1991,56 @@ async def test_schedule_patch_preserves_omitted_secret_environment(tmp_path, mon
     assert result["revision"] == 2
     assert saved.command == ("echo", "new")
     assert dict(saved.environment) == {"TOKEN": "secret", "EXTRA": "value"}
+
+
+@pytest.mark.asyncio
+async def test_schedule_patch_normalizes_interval_anchor_and_working_directory(
+    tmp_path, monkeypatch
+):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("patch-portable", ["echo", "ok"], ScheduleSpec.cron("0 9 * * *"))
+    )
+    working_directory = tmp_path / "relative-work"
+    working_directory.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("taskflows.admin.api.SchedulerRepository", lambda: repository)
+
+    await patch_portable_schedule(
+        task.id,
+        PortableSchedulePatch(
+            expected_revision=task.revision,
+            interval_seconds=120,
+            cwd="relative-work",
+        ),
+    )
+
+    saved = repository.resolve(task.id)
+    assert saved.schedule.kind == "interval"
+    assert saved.schedule.start_at is not None
+    assert saved.cwd == str(working_directory.resolve())
+
+
+@pytest.mark.asyncio
+async def test_schedule_patch_rejects_interval_only_start_for_one_off(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("patch-once", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    monkeypatch.setattr("taskflows.admin.api.SchedulerRepository", lambda: repository)
+
+    with pytest.raises(HTTPException) as error:
+        await patch_portable_schedule(
+            task.id,
+            PortableSchedulePatch(
+                expected_revision=task.revision,
+                run_at=(utc_now() + timedelta(hours=1)).isoformat(),
+                start_at=utc_now().isoformat(),
+            ),
+        )
+
+    assert error.value.status_code == 400
+    assert "start_at can only be used with an interval schedule" in error.value.detail
 
 
 @pytest.mark.asyncio

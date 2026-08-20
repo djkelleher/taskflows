@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from importlib import import_module
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -43,8 +44,11 @@ def _open_run_log(path: Path) -> Iterator[BinaryIO]:
             os.close(descriptor)
 
 
-def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
-    if process.poll() is not None:
+def _terminate_process_tree(
+    process: subprocess.Popen[Any], *, include_exited_group: bool = False
+) -> None:
+    root_exited = process.poll() is not None
+    if root_exited and not include_exited_group:
         return
     if os.name == "nt":
         # CREATE_NEW_PROCESS_GROUP does not include grandchildren when killed
@@ -65,19 +69,84 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
+    if not root_exited:
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=5)
+    # The leader can exit promptly while a descendant ignores SIGTERM.  In
+    # that case waiting on the leader alone would leave the process group and
+    # inherited output pipes alive.  A group whose leader has exited is still
+    # addressable by its original PGID.
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
+def _assign_windows_job(process: subprocess.Popen[Any]) -> Any | None:
+    """Put a suspended child in a kill-on-close Job Object, then resume it."""
+
+    job: Any | None = None
+    win32api: Any | None = None
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
-    else:
-        # The leader can exit promptly while a descendant ignores SIGTERM.
-        # In that case waiting on the leader alone would leave the rest of
-        # the process group orphaned.  A group whose leader has exited is
-        # still safe to address by its original PGID; if it no longer exists,
-        # killpg raises ProcessLookupError and there is nothing left to do.
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+        win32api = import_module("win32api")
+        win32job: Any = import_module("win32job")
+
+        job = win32job.CreateJobObject(None, "")
+        information = win32job.QueryInformationJobObject(
+            job, win32job.JobObjectExtendedLimitInformation
+        )
+        information["BasicLimitInformation"]["LimitFlags"] |= (
+            win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+        win32job.SetInformationJobObject(
+            job,
+            win32job.JobObjectExtendedLimitInformation,
+            information,
+        )
+        native_process: Any = process
+        win32job.AssignProcessToJobObject(job, native_process._handle)
+    except Exception as exc:
+        if job is not None and win32api is not None:
+            with suppress(Exception):
+                win32api.CloseHandle(job)
+            job = None
+        logger.warning(f"Could not assign scheduled process {process.pid} to a Job Object: {exc}")
+    try:
+        native_process = process
+        win32process = import_module("win32process")
+        win32process.ResumeThread(native_process._thread)
+    except Exception as exc:
+        if job is not None and win32api is not None:
+            with suppress(Exception):
+                win32api.CloseHandle(job)
+        with suppress(Exception):
+            process.kill()
+        raise RuntimeError(f"could not resume scheduled process {process.pid}: {exc}") from exc
+    return job
+
+
+def _finish_process_tree(process: subprocess.Popen[Any], windows_job: Any | None) -> None:
+    """Remove descendants after the command leader exits and release job state."""
+
+    if windows_job is not None:
+        win32api: Any = import_module("win32api")
+
+        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates descendants even when
+        # the root process has already exited and TaskKill can no longer walk it.
+        win32api.CloseHandle(windows_job)
+        return
+    _terminate_process_tree(process, include_exited_group=True)
+
+
+def _join_capture_threads(
+    capture_threads: list[threading.Thread], errors: list[str], timeout: float = 10.0
+) -> None:
+    """Wait a bounded total time for both output drains."""
+
+    deadline = time.monotonic() + timeout
+    for capture_thread in capture_threads:
+        capture_thread.join(max(deadline - time.monotonic(), 0))
+    stuck = [capture_thread.name for capture_thread in capture_threads if capture_thread.is_alive()]
+    if stuck:
+        errors.append(f"output capture did not stop: {', '.join(stuck)}")
 
 
 def terminate_active_runs() -> None:
@@ -227,6 +296,7 @@ def execute_scheduled_task(
     stdout_path = log_dir / f"{run_id}.stdout.log"
     stderr_path = log_dir / f"{run_id}.stderr.log"
     process: subprocess.Popen[Any] | None = None
+    windows_job: Any | None = None
 
     try:
         # Claim one-time schedules before starting so the reconcile loop cannot
@@ -260,7 +330,7 @@ def execute_scheduled_task(
         if os.name == "nt":
             popen_kwargs["creationflags"] = getattr(
                 subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
-            )
+            ) | getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
         else:
             popen_kwargs["start_new_session"] = True
 
@@ -268,6 +338,8 @@ def execute_scheduled_task(
             process = subprocess.Popen(
                 list(task.command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, **popen_kwargs
             )
+            if os.name == "nt":
+                windows_job = _assign_windows_job(process)
             assert process.stdout is not None and process.stderr is not None
             capture_errors: list[str] = []
             capture_threads = [
@@ -275,11 +347,13 @@ def execute_scheduled_task(
                     target=_copy_bounded,
                     args=(process.stdout, stdout, MAX_RUN_LOG_BYTES, capture_errors),
                     name=f"taskflows-stdout-{run_id}",
+                    daemon=True,
                 ),
                 threading.Thread(
                     target=_copy_bounded,
                     args=(process.stderr, stderr, MAX_RUN_LOG_BYTES, capture_errors),
                     name=f"taskflows-stderr-{run_id}",
+                    daemon=True,
                 ),
             ]
             for capture_thread in capture_threads:
@@ -290,8 +364,9 @@ def execute_scheduled_task(
             if not registered and repository.cancellation_requested(run_id):
                 _terminate_process_tree(process)
                 exit_code = process.wait(timeout=10)
-                for capture_thread in capture_threads:
-                    capture_thread.join(timeout=10)
+                _finish_process_tree(process, windows_job)
+                windows_job = None
+                _join_capture_threads(capture_threads, capture_errors)
                 repository.finish_run(
                     run_id,
                     status="cancelled",
@@ -317,8 +392,9 @@ def execute_scheduled_task(
                     # command did not reap the root process.
                     process.kill()
                     exit_code = process.wait(timeout=10)
-                for capture_thread in capture_threads:
-                    capture_thread.join(timeout=10)
+                _finish_process_tree(process, windows_job)
+                windows_job = None
+                _join_capture_threads(capture_threads, capture_errors)
                 repository.finish_run(
                     run_id,
                     status="timed_out",
@@ -334,8 +410,12 @@ def execute_scheduled_task(
                 )
                 return exit_code
 
-            for capture_thread in capture_threads:
-                capture_thread.join(timeout=10)
+            # A scheduled command owns its complete process tree. If its root
+            # exits after spawning a background descendant, terminate that
+            # descendant before waiting for inherited output pipes to close.
+            _finish_process_tree(process, windows_job)
+            windows_job = None
+            _join_capture_threads(capture_threads, capture_errors)
 
         status = "succeeded" if exit_code == 0 else "failed"
         capture_error = (
@@ -380,6 +460,9 @@ def execute_scheduled_task(
         logger.exception(f"Scheduled task {task.name} failed to launch: {exc}")
         return failure_exit_code
     finally:
+        if windows_job is not None and process is not None:
+            with suppress(Exception):
+                _finish_process_tree(process, windows_job)
         with _active_lock:
             _active_processes.pop(run_id, None)
 

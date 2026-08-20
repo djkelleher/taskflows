@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { login, logout, getServices } from "../client";
+import { getServices, login, logout, updateSchedule } from "../client";
 import { useAuthStore } from "@/stores/authStore";
 import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
@@ -31,17 +31,19 @@ describe("API Client", () => {
       server.use(
         http.post("/auth/login", () => {
           return HttpResponse.text("Invalid credentials", { status: 401 });
-        })
+        }),
       );
 
-      await expect(login("invalid", "invalid")).rejects.toThrow("Invalid credentials");
+      await expect(login("invalid", "invalid")).rejects.toThrow(
+        "Invalid credentials",
+      );
     });
 
     it("should throw error when response is not ok", async () => {
       server.use(
         http.post("/auth/login", () => {
           return HttpResponse.text("Server error", { status: 500 });
-        })
+        }),
       );
 
       await expect(login("admin", "password")).rejects.toThrow();
@@ -51,7 +53,7 @@ describe("API Client", () => {
       server.use(
         http.post("/auth/login", () => {
           return HttpResponse.error();
-        })
+        }),
       );
 
       await expect(login("admin", "password")).rejects.toThrow();
@@ -82,7 +84,7 @@ describe("API Client", () => {
       server.use(
         http.post("/auth/logout", () => {
           return HttpResponse.text("Server error", { status: 500 });
-        })
+        }),
       );
 
       // Should not throw
@@ -131,7 +133,7 @@ describe("API Client", () => {
           return HttpResponse.json({
             services: [{ name: "service1", status: "running" }],
           });
-        })
+        }),
       );
 
       const result = await getServices();
@@ -150,7 +152,7 @@ describe("API Client", () => {
         }),
         http.post("/auth/refresh", () => {
           return HttpResponse.json({}, { status: 401 });
-        })
+        }),
       );
 
       await expect(getServices()).rejects.toThrow("Unauthorized");
@@ -160,7 +162,7 @@ describe("API Client", () => {
       server.use(
         http.get("/api/services", () => {
           return HttpResponse.text("Server error", { status: 500 });
-        })
+        }),
       );
 
       await expect(getServices()).rejects.toThrow("Failed to fetch services");
@@ -173,13 +175,42 @@ describe("API Client", () => {
         http.get("/api/services", ({ request }) => {
           receivedHeaders = request.headers;
           return HttpResponse.json({ services: [] });
-        })
+        }),
       );
 
       await getServices();
 
       expect(receivedHeaders).not.toBeNull();
       expect(receivedHeaders!.get("Authorization")).toBe("Bearer valid-token");
+    });
+  });
+
+  describe("portable schedules", () => {
+    it("patches a definition with its revision precondition", async () => {
+      useAuthStore.getState().login("valid-token", "valid-refresh");
+      let receivedBody: unknown;
+      server.use(
+        http.patch("/api/schedules/:id", async ({ params, request }) => {
+          expect(params.id).toBe("schedule/id");
+          receivedBody = await request.json();
+          return HttpResponse.json({ id: params.id, name: "renamed" });
+        }),
+      );
+
+      const result = await updateSchedule("schedule/id", {
+        expected_revision: 4,
+        name: "renamed",
+        interval_seconds: 120,
+        start_at: "2026-08-19T10:00:00Z",
+      });
+
+      expect(result.name).toBe("renamed");
+      expect(receivedBody).toEqual({
+        expected_revision: 4,
+        name: "renamed",
+        interval_seconds: 120,
+        start_at: "2026-08-19T10:00:00Z",
+      });
     });
   });
 
@@ -198,7 +229,7 @@ describe("API Client", () => {
             return HttpResponse.json({}, { status: 401 });
           }
           return HttpResponse.json({ services: [] });
-        })
+        }),
       );
 
       // This should trigger refresh and retry
@@ -220,8 +251,11 @@ describe("API Client", () => {
           return HttpResponse.json({}, { status: 401 });
         }),
         http.post("/auth/refresh", () => {
-          return HttpResponse.json({ error: "Invalid refresh token" }, { status: 401 });
-        })
+          return HttpResponse.json(
+            { error: "Invalid refresh token" },
+            { status: 401 },
+          );
+        }),
       );
 
       await expect(getServices()).rejects.toThrow();
@@ -237,7 +271,7 @@ describe("API Client", () => {
       server.use(
         http.get("/api/services", () => {
           return HttpResponse.error();
-        })
+        }),
       );
 
       await expect(getServices()).rejects.toThrow();
@@ -247,7 +281,7 @@ describe("API Client", () => {
       server.use(
         http.get("/api/services", () => {
           return HttpResponse.text("Not JSON");
-        })
+        }),
       );
 
       await expect(getServices()).rejects.toThrow();

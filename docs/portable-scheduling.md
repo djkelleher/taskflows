@@ -54,6 +54,9 @@ slot transactionally, and starts the command without a shell. Taskflows:
   environment, preventing `PATH`/`Path` aliases from behaving differently on
   Windows and POSIX;
 - uses a dedicated process group and terminates the process tree on timeout;
+- treats the complete process tree as the short-lived task: POSIX descendants
+  are removed when the root exits, while Windows assigns the suspended root to
+  a kill-on-close Job Object before allowing it to run;
 - captures stdout and stderr in owner-only run directories;
 - defaults to a one-hour execution timeout (`--no-timeout` is an explicit
   escape hatch) and caps each stdout/stderr capture at 10 MiB;
@@ -169,8 +172,11 @@ available at `/api/schedule-runs/{run_id}` and its `/logs` and `/cancel`
 subresources. `PATCH /api/schedules/{id}` preserves omitted fields, including
 secret environment values; `environment` upserts selected secrets and
 `remove_environment` deletes them explicitly. The web UI exposes scheduler
-health/repair, creation, preview, run/retry, enable/disable, history, logs and
-cancellation on the **Schedules** page.
+health/repair, creation and revision-safe editing, preview, run/retry,
+enable/disable, history, logs and cancellation on the **Schedules** page.
+Switching a definition to an interval without an explicit `start_at` persists
+one immediately, and updated working directories use the same absolute-path
+normalization as newly created definitions.
 
 `tf schedule preview` and `GET /api/schedules/{id-or-name}/preview` calculate
 upcoming occurrences with the exact APScheduler trigger used by the daemon.

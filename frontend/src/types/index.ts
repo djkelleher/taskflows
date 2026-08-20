@@ -31,6 +31,7 @@ export type {
 } from "./auth";
 export type {
   CreateScheduleRequest,
+  UpdateScheduleRequest,
   PortableSchedule,
   SchedulerState,
   SchedulerStatus,
