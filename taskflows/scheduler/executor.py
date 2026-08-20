@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import traceback
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,7 @@ from apscheduler.events import (
 )
 from apscheduler.executors.pool import ThreadPoolExecutor
 
+from .models import MAX_CATCH_UP_OCCURRENCES
 from .repository import QueuedOccurrence, SchedulerRepository
 from .runner import execute_scheduled_task
 
@@ -90,15 +92,64 @@ def _run_recovered(database_path: str, occurrences: list[QueuedOccurrence]) -> N
 class DurableThreadPoolExecutor(ThreadPoolExecutor):
     """Thread pool that persists scheduled occurrences before dispatch."""
 
-    def __init__(self, database_path: str, max_workers: int = 10) -> None:
+    def __init__(
+        self,
+        database_path: str,
+        max_workers: int = 10,
+        *,
+        max_pending_jobs: int | None = None,
+    ) -> None:
         super().__init__(max_workers=max_workers)
         self.database_path = database_path
+        self.max_pending_jobs = max_pending_jobs or max_workers * 2
+        self._pending: set[Any] = set()
+        self._pending_lock = threading.RLock()
+        self._stopping = False
+
+    @property
+    def pending_count(self) -> int:
+        with self._pending_lock:
+            return len(self._pending)
+
+    def _has_capacity(self) -> bool:
+        with self._pending_lock:
+            return not self._stopping and len(self._pending) < self.max_pending_jobs
+
+    def _track(self, future: Any) -> None:
+        with self._pending_lock:
+            self._pending.add(future)
+
+        def forget(completed: Any) -> None:
+            with self._pending_lock:
+                self._pending.discard(completed)
+
+        future.add_done_callback(forget)
+
+    def begin_shutdown(self) -> None:
+        """Reject new work and cancel futures that have not launched yet."""
+
+        with self._pending_lock:
+            self._stopping = True
+        # APScheduler will call shutdown again; concurrent.futures explicitly
+        # permits repeated shutdown calls. Cancellation callbacks release the
+        # durable rows so the next daemon can recover them.
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _do_submit_job(self, job: Any, run_times: list[datetime]) -> None:
         repository = SchedulerRepository(self.database_path)
         task_id = str(job.kwargs["task_id"])
         revision = int(job.kwargs["revision"])
         task = repository.get(task_id)
+        if len(run_times) > MAX_CATCH_UP_OCCURRENCES:
+            dropped = run_times[:-MAX_CATCH_UP_OCCURRENCES]
+            run_times = run_times[-MAX_CATCH_UP_OCCURRENCES:]
+            if task is not None and task.revision == revision:
+                for run_time in dropped:
+                    repository.record_missed(
+                        task,
+                        run_time,
+                        f"catch-up backlog exceeded {MAX_CATCH_UP_OCCURRENCES} occurrences",
+                    )
         executable_times: list[datetime] = []
         missed_events: list[JobExecutionEvent] = []
         now = datetime.now(UTC)
@@ -119,11 +170,31 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
             else:
                 executable_times.append(run_time)
 
+        if executable_times and not self._has_capacity():
+            if task is not None and task.revision == revision:
+                for run_time in executable_times:
+                    repository.record_missed(task, run_time, "scheduler worker queue is full")
+            self._run_job_success(job.id, missed_events)
+            return
+
         occurrences = (
             repository.reserve_occurrences(task, executable_times)
             if task is not None and task.revision == revision
             else []
         )
+        reserved_times = {occurrence.scheduled_for for occurrence in occurrences}
+        if task is not None and task.revision == revision:
+            for run_time in executable_times:
+                if run_time not in reserved_times:
+                    repository.record_missed(task, run_time, "scheduler occurrence queue is full")
+                    missed_events.append(
+                        JobExecutionEvent(
+                            EVENT_JOB_MISSED,
+                            job.id,
+                            job._jobstore_alias,
+                            run_time,
+                        )
+                    )
 
         def callback(future: Any) -> None:
             try:
@@ -152,6 +223,7 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
         except BaseException:
             repository.release_queued_owners([occurrence.run_id for occurrence in occurrences])
             raise
+        self._track(future)
         future.add_done_callback(callback)
 
     def submit_recovered(self, occurrences: list[QueuedOccurrence]) -> None:
@@ -161,11 +233,19 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
             grouped[occurrence.task_id].append(occurrence)
         for task_occurrences in grouped.values():
             run_ids = [occurrence.run_id for occurrence in task_occurrences]
-            future = self._pool.submit(
-                _run_recovered,
-                self.database_path,
-                task_occurrences,
-            )
+            if not self._has_capacity():
+                SchedulerRepository(self.database_path).release_queued_owners(run_ids)
+                continue
+            try:
+                future = self._pool.submit(
+                    _run_recovered,
+                    self.database_path,
+                    task_occurrences,
+                )
+            except RuntimeError:
+                SchedulerRepository(self.database_path).release_queued_owners(run_ids)
+                continue
+            self._track(future)
 
             def log_failure(completed: Any, occurrence_ids: list[str] = run_ids) -> None:
                 try:

@@ -12,23 +12,65 @@ import os
 import shutil
 import socket
 import sqlite3
+import threading
 import time
+from collections.abc import Callable
+from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
-from .models import ScheduledTask, merge_environment, parse_datetime
+from .installer import current_operation_timeout, operation_timeout
+from .models import MAX_QUEUED_OCCURRENCES, ScheduledTask, merge_environment, parse_datetime
 from .repository import SchedulerRepository, _pid_matches_identity
 from .supervisor import SchedulerSupervisor, SupervisorStatus, get_supervisor
 
 DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 5.0
 OverallSchedulerState = Literal[
-    "running", "starting", "stopped", "failed", "unresponsive", "not-installed", "unknown"
+    "running",
+    "degraded",
+    "unmanaged",
+    "starting",
+    "stopped",
+    "failed",
+    "unresponsive",
+    "not-installed",
+    "unknown",
 ]
 CheckLevel = Literal["ok", "warning", "error"]
 WaitTarget = Literal["running", "stopped", "not-installed"]
 SchedulerOperation = Literal["ensure", "install", "uninstall", "start", "stop", "restart"]
+_T = TypeVar("_T")
+
+
+def _bounded_native_call(operation: Callable[[], _T], timeout: float | None = None) -> _T:
+    """Bound native calls, including Windows COM calls that lack timeouts."""
+
+    result: list[_T] = []
+    errors: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            result.append(operation())
+        except BaseException as exc:
+            errors.append(exc)
+
+    limit = timeout if timeout is not None else current_operation_timeout()
+    context = copy_context()
+    thread = threading.Thread(
+        target=context.run,
+        args=(invoke,),
+        name="taskflows-native-operation",
+        daemon=True,
+    )
+    thread.start()
+    thread.join(limit)
+    if thread.is_alive():
+        raise TimeoutError(f"native scheduler operation did not finish within {limit:g}s")
+    if errors:
+        raise errors[0]
+    return result[0]
 
 
 @dataclass(frozen=True)
@@ -57,6 +99,7 @@ class SchedulerStatus:
     enabled_task_count: int
     queued_occurrence_count: int
     running_run_count: int
+    queue_capacity: int = MAX_QUEUED_OCCURRENCES
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -126,12 +169,17 @@ def scheduler_status(
     """Return the common scheduler status used by all platform-facing clients."""
 
     repository = repository or SchedulerRepository()
-    native = (supervisor or get_supervisor()).status()
+    native = _bounded_native_call((supervisor or get_supervisor()).status)
     runtime = runtime_status(repository, heartbeat_timeout=heartbeat_timeout)
     tasks = repository.list()
     active_runs = repository.active_run_counts()
-    if runtime.healthy:
-        state: OverallSchedulerState = "running"
+    if runtime.healthy and native.state == "running":
+        if native.automatic is True and native.registration_valid is True:
+            state: OverallSchedulerState = "running"
+        else:
+            state = "degraded"
+    elif runtime.healthy:
+        state = "unmanaged"
     elif native.state in {"not-installed", "starting", "failed", "unknown"}:
         state = native.state
     elif native.state == "running":
@@ -147,6 +195,7 @@ def scheduler_status(
         enabled_task_count=sum(task.enabled for task in tasks),
         queued_occurrence_count=active_runs["queued"],
         running_run_count=active_runs["running"],
+        queue_capacity=MAX_QUEUED_OCCURRENCES,
     )
 
 
@@ -233,7 +282,9 @@ def operate_scheduler(
     supervisor = supervisor or get_supervisor()
     if operation not in {"ensure", "install", "uninstall", "start", "stop", "restart"}:
         raise ValueError(f"unsupported scheduler operation: {operation}")
-    before = scheduler_status(repository, supervisor)
+    started = time.monotonic()
+    with operation_timeout(timeout):
+        before = scheduler_status(repository, supervisor)
     require_new_runtime = (
         operation in {"install", "restart"} and before.runtime.heartbeat_at is not None
     )
@@ -249,32 +300,39 @@ def operate_scheduler(
         ready = (
             current.runtime.healthy
             and current.supervisor.state == "running"
-            and current.supervisor.automatic is not False
+            and current.supervisor.automatic is True
+            and current.supervisor.registration_valid is True
         )
         if ready:
             return current
         if (
             not current.supervisor.installed
-            or current.supervisor.automatic is False
+            or current.supervisor.automatic is not True
+            or current.supervisor.registration_valid is not True
             or current.supervisor.state == "unknown"
         ):
-            supervisor.install()
+            with operation_timeout(max(timeout - (time.monotonic() - started), 0.001)):
+                _bounded_native_call(supervisor.install)
             require_new_runtime = current.runtime.heartbeat_at is not None
         elif current.supervisor.state in {"running", "starting"}:
             # The native manager claims ownership but no healthy heartbeat was
             # observed. Restart instead of issuing a start that may be a no-op.
-            supervisor.restart()
+            with operation_timeout(max(timeout - (time.monotonic() - started), 0.001)):
+                _bounded_native_call(supervisor.restart)
             require_new_runtime = current.runtime.heartbeat_at is not None
         else:
-            supervisor.start()
+            with operation_timeout(max(timeout - (time.monotonic() - started), 0.001)):
+                _bounded_native_call(supervisor.start)
     else:
         try:
             action = operations[operation]
         except KeyError as exc:
             raise ValueError(f"unsupported scheduler operation: {operation}") from exc
-        action()
+        with operation_timeout(max(timeout - (time.monotonic() - started), 0.001)):
+            _bounded_native_call(action)
     if not wait:
-        return scheduler_status(repository, supervisor)
+        with operation_timeout(max(timeout - (time.monotonic() - started), 0.001)):
+            return scheduler_status(repository, supervisor)
     target: WaitTarget = (
         "not-installed"
         if operation == "uninstall"
@@ -282,13 +340,15 @@ def operate_scheduler(
         if operation == "stop"
         else "running"
     )
-    return wait_for_scheduler(
-        target,
-        repository,
-        supervisor,
-        timeout=timeout,
-        previous_runtime=before.runtime if require_new_runtime else None,
-    )
+    remaining = max(timeout - (time.monotonic() - started), 0.001)
+    with operation_timeout(remaining):
+        return wait_for_scheduler(
+            target,
+            repository,
+            supervisor,
+            timeout=remaining,
+            previous_runtime=before.runtime if require_new_runtime else None,
+        )
 
 
 def diagnose_scheduler(
@@ -307,6 +367,33 @@ def diagnose_scheduler(
                 "supervisor-registration",
                 "ok",
                 f"registered with {status.supervisor.backend}",
+            )
+        )
+
+    if status.supervisor.registration_valid is False:
+        checks.append(
+            DiagnosticCheck(
+                "supervisor-definition",
+                "error",
+                "native registration does not match this interpreter and scheduler registry",
+                "run 'tf scheduler ensure' to repair the registration",
+            )
+        )
+    elif status.supervisor.registration_valid is True:
+        checks.append(
+            DiagnosticCheck(
+                "supervisor-definition",
+                "ok",
+                "native registration matches the current Taskflows installation",
+            )
+        )
+    elif status.supervisor.installed:
+        checks.append(
+            DiagnosticCheck(
+                "supervisor-definition",
+                "warning",
+                "native registration could not be validated",
+                "run 'tf scheduler ensure' to refresh it",
             )
         )
     else:
@@ -334,6 +421,15 @@ def diagnose_scheduler(
                 "automatic-start",
                 "ok",
                 "native registration is enabled for future login/boot starts",
+            )
+        )
+    elif status.supervisor.installed:
+        checks.append(
+            DiagnosticCheck(
+                "automatic-start",
+                "warning",
+                "automatic login/boot start could not be confirmed",
+                "run 'tf scheduler ensure' to repair the registration",
             )
         )
 
@@ -465,6 +561,23 @@ def diagnose_scheduler(
                 None
                 if status.state == "running"
                 else "start the scheduler; queued occurrences will be recovered automatically",
+            )
+        )
+    if status.queued_occurrence_count >= status.queue_capacity * 0.8:
+        checks.append(
+            DiagnosticCheck(
+                "queue-capacity",
+                "error" if status.queued_occurrence_count >= status.queue_capacity else "warning",
+                f"scheduler queue is {status.queued_occurrence_count}/{status.queue_capacity} full",
+                "reduce catch-up volume, increase intervals, or resolve blocked workers",
+            )
+        )
+    else:
+        checks.append(
+            DiagnosticCheck(
+                "queue-capacity",
+                "ok",
+                f"scheduler queue is {status.queued_occurrence_count}/{status.queue_capacity} full",
             )
         )
     return status, checks

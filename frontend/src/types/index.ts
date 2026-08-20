@@ -23,4 +23,16 @@ export type {
   NamedEnvironment,
   EnvironmentsResponse,
 } from "./environment";
-export type { LoginRequest, LoginResponse, RefreshRequest, RefreshResponse } from "./auth";
+export type {
+  LoginRequest,
+  LoginResponse,
+  RefreshRequest,
+  RefreshResponse,
+} from "./auth";
+export type {
+  CreateScheduleRequest,
+  PortableSchedule,
+  SchedulerState,
+  SchedulerStatus,
+  ScheduleRun,
+} from "./scheduler";

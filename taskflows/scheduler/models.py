@@ -12,6 +12,27 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 ScheduleKind = Literal["date", "interval", "cron"]
+RunState = Literal[
+    "queued",
+    "starting",
+    "running",
+    "succeeded",
+    "failed",
+    "timed_out",
+    "cancelled",
+    "skipped",
+    "missed",
+    "interrupted",
+]
+
+# Portable jobs are deliberately bounded. Callers that truly need an unbounded
+# process should use ``Service`` rather than silently turning the scheduler into
+# a second service manager.
+DEFAULT_TASK_TIMEOUT_SECONDS = 60 * 60
+MIN_INTERVAL_SECONDS = 1.0
+MAX_CATCH_UP_OCCURRENCES = 1_000
+MAX_QUEUED_OCCURRENCES = 10_000
+MAX_RUN_LOG_BYTES = 10 * 1024 * 1024
 
 
 def utc_now() -> datetime:
@@ -70,8 +91,15 @@ class ScheduleSpec:
                 raise ValueError(
                     "interval must be a finite number greater than zero seconds"
                 ) from exc
-            if isinstance(self.value, bool) or not math.isfinite(interval) or interval <= 0:
-                raise ValueError("interval must be a finite number greater than zero seconds")
+            if (
+                isinstance(self.value, bool)
+                or not math.isfinite(interval)
+                or interval < MIN_INTERVAL_SECONDS
+            ):
+                raise ValueError(
+                    "interval must be greater than zero and at least "
+                    f"{MIN_INTERVAL_SECONDS:g} second"
+                )
             if self.start_at is not None:
                 parse_datetime(self.start_at)
         elif self.kind == "cron":
@@ -84,8 +112,8 @@ class ScheduleSpec:
             raise ValueError(f"unsupported schedule kind: {self.kind}")
 
     @classmethod
-    def once(cls, run_at: str | datetime) -> ScheduleSpec:
-        return cls("date", parse_datetime(run_at).isoformat())
+    def once(cls, run_at: str | datetime, *, timezone: str = "UTC") -> ScheduleSpec:
+        return cls("date", parse_datetime(run_at).isoformat(), timezone=timezone)
 
     @classmethod
     def interval(
@@ -217,7 +245,7 @@ class ScheduledTask:
     command: tuple[str, ...]
     schedule: ScheduleSpec
     enabled: bool = True
-    timeout: float | None = None
+    timeout: float | None = DEFAULT_TASK_TIMEOUT_SECONDS
     cwd: str | None = None
     environment: Mapping[str, str] = field(default_factory=dict)
     misfire_grace_time: int | None = 3600
@@ -350,3 +378,59 @@ class ScheduledTask:
             "updated_at": self.updated_at.isoformat(),
             "next_run_at": self.next_run_at.isoformat() if self.next_run_at else None,
         }
+
+
+@dataclass(frozen=True)
+class RunHandle:
+    """Stable result of accepting one manual or scheduled execution request."""
+
+    id: str
+    task_id: str | None
+    task_name: str
+    task_revision: int | None
+    scheduled_for: str | None
+    status: RunState
+    started_at: str | None = None
+    finished_at: str | None = None
+    exit_code: int | None = None
+    error: str | None = None
+    stdout_path: str | None = None
+    stderr_path: str | None = None
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> RunHandle:
+        return cls(
+            id=str(row["id"]),
+            task_id=row.get("task_id"),
+            task_name=str(row["task_name"]),
+            task_revision=row.get("task_revision"),
+            scheduled_for=row.get("scheduled_for"),
+            status=row["status"],
+            started_at=row.get("started_at"),
+            finished_at=row.get("finished_at"),
+            exit_code=row.get("exit_code"),
+            error=row.get("error"),
+            stdout_path=row.get("stdout_path"),
+            stderr_path=row.get("stderr_path"),
+        )
+
+    @property
+    def terminal(self) -> bool:
+        return self.status not in {"queued", "starting", "running"}
+
+    def to_dict(self, *, include_log_paths: bool = False) -> dict[str, Any]:
+        result = {
+            "id": self.id,
+            "task_id": self.task_id,
+            "task_name": self.task_name,
+            "task_revision": self.task_revision,
+            "scheduled_for": self.scheduled_for,
+            "status": self.status,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "exit_code": self.exit_code,
+            "error": self.error,
+        }
+        if include_log_paths:
+            result.update(stdout_path=self.stdout_path, stderr_path=self.stderr_path)
+        return result

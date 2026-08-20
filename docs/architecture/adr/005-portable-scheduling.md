@@ -31,6 +31,11 @@ privileged, resource-controlled, or dependency-aware processes.
 - Durable run history and portable stdout/stderr locations.
 - Commands are data; APScheduler serializes only stable IDs.
 - One idempotent ensure operation hides native install/repair/start differences.
+- Bounded workers, catch-up, durable queue, output, retention, and default
+  execution time prevent short-lived scheduling from becoming unbounded process
+  supervision.
+- One status model reports native registration validity, automatic start,
+  runtime ownership, queue capacity, and actionable degraded/unmanaged states.
 
 ### Negative
 

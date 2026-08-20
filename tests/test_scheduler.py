@@ -19,7 +19,7 @@ from apscheduler.events import (
     EVENT_JOB_SUBMITTED,
 )
 from click.testing import CliRunner
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 from taskflows.admin.api import (
     create_portable_schedule,
@@ -28,6 +28,7 @@ from taskflows.admin.api import (
     list_portable_schedules,
     list_servers_endpoint,
     operate_portable_scheduler,
+    patch_portable_schedule,
     portable_schedule_history,
     portable_scheduler_diagnostics,
     portable_scheduler_status,
@@ -36,7 +37,7 @@ from taskflows.admin.api import (
     set_portable_schedule_enabled,
 )
 from taskflows.admin.cli import cli
-from taskflows.admin.models import PortableScheduleRequest
+from taskflows.admin.models import PortableSchedulePatch, PortableScheduleRequest
 from taskflows.exceptions import RevisionConflict
 from taskflows.schedule import Calendar
 from taskflows.scheduler import installer, supervisor
@@ -56,7 +57,7 @@ from taskflows.scheduler.repository import (
     _pid_matches_identity,
     _process_identity,
 )
-from taskflows.scheduler.runner import execute_scheduled_task, run_now
+from taskflows.scheduler.runner import cancel_run, execute_scheduled_task, run_now, submit_now
 from taskflows.scheduler.status import (
     DiagnosticCheck,
     diagnose_scheduler,
@@ -487,7 +488,10 @@ def test_daemon_recovers_queued_occurrence_from_dead_owner(tmp_path):
     daemon.start()
     try:
         deadline = time.monotonic() + 5
-        while not marker.exists() and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            runs = repository.history(task.id)
+            if runs and runs[0]["status"] == "succeeded":
+                break
             time.sleep(0.05)
     finally:
         daemon.shutdown()
@@ -1668,6 +1672,229 @@ def test_windows_supervisor_reports_trigger_autostart_and_last_failure(monkeypat
     assert status.automatic is False
     assert status.last_exit_code == 7
     assert status.state == "failed"
+
+
+def test_windows_supervisor_rejects_enabled_task_without_logon_trigger(monkeypatch):
+    triggers = SimpleNamespace(Count=0, Item=lambda index: None)
+    task = SimpleNamespace(
+        State=3,
+        Enabled=True,
+        LastTaskResult=0,
+        Definition=SimpleNamespace(
+            Triggers=triggers,
+            RegistrationInfo=SimpleNamespace(Source=installer.definition_fingerprint()),
+        ),
+    )
+    monkeypatch.setattr(supervisor, "_windows_registered_task", lambda: task)
+
+    status = supervisor.WindowsTaskSupervisor().status()
+
+    assert status.automatic is False
+    assert status.registration_valid is True
+
+
+def test_sqlalchemy_job_store_preserves_special_database_path(tmp_path):
+    database = tmp_path / "registry# name.sqlite3"
+    daemon = SchedulerDaemon(database)
+
+    assert Path(daemon.scheduler._jobstores["default"].engine.url.database) == database.resolve()
+
+
+def test_manual_run_never_executes_a_replacement_revision(tmp_path):
+    repository = make_repository(tmp_path)
+    old_marker = tmp_path / "old"
+    new_marker = tmp_path / "new"
+    original = repository.add(
+        ScheduledTask.create(
+            "revision-race",
+            [sys.executable, "-c", f"from pathlib import Path; Path({str(old_marker)!r}).touch()"],
+            ScheduleSpec.interval(60),
+        )
+    )
+    replacement = repository.add(
+        ScheduledTask.create(
+            "revision-race",
+            [sys.executable, "-c", f"from pathlib import Path; Path({str(new_marker)!r}).touch()"],
+            ScheduleSpec.interval(60),
+        ),
+        replace_existing=True,
+        expected_revision=original.revision,
+    )
+
+    result = execute_scheduled_task(
+        str(repository.database_path),
+        replacement.id,
+        original.revision,
+        allow_disabled=True,
+    )
+
+    assert result is None
+    assert not old_marker.exists()
+    assert not new_marker.exists()
+
+
+def test_deleted_task_history_remains_queryable_by_definition_id(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "deleted-history", [sys.executable, "-c", "pass"], ScheduleSpec.interval(60)
+        )
+    )
+    assert run_now(repository.database_path, task.id) == 0
+    repository.delete(task.id)
+
+    assert repository.history(task.id)[0]["task_name"] == "deleted-history"
+
+
+def test_manual_run_handle_can_be_cancelled(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "cancel-me",
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            ScheduleSpec.interval(60),
+        )
+    )
+    handle = submit_now(repository.database_path, task.id)
+    deadline = time.monotonic() + 5
+    while repository.get_run(handle.id).status != "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    cancel_run(repository.database_path, handle.id)
+    deadline = time.monotonic() + 5
+    while not repository.get_run(handle.id).terminal and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert repository.get_run(handle.id).status == "cancelled"
+
+
+def test_run_output_capture_is_bounded(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "bounded-output",
+            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 10000)"],
+            ScheduleSpec.interval(60),
+        )
+    )
+    monkeypatch.setattr("taskflows.scheduler.runner.MAX_RUN_LOG_BYTES", 128)
+
+    assert run_now(repository.database_path, task.id) == 0
+
+    path = Path(repository.history(task.id)[0]["stdout_path"])
+    content = path.read_text()
+    assert content.startswith("x" * 128)
+    assert "output truncated after 128 bytes" in content
+    assert path.stat().st_size < 256
+
+
+def test_healthy_foreground_daemon_is_reported_as_unmanaged(tmp_path):
+    repository = make_repository(tmp_path)
+    repository.heartbeat(pid=os.getpid(), hostname=socket.gethostname(), started_at=utc_now())
+    native = SupervisorStatus(
+        backend="systemd",
+        installed=True,
+        state="stopped",
+        automatic=True,
+        registration_valid=True,
+    )
+
+    assert scheduler_status(repository, SimpleNamespace(status=lambda: native)).state == "unmanaged"
+
+
+def test_daemon_shutdown_cancels_pending_commands_before_terminating_workers(tmp_path):
+    repository = make_repository(tmp_path)
+    first_started = tmp_path / "first-started"
+    second_started = tmp_path / "second-started"
+    first_at = utc_now() + timedelta(milliseconds=150)
+    second_at = utc_now() + timedelta(milliseconds=250)
+    repository.add(
+        ScheduledTask.create(
+            "shutdown-first",
+            [
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; import time; Path({str(first_started)!r}).touch(); time.sleep(30)",
+            ],
+            ScheduleSpec.once(first_at),
+        )
+    )
+    repository.add(
+        ScheduledTask.create(
+            "shutdown-second",
+            [
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; Path({str(second_started)!r}).touch()",
+            ],
+            ScheduleSpec.once(second_at),
+        )
+    )
+    daemon = SchedulerDaemon(repository.database_path, max_workers=1)
+    daemon.start()
+    deadline = time.monotonic() + 5
+    while not first_started.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert first_started.exists()
+    time.sleep(0.3)  # let APScheduler place the second command in the pending pool queue
+
+    daemon.shutdown()
+    time.sleep(0.1)
+
+    assert not second_started.exists()
+
+
+@pytest.mark.asyncio
+async def test_schedule_patch_preserves_omitted_secret_environment(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "patch-secrets",
+            ["echo", "old"],
+            ScheduleSpec.interval(60),
+            environment={"TOKEN": "secret", "REMOVE_ME": "old"},
+        )
+    )
+    monkeypatch.setattr("taskflows.admin.api.SchedulerRepository", lambda: repository)
+
+    result = await patch_portable_schedule(
+        task.id,
+        PortableSchedulePatch(
+            expected_revision=task.revision,
+            command=["echo", "new"],
+            environment={"EXTRA": "value"},
+            remove_environment=["remove_me"],
+        ),
+    )
+
+    saved = repository.resolve(task.id)
+    assert result["revision"] == 2
+    assert saved.command == ("echo", "new")
+    assert dict(saved.environment) == {"TOKEN": "secret", "EXTRA": "value"}
+
+
+@pytest.mark.asyncio
+async def test_schedule_api_accepts_manual_run_asynchronously(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create(
+            "async-api-run",
+            [sys.executable, "-c", "pass"],
+            ScheduleSpec.interval(60),
+        )
+    )
+    monkeypatch.setattr("taskflows.admin.api.SchedulerRepository", lambda: repository)
+    response = Response()
+
+    result = await run_portable_schedule(task.id, response, wait=False, timeout=1)
+
+    assert response.status_code == 202
+    assert result["id"]
+    assert result["task_revision"] == task.revision
+    deadline = time.monotonic() + 5
+    while not repository.get_run(result["id"]).terminal and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert repository.get_run(result["id"]).status == "succeeded"
 
 
 def test_launchd_restart_bootstraps_an_unloaded_agent(tmp_path, monkeypatch):

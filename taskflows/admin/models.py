@@ -4,6 +4,8 @@ from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
+from taskflows.scheduler.models import DEFAULT_TASK_TIMEOUT_SECONDS, MIN_INTERVAL_SECONDS
+
 
 class ServerInfo(TypedDict, total=False):
     """Server information from registry."""
@@ -72,12 +74,13 @@ class PortableScheduleRequest(BaseModel):
     name: str = Field(min_length=1)
     command: list[str] = Field(min_length=1)
     run_at: str | None = None
-    interval_seconds: float | None = Field(None, gt=0)
+    interval_seconds: float | None = Field(None, ge=MIN_INTERVAL_SECONDS)
     start_at: str | None = None
     cron: str | None = None
     timezone: str = "UTC"
     enabled: bool = True
-    timeout: float | None = Field(None, gt=0)
+    timeout: float | None = Field(DEFAULT_TASK_TIMEOUT_SECONDS, gt=0)
+    no_timeout: bool = False
     cwd: str | None = None
     environment: dict[str, str] = Field(default_factory=dict)
     misfire_grace_time: int | None = Field(3600, gt=0)
@@ -85,3 +88,25 @@ class PortableScheduleRequest(BaseModel):
     max_instances: int = Field(1, ge=1)
     replace_existing: bool = False
     expected_revision: int | None = Field(None, ge=1)
+
+
+class PortableSchedulePatch(BaseModel):
+    """Field-preserving schedule update; omitted secrets remain unchanged."""
+
+    expected_revision: int = Field(ge=1)
+    name: str | None = Field(None, min_length=1)
+    command: list[str] | None = Field(None, min_length=1)
+    run_at: str | None = None
+    interval_seconds: float | None = Field(None, ge=MIN_INTERVAL_SECONDS)
+    start_at: str | None = None
+    cron: str | None = None
+    timezone: str | None = None
+    enabled: bool | None = None
+    timeout: float | None = Field(None, gt=0)
+    no_timeout: bool = False
+    cwd: str | None = None
+    environment: dict[str, str] | None = None
+    remove_environment: list[str] = Field(default_factory=list)
+    misfire_grace_time: int | None = Field(None, gt=0)
+    coalesce: bool | None = None
+    max_instances: int | None = Field(None, ge=1)

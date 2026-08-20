@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Box, LogOut } from "lucide-react";
+import { LayoutDashboard, Box, CalendarClock, LogOut } from "lucide-react";
 import { clsx } from "clsx";
 import { logout } from "@/api";
 import { Button, ThemeToggle } from "@/components/ui";
@@ -21,7 +21,7 @@ function TabItem({ to, icon, label, end }: TabItemProps) {
           "flex items-center gap-2 px-4 h-full border-b-2 text-sm font-medium transition-colors",
           isActive
             ? "border-electric-blue text-electric-blue"
-            : "border-transparent text-muted hover:text-foreground hover:border-muted"
+            : "border-transparent text-muted hover:text-foreground hover:border-muted",
         )
       }
     >
@@ -49,6 +49,11 @@ export function AppBar() {
           end
           icon={<LayoutDashboard className="w-5 h-5" />}
           label="Dashboard"
+        />
+        <TabItem
+          to="/schedules"
+          icon={<CalendarClock className="w-5 h-5" />}
+          label="Schedules"
         />
         <TabItem
           to="/environments"

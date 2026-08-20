@@ -1,6 +1,15 @@
 import { useAuthStore } from "@/stores/authStore";
 import { logger } from "@/utils/logger";
-import type { LoginRequest, LoginResponse, RefreshResponse, NamedEnvironment } from "@/types";
+import type {
+  CreateScheduleRequest,
+  LoginRequest,
+  LoginResponse,
+  NamedEnvironment,
+  PortableSchedule,
+  RefreshResponse,
+  SchedulerStatus,
+  ScheduleRun,
+} from "@/types";
 
 // Mutex to prevent concurrent token refreshes
 let refreshPromise: Promise<string | null> | null = null;
@@ -27,7 +36,9 @@ async function refreshAccessToken(): Promise<string | null> {
 
       if (response.ok) {
         const data = (await response.json()) as RefreshResponse;
-        useAuthStore.getState().refreshAccessToken(data.access_token, data.csrf_token);
+        useAuthStore
+          .getState()
+          .refreshAccessToken(data.access_token, data.csrf_token);
         return data.access_token;
       }
     } catch (err) {
@@ -47,7 +58,10 @@ async function refreshAccessToken(): Promise<string | null> {
 
 // Standardized fetch with 401 retry logic
 // Automatically refreshes token and retries once on 401, or logs out if refresh fails
-async function fetchWithAuth(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+async function fetchWithAuth(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
   const token = useAuthStore.getState().accessToken;
   const csrfToken = useAuthStore.getState().csrfToken;
 
@@ -86,8 +100,20 @@ async function fetchWithAuth(input: RequestInfo | URL, init?: RequestInit): Prom
   return response;
 }
 
+async function apiError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const payload = (await response.json()) as { detail?: string };
+    return new Error(payload.detail || fallback);
+  } catch {
+    return new Error(fallback);
+  }
+}
+
 // Auth functions (don't use auth - public endpoints)
-export async function login(username: string, password: string): Promise<LoginResponse> {
+export async function login(
+  username: string,
+  password: string,
+): Promise<LoginResponse> {
   const response = await fetch("/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -129,10 +155,13 @@ export async function getServices() {
   return response.json();
 }
 
-export async function serviceAction(serviceName: string, action: "start" | "stop" | "restart") {
+export async function serviceAction(
+  serviceName: string,
+  action: "start" | "stop" | "restart",
+) {
   const response = await fetchWithAuth(
     `/api/${action}?match=${encodeURIComponent(serviceName)}&as_json=true`,
-    { method: "POST" }
+    { method: "POST" },
   );
 
   if (!response.ok) throw new Error(`Failed to ${action} service`);
@@ -142,7 +171,7 @@ export async function serviceAction(serviceName: string, action: "start" | "stop
 export async function enableService(match: string) {
   const response = await fetchWithAuth(
     `/api/enable?match=${encodeURIComponent(match)}`,
-    { method: "POST" }
+    { method: "POST" },
   );
 
   if (!response.ok) throw new Error("Failed to enable service");
@@ -152,7 +181,7 @@ export async function enableService(match: string) {
 export async function disableService(match: string) {
   const response = await fetchWithAuth(
     `/api/disable?match=${encodeURIComponent(match)}`,
-    { method: "POST" }
+    { method: "POST" },
   );
 
   if (!response.ok) throw new Error("Failed to disable service");
@@ -162,7 +191,7 @@ export async function disableService(match: string) {
 export async function removeService(match: string) {
   const response = await fetchWithAuth(
     `/api/remove?match=${encodeURIComponent(match)}`,
-    { method: "POST" }
+    { method: "POST" },
   );
 
   if (!response.ok) throw new Error("Failed to remove service");
@@ -171,14 +200,19 @@ export async function removeService(match: string) {
 
 export async function showService(match: string) {
   const response = await fetchWithAuth(
-    `/api/show?match=${encodeURIComponent(match)}`
+    `/api/show?match=${encodeURIComponent(match)}`,
   );
 
   if (!response.ok) throw new Error("Failed to fetch service files");
   return response.json();
 }
 
-export async function createService(file: File, host?: string, include?: string, exclude?: string) {
+export async function createService(
+  file: File,
+  host?: string,
+  include?: string,
+  exclude?: string,
+) {
   const formData = new FormData();
   formData.append("file", file);
   if (host) formData.append("host", host);
@@ -201,7 +235,10 @@ export async function getServers() {
   return response.json();
 }
 
-export async function batchAction(serviceNames: string[], operation: "start" | "stop" | "restart" | "enable" | "disable" | "remove") {
+export async function batchAction(
+  serviceNames: string[],
+  operation: "start" | "stop" | "restart" | "enable" | "disable" | "remove",
+) {
   const response = await fetchWithAuth("/api/batch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -214,7 +251,7 @@ export async function batchAction(serviceNames: string[], operation: "start" | "
 
 export async function getLogs(serviceName: string, nLines: number = 1000) {
   const response = await fetchWithAuth(
-    `/api/logs?service_name=${encodeURIComponent(serviceName)}&n_lines=${nLines}`
+    `/api/logs?service_name=${encodeURIComponent(serviceName)}&n_lines=${nLines}`,
   );
 
   if (!response.ok) throw new Error("Failed to fetch logs");
@@ -230,7 +267,9 @@ export async function getEnvironments() {
 }
 
 export async function getEnvironment(name: string) {
-  const response = await fetchWithAuth(`/api/environments/${encodeURIComponent(name)}`);
+  const response = await fetchWithAuth(
+    `/api/environments/${encodeURIComponent(name)}`,
+  );
 
   if (!response.ok) throw new Error("Failed to fetch environment");
   return response.json();
@@ -247,21 +286,145 @@ export async function createEnvironment(environment: NamedEnvironment) {
   return response.json();
 }
 
-export async function updateEnvironment(name: string, environment: NamedEnvironment) {
-  const response = await fetchWithAuth(`/api/environments/${encodeURIComponent(name)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(environment),
-  });
+export async function updateEnvironment(
+  name: string,
+  environment: NamedEnvironment,
+) {
+  const response = await fetchWithAuth(
+    `/api/environments/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(environment),
+    },
+  );
 
   if (!response.ok) throw new Error("Failed to update environment");
   return response.json();
 }
 
 export async function deleteEnvironment(name: string): Promise<void> {
-  const response = await fetchWithAuth(`/api/environments/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-  });
+  const response = await fetchWithAuth(
+    `/api/environments/${encodeURIComponent(name)}`,
+    {
+      method: "DELETE",
+    },
+  );
 
   if (!response.ok) throw new Error("Failed to delete environment");
+}
+
+// Portable scheduler API
+export async function getSchedules(): Promise<{
+  schedules: PortableSchedule[];
+}> {
+  const response = await fetchWithAuth("/api/schedules");
+  if (!response.ok) throw await apiError(response, "Failed to fetch schedules");
+  return response.json();
+}
+
+export async function createSchedule(
+  request: CreateScheduleRequest,
+): Promise<PortableSchedule> {
+  const response = await fetchWithAuth("/api/schedules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) throw await apiError(response, "Failed to create schedule");
+  return response.json();
+}
+
+export async function setScheduleEnabled(
+  schedule: PortableSchedule,
+  enabled: boolean,
+): Promise<PortableSchedule> {
+  const response = await fetchWithAuth(
+    `/api/schedules/${encodeURIComponent(schedule.id)}/enabled`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, expected_revision: schedule.revision }),
+    },
+  );
+  if (!response.ok) throw await apiError(response, "Failed to update schedule");
+  return response.json();
+}
+
+export async function deleteSchedule(
+  schedule: PortableSchedule,
+): Promise<void> {
+  const response = await fetchWithAuth(
+    `/api/schedules/${encodeURIComponent(schedule.id)}?expected_revision=${schedule.revision}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) throw await apiError(response, "Failed to delete schedule");
+}
+
+export async function runSchedule(id: string): Promise<ScheduleRun> {
+  const response = await fetchWithAuth(
+    `/api/schedules/${encodeURIComponent(id)}/run`,
+    {
+      method: "POST",
+    },
+  );
+  if (!response.ok) throw await apiError(response, "Failed to start schedule");
+  return response.json();
+}
+
+export async function previewSchedule(id: string): Promise<{
+  timezone: string;
+  occurrences: { utc: string; local: string }[];
+}> {
+  const response = await fetchWithAuth(
+    `/api/schedules/${encodeURIComponent(id)}/preview?count=5`,
+  );
+  if (!response.ok)
+    throw await apiError(response, "Failed to preview schedule");
+  return response.json();
+}
+
+export async function getScheduleRuns(): Promise<{ runs: ScheduleRun[] }> {
+  const response = await fetchWithAuth("/api/schedule-runs?limit=100");
+  if (!response.ok)
+    throw await apiError(response, "Failed to fetch run history");
+  return response.json();
+}
+
+export async function getScheduleRunLogs(
+  runId: string,
+): Promise<{ stdout?: string; stderr?: string }> {
+  const response = await fetchWithAuth(
+    `/api/schedule-runs/${encodeURIComponent(runId)}/logs?lines=500`,
+  );
+  if (!response.ok) throw await apiError(response, "Failed to fetch run logs");
+  return response.json();
+}
+
+export async function cancelScheduleRun(runId: string): Promise<ScheduleRun> {
+  const response = await fetchWithAuth(
+    `/api/schedule-runs/${encodeURIComponent(runId)}/cancel`,
+    { method: "POST" },
+  );
+  if (!response.ok) throw await apiError(response, "Failed to cancel run");
+  return response.json();
+}
+
+export async function getSchedulerStatus(): Promise<SchedulerStatus> {
+  const response = await fetchWithAuth("/api/scheduler/status");
+  if (!response.ok)
+    throw await apiError(response, "Failed to fetch scheduler status");
+  return response.json();
+}
+
+export async function ensureScheduler(): Promise<SchedulerStatus> {
+  const response = await fetchWithAuth(
+    "/api/scheduler/ensure?wait=true&timeout=30",
+    {
+      method: "POST",
+    },
+  );
+  if (!response.ok)
+    throw await apiError(response, "Failed to repair scheduler");
+  return response.json();
 }

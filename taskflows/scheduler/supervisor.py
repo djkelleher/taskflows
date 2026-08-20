@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -23,7 +24,11 @@ class SupervisorStatus:
     backend: Literal["systemd", "launchd", "windows-task-scheduler"]
     installed: bool
     state: SupervisorState
-    automatic: bool | None = None
+    # Backward-compatible defaults for third-party supervisors. Built-in
+    # backends always pass explicit values, including None when inspection fails.
+    automatic: bool | None = True
+    registration_valid: bool | None = True
+    definition_fingerprint: str | None = None
     definition_path: str | None = None
     last_exit_code: int | None = None
     log_hint: str | None = None
@@ -60,7 +65,8 @@ class SystemdSupervisor:
 
     @property
     def log_hint(self) -> str:
-        return f"journalctl --user -u {native.LINUX_UNIT_NAME} -n 200"
+        daemon_log = native.services_data_dir.resolve() / "logs" / "scheduler-daemon.log"
+        return f"{daemon_log} or journalctl --user -u {native.LINUX_UNIT_NAME} -n 200"
 
     def install(self) -> Path:
         return native.install_linux()
@@ -84,18 +90,31 @@ class SystemdSupervisor:
                 backend="systemd",
                 installed=False,
                 state="not-installed",
+                automatic=False,
+                registration_valid=False,
                 definition_path=str(self.definition_path),
                 log_hint=self.log_hint,
             )
+        fingerprint: str | None = None
+        registration_valid: bool | None = None
+        try:
+            definition = self.definition_path.read_text()
+            match = re.search(r"^X-Taskflows-Definition=(.+)$", definition, re.MULTILINE)
+            fingerprint = match.group(1).strip() if match else None
+            registration_valid = fingerprint == native.definition_fingerprint()
+        except OSError:
+            registration_valid = None
         try:
             result = native._run(
                 ["systemctl", "--user", "is-active", native.LINUX_UNIT_NAME], check=False
             )
-        except OSError as exc:
+        except (OSError, TimeoutError) as exc:
             return SupervisorStatus(
                 backend="systemd",
                 installed=True,
                 state="unknown",
+                automatic=None,
+                registration_valid=None,
                 definition_path=str(self.definition_path),
                 log_hint=self.log_hint,
                 detail=str(exc),
@@ -105,7 +124,7 @@ class SystemdSupervisor:
             enabled_result = native._run(
                 ["systemctl", "--user", "is-enabled", native.LINUX_UNIT_NAME], check=False
             )
-        except OSError:
+        except (OSError, TimeoutError):
             enabled_detail = None
         else:
             enabled_detail = _completed_detail(enabled_result)
@@ -130,6 +149,8 @@ class SystemdSupervisor:
             installed=True,
             state=state,
             automatic=automatic,
+            registration_valid=registration_valid,
+            definition_fingerprint=fingerprint,
             definition_path=str(self.definition_path),
             log_hint=self.log_hint,
             detail=detail,
@@ -154,7 +175,10 @@ class LaunchdSupervisor:
     @property
     def log_hint(self) -> str:
         log_dir = native.services_data_dir.resolve() / "logs"
-        return f"{log_dir / 'scheduler.stdout.log'} and {log_dir / 'scheduler.stderr.log'}"
+        return (
+            f"{log_dir / 'scheduler-daemon.log'}, "
+            f"{log_dir / 'scheduler.stdout.log'}, or {log_dir / 'scheduler.stderr.log'}"
+        )
 
     def install(self) -> Path:
         return native.install_macos()
@@ -188,16 +212,30 @@ class LaunchdSupervisor:
                 backend="launchd",
                 installed=False,
                 state="not-installed",
+                automatic=False,
+                registration_valid=False,
                 definition_path=str(self.definition_path),
                 log_hint=self.log_hint,
             )
+        fingerprint: str | None = None
+        registration_valid: bool | None = None
+        try:
+            with self.definition_path.open("rb") as stream:
+                definition = plistlib.load(stream)
+            value = definition.get("TaskflowsDefinitionFingerprint")
+            fingerprint = value if isinstance(value, str) else None
+            registration_valid = fingerprint == native.definition_fingerprint()
+        except (OSError, plistlib.InvalidFileException, AttributeError):
+            registration_valid = None
         try:
             result = native._run(["launchctl", "print", self.service_target], check=False)
-        except OSError as exc:
+        except (OSError, TimeoutError) as exc:
             return SupervisorStatus(
                 backend="launchd",
                 installed=True,
                 state="unknown",
+                automatic=None,
+                registration_valid=None,
                 definition_path=str(self.definition_path),
                 log_hint=self.log_hint,
                 detail=str(exc),
@@ -213,7 +251,7 @@ class LaunchdSupervisor:
         automatic: bool | None = None
         try:
             disabled = native._run(["launchctl", "print-disabled", self.domain], check=False)
-        except OSError:
+        except (OSError, TimeoutError):
             disabled_detail = ""
         else:
             disabled_detail = _completed_detail(disabled) or ""
@@ -233,6 +271,8 @@ class LaunchdSupervisor:
             installed=True,
             state=state,
             automatic=automatic,
+            registration_valid=registration_valid,
+            definition_fingerprint=fingerprint,
             definition_path=str(self.definition_path),
             last_exit_code=last_exit_code,
             log_hint=self.log_hint,
@@ -263,7 +303,8 @@ class WindowsTaskSupervisor:
 
     @property
     def log_hint(self) -> str:
-        return "Task Scheduler Library > Taskflows > Scheduler > History"
+        daemon_log = native.services_data_dir.resolve() / "logs" / "scheduler-daemon.log"
+        return f"{daemon_log} or Task Scheduler Library > Taskflows > Scheduler > History"
 
     def start(self) -> None:
         task = _windows_registered_task()
@@ -290,6 +331,8 @@ class WindowsTaskSupervisor:
                 backend="windows-task-scheduler",
                 installed=False,
                 state="unknown",
+                automatic=None,
+                registration_valid=None,
                 log_hint=self.log_hint,
                 detail=str(exc),
             )
@@ -298,11 +341,13 @@ class WindowsTaskSupervisor:
                 backend="windows-task-scheduler",
                 installed=False,
                 state="not-installed",
+                automatic=False,
+                registration_valid=False,
                 log_hint=self.log_hint,
             )
         task_state = int(getattr(task, "State", 0))
         enabled_value = getattr(task, "Enabled", None)
-        automatic = bool(enabled_value) if enabled_value is not None else None
+        automatic: bool | None = None
         try:
             triggers = task.Definition.Triggers
             logon_triggers = [
@@ -311,11 +356,15 @@ class WindowsTaskSupervisor:
                 if int(getattr(triggers.Item(index), "Type", -1)) == native._TASK_TRIGGER_LOGON
             ]
         except Exception:
-            logon_triggers = []
-        if logon_triggers:
+            logon_triggers = None
+        if logon_triggers is not None:
             automatic = bool(enabled_value) and any(
                 bool(getattr(trigger, "Enabled", False)) for trigger in logon_triggers
             )
+        source = getattr(getattr(task, "Definition", None), "RegistrationInfo", None)
+        fingerprint_value = getattr(source, "Source", None)
+        fingerprint = fingerprint_value if isinstance(fingerprint_value, str) else None
+        registration_valid = fingerprint == native.definition_fingerprint()
         result_value = getattr(task, "LastTaskResult", None)
         last_exit_code = int(result_value) if isinstance(result_value, int) else None
         # TASK_STATE_RUNNING=4, READY=3, QUEUED=2, DISABLED=1, UNKNOWN=0.
@@ -338,6 +387,8 @@ class WindowsTaskSupervisor:
             installed=True,
             state=state,
             automatic=automatic,
+            registration_valid=registration_valid,
+            definition_fingerprint=fingerprint,
             last_exit_code=last_exit_code,
             log_hint=self.log_hint,
             detail=f"Task Scheduler state {task_state}",

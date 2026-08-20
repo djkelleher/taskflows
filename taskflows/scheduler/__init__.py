@@ -6,8 +6,9 @@ APScheduler, so their schedule semantics are the same on Linux, macOS and
 Windows.
 """
 
-from .models import ScheduledTask, ScheduleSpec, schedule_preview
+from .models import RunHandle, ScheduledTask, ScheduleSpec, schedule_preview
 from .repository import HistoryPruneResult, SchedulerRepository
+from .runner import cancel_run, submit_now
 from .status import (
     DiagnosticCheck,
     SchedulerOperation,
@@ -23,6 +24,7 @@ from .supervisor import SchedulerSupervisor, SupervisorStatus, get_supervisor
 __all__ = [
     "DiagnosticCheck",
     "HistoryPruneResult",
+    "RunHandle",
     "ScheduleSpec",
     "ScheduledTask",
     "SchedulerRepository",
@@ -32,9 +34,11 @@ __all__ = [
     "SchedulerSupervisor",
     "SupervisorStatus",
     "diagnose_scheduler",
+    "cancel_run",
     "get_supervisor",
     "operate_scheduler",
     "schedule_preview",
     "scheduler_status",
+    "submit_now",
     "wait_for_scheduler",
 ]

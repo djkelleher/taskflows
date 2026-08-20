@@ -170,6 +170,7 @@ tf schedule history report
 tf schedule logs report
 tf schedule prune --older-than 30d --keep-latest 10
 tf schedule run report
+tf schedule run report --no-wait  # returns a durable run ID immediately
 tf schedule disable report
 
 # The lifecycle commands are identical on Linux, macOS, and Windows.

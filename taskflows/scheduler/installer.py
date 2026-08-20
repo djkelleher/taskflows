@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import plistlib
 import shlex
 import subprocess
 import sys
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -25,6 +29,22 @@ _TASK_INSTANCES_IGNORE_NEW = 2
 _TASK_LOGON_INTERACTIVE_TOKEN = 3
 _TASK_RUNLEVEL_LUA = 0
 _TASK_TRIGGER_LOGON = 9
+_COMMAND_TIMEOUT: ContextVar[float] = ContextVar("scheduler_command_timeout", default=15.0)
+
+
+@contextmanager
+def operation_timeout(seconds: float) -> Iterator[None]:
+    token = _COMMAND_TIMEOUT.set(seconds)
+    try:
+        yield
+    finally:
+        _COMMAND_TIMEOUT.reset(token)
+
+
+def current_operation_timeout() -> float:
+    """Return the active lifecycle deadline for subprocess and COM adapters."""
+
+    return _COMMAND_TIMEOUT.get()
 
 
 def _home_dir() -> Path:
@@ -42,12 +62,37 @@ def _daemon_command() -> list[str]:
     ]
 
 
+def definition_fingerprint() -> str:
+    """Fingerprint the interpreter, registry and daemon invocation we expect."""
+
+    payload = json.dumps(
+        {
+            "command": _daemon_command(),
+            "data_dir": str(services_data_dir.resolve()),
+            "version": 1,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(command, check=check, capture_output=True, text=True)
+        return subprocess.run(
+            command,
+            check=check,
+            capture_output=True,
+            text=True,
+            timeout=_COMMAND_TIMEOUT.get(),
+        )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         raise RuntimeError(f"{command[0]} failed: {detail}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(
+            f"{command[0]} did not finish within {_COMMAND_TIMEOUT.get():g}s"
+        ) from exc
 
 
 def install_linux() -> Path:
@@ -64,6 +109,7 @@ def install_linux() -> Path:
     )
     content = f"""[Unit]
 Description=Taskflows portable scheduler
+X-Taskflows-Definition={definition_fingerprint()}
 After=default.target
 
 [Service]
@@ -110,6 +156,7 @@ def install_macos() -> Path:
     plist_path = agents_dir / f"{MACOS_LABEL}.plist"
     definition = {
         "Label": MACOS_LABEL,
+        "TaskflowsDefinitionFingerprint": definition_fingerprint(),
         "ProgramArguments": _daemon_command(),
         "EnvironmentVariables": {"TASKFLOWS_DATA_DIR": str(data_dir)},
         "RunAtLoad": True,
@@ -161,6 +208,7 @@ def install_windows() -> None:
 
     definition = scheduler.NewTask(0)
     definition.RegistrationInfo.Description = "Taskflows portable scheduler daemon"
+    definition.RegistrationInfo.Source = definition_fingerprint()
     # A SAM-compatible name scopes both the task principal and logon trigger
     # to the installing user. An unscoped logon trigger fires for every user.
     user_id = windows_api.GetUserNameEx(windows_api.NameSamCompatible)

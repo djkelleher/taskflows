@@ -6,8 +6,9 @@ import platform
 import signal
 import socket
 import threading
-from contextlib import AbstractContextManager
-from datetime import UTC
+import time
+from contextlib import AbstractContextManager, suppress
+from datetime import UTC, timedelta
 from pathlib import Path
 from types import FrameType
 from typing import Any, TextIO
@@ -22,6 +23,7 @@ from apscheduler.events import (
 )
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy import URL
 
 from taskflows.common import logger
 from taskflows.exceptions import RevisionConflict
@@ -111,10 +113,15 @@ class SchedulerDaemon:
         *,
         max_workers: int = 20,
         reconcile_interval: float = 1.0,
+        history_retention_days: int = 30,
+        history_keep_latest: int = 100,
     ) -> None:
         self.repository = SchedulerRepository(database_path)
         self.database_path = self.repository.database_path.resolve()
         self.reconcile_interval = reconcile_interval
+        self.history_retention_days = history_retention_days
+        self.history_keep_latest = history_keep_latest
+        self._last_retention_at = 0.0
         self.started_at = utc_now()
         self.process_identity = _process_identity(os.getpid())
         self.stop_event = threading.Event()
@@ -122,7 +129,8 @@ class SchedulerDaemon:
         self._submitted_lock = threading.RLock()
         self._known_date_revisions: dict[str, int] = {}
         self._known_revisions: dict[str, int] = {}
-        database_url = f"sqlite:///{self.database_path.as_posix()}"
+        self._log_sink_id: int | None = None
+        database_url = URL.create("sqlite", database=str(self.database_path))
         self.executor = DurableThreadPoolExecutor(str(self.database_path), max_workers=max_workers)
         self.scheduler = BackgroundScheduler(
             jobstores={
@@ -143,6 +151,21 @@ class SchedulerDaemon:
             | EVENT_JOB_ERROR,
         )
         self._started = False
+
+    def _configure_daemon_log(self) -> None:
+        if self._log_sink_id is not None:
+            return
+        log_dir = self.database_path.parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(log_dir, 0o700)
+        self._log_sink_id = logger.add(
+            str(log_dir / "scheduler-daemon.log"),
+            rotation="20 MB",
+            retention=3,
+            level="INFO",
+            enqueue=True,
+        )
 
     @staticmethod
     def _job_id(task_id: str) -> str:
@@ -169,6 +192,8 @@ class SchedulerDaemon:
             if event.code in (EVENT_JOB_EXECUTED, EVENT_JOB_ERROR):
                 with self._submitted_lock:
                     self._submitted_date_jobs.pop(event.job_id, None)
+                    self._known_date_revisions.pop(event.job_id, None)
+                    self._known_revisions.pop(event.job_id, None)
             return
         # Events can arrive after the registry definition was replaced but
         # before reconciliation updates APScheduler. Never attribute an old
@@ -178,6 +203,9 @@ class SchedulerDaemon:
                 with self._submitted_lock:
                     if self._submitted_date_jobs.get(event.job_id) == known_revision:
                         self._submitted_date_jobs.pop(event.job_id, None)
+                    if is_known_date:
+                        self._known_date_revisions.pop(event.job_id, None)
+                        self._known_revisions.pop(event.job_id, None)
             return
         if event.code == EVENT_JOB_SUBMITTED:
             if is_known_date and known_revision is not None:
@@ -194,6 +222,10 @@ class SchedulerDaemon:
             # one-shot cannot remain enabled with no persisted job to run it.
             if task.schedule.kind == "date" and task.enabled:
                 self._disable_if_current(task)
+            if task.schedule.kind == "date":
+                with self._submitted_lock:
+                    self._known_date_revisions.pop(event.job_id, None)
+                    self._known_revisions.pop(event.job_id, None)
             return
         scheduled_times = getattr(event, "scheduled_run_times", None) or [
             getattr(event, "scheduled_run_time", utc_now())
@@ -211,6 +243,7 @@ class SchedulerDaemon:
     def start(self) -> None:
         if self._started:
             return
+        self._configure_daemon_log()
         self.repository.mark_interrupted_runs()
         # Pausing is important: persisted jobs must not fire before stale or
         # deleted Taskflows definitions have been reconciled.
@@ -224,6 +257,9 @@ class SchedulerDaemon:
             # initial reconciliation fails (for example, on corrupt state).
             self.scheduler.shutdown(wait=False)
             self._started = False
+            if self._log_sink_id is not None:
+                logger.remove(self._log_sink_id)
+                self._log_sink_id = None
             raise
 
     def _add_or_update(self, task: ScheduledTask, existing: Any = None) -> Any:
@@ -324,6 +360,15 @@ class SchedulerDaemon:
                 for task in tasks
             }
         )
+        now = time.monotonic()
+        if self.history_retention_days > 0 and now - self._last_retention_at >= 24 * 60 * 60:
+            result = self.repository.prune_history(
+                before=utc_now() - timedelta(days=self.history_retention_days),
+                keep_latest=self.history_keep_latest,
+            )
+            self._last_retention_at = now
+            for error in result.log_errors:
+                logger.warning(error)
 
     def heartbeat(self) -> None:
         self.repository.heartbeat(
@@ -352,6 +397,12 @@ class SchedulerDaemon:
         if not self._started:
             return
         try:
+            # Stop dispatch first. Pending futures are cancelled and their
+            # durable queue ownership is released before live process trees are
+            # terminated, so shutdown cannot launch new commands behind us.
+            with suppress(Exception):
+                self.scheduler.pause()
+            self.executor.begin_shutdown()
             terminate_active_runs()
             self.scheduler.shutdown(wait=True)
         finally:
@@ -365,6 +416,9 @@ class SchedulerDaemon:
                     pid=os.getpid(), process_identity=self.process_identity
                 )
                 self._started = False
+                if self._log_sink_id is not None:
+                    logger.remove(self._log_sink_id)
+                    self._log_sink_id = None
 
 
 def main(argv: list[str] | None = None) -> None:

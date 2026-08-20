@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -18,9 +18,16 @@ from uuid import uuid4
 from taskflows.common import ensure_data_dir, logger, services_data_dir
 from taskflows.exceptions import RevisionConflict
 
-from .models import ScheduledTask, ScheduleSpec, parse_datetime, utc_now
+from .models import (
+    MAX_QUEUED_OCCURRENCES,
+    RunHandle,
+    ScheduledTask,
+    ScheduleSpec,
+    parse_datetime,
+    utc_now,
+)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -305,6 +312,8 @@ class SchedulerRepository:
                     runner_identity TEXT,
                     task_revision INTEGER,
                     occurrence_key TEXT,
+                    task_definition_id TEXT,
+                    cancellation_requested INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE SET NULL
                 )"""
                 )
@@ -349,6 +358,8 @@ class SchedulerRepository:
                         runner_identity TEXT,
                         task_revision INTEGER,
                         occurrence_key TEXT,
+                        task_definition_id TEXT,
+                        cancellation_requested INTEGER NOT NULL DEFAULT 0,
                         FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE SET NULL
                     )"""
                     )
@@ -384,6 +395,17 @@ class SchedulerRepository:
                     db.execute("ALTER TABLE task_runs ADD COLUMN task_revision INTEGER")
                 if "occurrence_key" not in run_columns:
                     db.execute("ALTER TABLE task_runs ADD COLUMN occurrence_key TEXT")
+                if "task_definition_id" not in run_columns:
+                    db.execute("ALTER TABLE task_runs ADD COLUMN task_definition_id TEXT")
+                db.execute(
+                    "UPDATE task_runs SET task_definition_id=task_id "
+                    "WHERE task_definition_id IS NULL AND task_id IS NOT NULL"
+                )
+                if "cancellation_requested" not in run_columns:
+                    db.execute(
+                        "ALTER TABLE task_runs ADD COLUMN cancellation_requested "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
                 db.execute(
                     """CREATE UNIQUE INDEX IF NOT EXISTS idx_task_runs_occurrence
                    ON task_runs(occurrence_key) WHERE occurrence_key IS NOT NULL"""
@@ -500,6 +522,65 @@ class SchedulerRepository:
             raise ValueError(f"a scheduled task with id {task.id!r} already exists") from exc
         return result
 
+    def update(
+        self,
+        identifier: str,
+        task: ScheduledTask,
+        *,
+        expected_revision: int,
+    ) -> ScheduledTask:
+        """Replace one definition by ID while preserving identity and secrets."""
+
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current_row = self._resolve_row(db, identifier)
+            if current_row is None:
+                raise KeyError(f"scheduled task not found: {identifier}")
+            current = self._task_from_row(current_row)
+            if current.revision != expected_revision:
+                raise RevisionConflict(
+                    f"scheduled task {current.name!r} changed from revision "
+                    f"{expected_revision} to {current.revision}"
+                )
+            updated_at = utc_now()
+            candidate = replace(
+                task,
+                id=current.id,
+                created_at=current.created_at,
+                updated_at=updated_at,
+                revision=current.revision + 1,
+                next_run_at=None,
+            )
+            try:
+                db.execute(
+                    """UPDATE scheduled_tasks SET name=?, command_json=?, schedule_json=?,
+                       enabled=?, timeout=?, cwd=?, environment_json=?, misfire_grace_time=?,
+                       coalesce=?, max_instances=?, updated_at=?, revision=?, next_run_at=NULL
+                       WHERE id=?""",
+                    (
+                        candidate.name,
+                        json.dumps(list(candidate.command)),
+                        candidate.schedule.to_json(),
+                        int(candidate.enabled),
+                        candidate.timeout,
+                        candidate.cwd,
+                        json.dumps(dict(candidate.environment), sort_keys=True),
+                        candidate.misfire_grace_time,
+                        int(candidate.coalesce),
+                        candidate.max_instances,
+                        _iso(candidate.updated_at),
+                        candidate.revision,
+                        candidate.id,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"a scheduled task named {candidate.name!r} already exists"
+                ) from exc
+            row = db.execute("SELECT * FROM scheduled_tasks WHERE id=?", (current.id,)).fetchone()
+            assert row is not None
+            return self._task_from_row(row)
+
     def get(self, task_id: str) -> ScheduledTask | None:
         with self.connect() as db:
             row = db.execute("SELECT * FROM scheduled_tasks WHERE id=?", (task_id,)).fetchone()
@@ -602,6 +683,11 @@ class SchedulerRepository:
         now = utc_now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            queued = db.execute(
+                "SELECT COUNT(*) FROM task_runs WHERE status IN ('queued', 'starting')"
+            ).fetchone()[0]
+            if queued >= MAX_QUEUED_OCCURRENCES:
+                raise RuntimeError(f"scheduler occurrence queue is full ({MAX_QUEUED_OCCURRENCES})")
             current = db.execute(
                 "SELECT name, enabled, revision, max_instances FROM scheduled_tasks WHERE id=?",
                 (task.id,),
@@ -620,18 +706,30 @@ class SchedulerRepository:
             if running >= current["max_instances"]:
                 db.execute(
                     """INSERT INTO task_runs
-                       (id, task_id, task_name, scheduled_for, started_at, finished_at, status, error)
-                       VALUES (?, ?, ?, ?, ?, ?, 'skipped', 'maximum concurrent instances reached')""",
-                    (run_id, task.id, current["name"], _iso(scheduled_for), _iso(now), _iso(now)),
+                       (id, task_id, task_definition_id, task_name, task_revision,
+                        scheduled_for, started_at, finished_at, status, error)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'skipped',
+                               'maximum concurrent instances reached')""",
+                    (
+                        run_id,
+                        task.id,
+                        task.id,
+                        current["name"],
+                        task.revision,
+                        _iso(scheduled_for),
+                        _iso(now),
+                        _iso(now),
+                    ),
                 )
                 return None
             db.execute(
                 """INSERT INTO task_runs
-                   (id, task_id, task_name, scheduled_for, started_at, status,
-                    runner_pid, runner_identity, task_revision)
-                   VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
+                   (id, task_id, task_definition_id, task_name, scheduled_for,
+                    started_at, status, runner_pid, runner_identity, task_revision)
+                   VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
                 (
                     run_id,
+                    task.id,
                     task.id,
                     current["name"],
                     _iso(scheduled_for),
@@ -642,6 +740,41 @@ class SchedulerRepository:
                 ),
             )
         return run_id
+
+    def reserve_manual_run(self, task: ScheduledTask) -> RunHandle:
+        """Durably accept a manual run without weakening revision checks."""
+
+        run_id = str(uuid4())
+        scheduled_for = utc_now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            queued = db.execute(
+                "SELECT COUNT(*) FROM task_runs WHERE status IN ('queued', 'starting')"
+            ).fetchone()[0]
+            if queued >= MAX_QUEUED_OCCURRENCES:
+                raise RuntimeError(f"scheduler occurrence queue is full ({MAX_QUEUED_OCCURRENCES})")
+            current = db.execute(
+                "SELECT name, revision FROM scheduled_tasks WHERE id=?", (task.id,)
+            ).fetchone()
+            if current is None or current["revision"] != task.revision:
+                raise RevisionConflict(
+                    f"scheduled task {task.name!r} changed before the run was accepted"
+                )
+            db.execute(
+                """INSERT INTO task_runs
+                   (id, task_id, task_definition_id, task_name, task_revision,
+                    scheduled_for, status)
+                   VALUES (?, ?, ?, ?, ?, ?, 'queued')""",
+                (
+                    run_id,
+                    task.id,
+                    task.id,
+                    current["name"],
+                    task.revision,
+                    _iso(scheduled_for),
+                ),
+            )
+        return self.get_run(run_id)
 
     @staticmethod
     def _occurrence_key(task: ScheduledTask, scheduled_for: datetime) -> str:
@@ -670,15 +803,20 @@ class SchedulerRepository:
                 or current["revision"] != task.revision
             ):
                 return []
-            for scheduled_for in scheduled_times:
+            queued = db.execute(
+                "SELECT COUNT(*) FROM task_runs WHERE status IN ('queued', 'starting')"
+            ).fetchone()[0]
+            available = max(MAX_QUEUED_OCCURRENCES - queued, 0)
+            for scheduled_for in scheduled_times[:available]:
                 run_id = str(uuid4())
                 cursor = db.execute(
                     """INSERT OR IGNORE INTO task_runs
-                       (id, task_id, task_name, task_revision, occurrence_key,
+                       (id, task_id, task_definition_id, task_name, task_revision, occurrence_key,
                         scheduled_for, status, runner_pid, runner_identity)
-                       VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)""",
                     (
                         run_id,
+                        task.id,
                         task.id,
                         current["name"],
                         task.revision,
@@ -815,16 +953,18 @@ class SchedulerRepository:
         pid: int,
         *,
         process_identity: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Record the command process and its creation identity after launch."""
         identity = process_identity if process_identity is not None else _process_identity(pid)
         with self.connect() as db:
-            db.execute(
+            cursor = db.execute(
                 """UPDATE task_runs
                    SET runner_pid=?, runner_identity=?, status='running'
-                   WHERE id=? AND status IN ('starting', 'running')""",
+                   WHERE id=? AND status IN ('starting', 'running')
+                     AND cancellation_requested=0""",
                 (pid, identity, run_id),
             )
+            return cursor.rowcount > 0
 
     def finish_run(
         self,
@@ -838,8 +978,12 @@ class SchedulerRepository:
     ) -> None:
         with self.connect() as db:
             db.execute(
-                """UPDATE task_runs SET finished_at=?, status=?, exit_code=?,
-                   stdout_path=?, stderr_path=?, error=? WHERE id=?""",
+                """UPDATE task_runs SET finished_at=?,
+                   status=CASE WHEN cancellation_requested THEN 'cancelled' ELSE ? END,
+                   exit_code=?, stdout_path=?, stderr_path=?,
+                   error=CASE WHEN cancellation_requested
+                              THEN COALESCE(error, 'cancelled by user') ELSE ? END
+                   WHERE id=?""",
                 (
                     _iso(utc_now()),
                     status,
@@ -861,11 +1005,13 @@ class SchedulerRepository:
                 return False
             cursor = db.execute(
                 """INSERT OR IGNORE INTO task_runs
-                   (id, task_id, task_name, task_revision, occurrence_key, scheduled_for,
+                   (id, task_id, task_definition_id, task_name, task_revision, occurrence_key,
+                    scheduled_for,
                     started_at, finished_at, status, error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'missed', ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'missed', ?)""",
                 (
                     str(uuid4()),
+                    task.id,
                     task.id,
                     task.name,
                     task.revision,
@@ -919,12 +1065,16 @@ class SchedulerRepository:
         where = ""
         if identifier:
             task = self.get(identifier)
-            if task is not None:
-                where = "WHERE r.task_id=?"
-                params.append(task.id)
+            with self.connect() as db:
+                has_definition_id = db.execute(
+                    "SELECT 1 FROM task_runs WHERE task_definition_id=? LIMIT 1",
+                    (identifier,),
+                ).fetchone()
+            if task is not None or has_definition_id is not None:
+                where = "WHERE r.task_definition_id=?"
+                params.append(identifier)
             else:
-                # Name queries span recreated tasks because history intentionally
-                # outlives each individual task definition. IDs remain precise.
+                # Name queries intentionally span deleted and recreated tasks.
                 where = "WHERE r.task_name=?"
                 params.append(identifier)
         params.append(limit)
@@ -935,6 +1085,49 @@ class SchedulerRepository:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_run(self, run_id: str) -> RunHandle:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM task_runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"scheduled run not found: {run_id}")
+        return RunHandle.from_row(dict(row))
+
+    def request_cancellation(self, run_id: str) -> RunHandle:
+        """Cancel queued work or flag a live command for process-tree termination."""
+
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM task_runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"scheduled run not found: {run_id}")
+            if row["status"] == "queued":
+                db.execute(
+                    """UPDATE task_runs SET status='cancelled', cancellation_requested=1,
+                       finished_at=?, error='cancelled by user' WHERE id=?""",
+                    (_iso(utc_now()), run_id),
+                )
+            elif row["status"] in {"starting", "running"}:
+                db.execute("UPDATE task_runs SET cancellation_requested=1 WHERE id=?", (run_id,))
+            updated = db.execute("SELECT * FROM task_runs WHERE id=?", (run_id,)).fetchone()
+            assert updated is not None
+            return RunHandle.from_row(dict(updated))
+
+    def cancellation_requested(self, run_id: str) -> bool:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT cancellation_requested FROM task_runs WHERE id=?", (run_id,)
+            ).fetchone()
+        return bool(row and row["cancellation_requested"])
+
+    def run_process(self, run_id: str) -> tuple[int | None, str | None]:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT runner_pid, runner_identity FROM task_runs WHERE id=?", (run_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"scheduled run not found: {run_id}")
+        return row["runner_pid"], row["runner_identity"]
 
     def prune_history(
         self,

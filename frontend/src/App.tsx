@@ -13,6 +13,7 @@ import { EnvironmentsPage } from "@/pages/EnvironmentsPage";
 import { EnvironmentCreatePage } from "@/pages/EnvironmentCreatePage";
 import { EnvironmentEditPage } from "@/pages/EnvironmentEditPage";
 import { CreateServicePage } from "@/pages/CreateServicePage";
+import { SchedulesPage } from "@/pages/SchedulesPage";
 
 function ProtectedRoute() {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
@@ -58,11 +59,21 @@ function App() {
             <Route element={<ProtectedRoute />}>
               <Route element={<MainLayout />}>
                 <Route path="/" element={<DashboardPage />} />
-                <Route path="/services/create" element={<CreateServicePage />} />
+                <Route
+                  path="/services/create"
+                  element={<CreateServicePage />}
+                />
                 <Route path="/logs/:serviceName" element={<LogsPage />} />
                 <Route path="/environments" element={<EnvironmentsPage />} />
-                <Route path="/environments/create" element={<EnvironmentCreatePage />} />
-                <Route path="/environments/edit/:name" element={<EnvironmentEditPage />} />
+                <Route path="/schedules" element={<SchedulesPage />} />
+                <Route
+                  path="/environments/create"
+                  element={<EnvironmentCreatePage />}
+                />
+                <Route
+                  path="/environments/edit/:name"
+                  element={<EnvironmentEditPage />}
+                />
               </Route>
             </Route>
 

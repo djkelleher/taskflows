@@ -12,9 +12,15 @@ from dotenv import dotenv_values
 from taskflows.exceptions import RevisionConflict
 
 from .daemon import SchedulerDaemon
-from .models import ScheduledTask, ScheduleSpec, schedule_preview, utc_now
+from .models import (
+    DEFAULT_TASK_TIMEOUT_SECONDS,
+    ScheduledTask,
+    ScheduleSpec,
+    schedule_preview,
+    utc_now,
+)
 from .repository import SchedulerRepository
-from .runner import run_now
+from .runner import run_now, submit_now
 from .status import (
     diagnose_scheduler,
     operate_scheduler,
@@ -138,7 +144,18 @@ def schedule_cli() -> None:
     help="Load environment values from a dotenv file; repeatable.",
 )
 @click.option("--env", "environment", multiple=True, help="Environment KEY=VALUE; repeatable.")
-@click.option("--timeout", type=DURATION, help="Terminate after a duration, e.g. 90s or 5m.")
+@click.option(
+    "--timeout",
+    type=DURATION,
+    default=DEFAULT_TASK_TIMEOUT_SECONDS,
+    show_default=True,
+    help="Terminate after a duration, e.g. 90s or 5m.",
+)
+@click.option(
+    "--no-timeout",
+    is_flag=True,
+    help="Allow an unbounded command (persistent work should normally use a Service).",
+)
 @click.option("--misfire-grace", type=int, default=3600, show_default=True)
 @click.option("--max-instances", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--no-coalesce", is_flag=True, help="Run every retained occurrence after downtime.")
@@ -161,6 +178,7 @@ def add_schedule(
     env_files: tuple[Path, ...],
     environment: tuple[str, ...],
     timeout: float | None,
+    no_timeout: bool,
     misfire_grace: int,
     max_instances: int,
     no_coalesce: bool,
@@ -177,7 +195,7 @@ def add_schedule(
         raise click.UsageError("--revision can only be used with --replace")
     try:
         if run_at is not None:
-            spec = ScheduleSpec.once(run_at)
+            spec = ScheduleSpec.once(run_at, timezone=timezone)
         elif interval is not None:
             spec = ScheduleSpec.interval(
                 interval, start_at=start_at or utc_now(), timezone=timezone
@@ -190,7 +208,7 @@ def add_schedule(
             command=command,
             schedule=spec,
             enabled=not disabled,
-            timeout=timeout,
+            timeout=None if no_timeout else timeout,
             cwd=cwd,
             environment=_parse_environment(environment, env_files),
             misfire_grace_time=misfire_grace,
@@ -239,7 +257,7 @@ def show_schedule(identifier: str, as_json: bool) -> None:
     """Show one definition without exposing environment values."""
     try:
         data = _repository().resolve(identifier).to_public_dict()
-    except KeyError as exc:
+    except (KeyError, RuntimeError) as exc:
         raise click.ClickException(str(exc)) from exc
     if as_json:
         click.echo(json.dumps(data, indent=2))
@@ -329,10 +347,15 @@ def remove_schedule(identifier: str, yes: bool) -> None:
 
 @schedule_cli.command("run")
 @click.argument("identifier")
-def run_schedule(identifier: str) -> None:
+@click.option("--wait/--no-wait", default=True, show_default=True)
+def run_schedule(identifier: str, wait: bool) -> None:
     try:
+        if not wait:
+            handle = submit_now(_repository().database_path, identifier)
+            click.echo(f"Accepted run {handle.id} ({handle.status})")
+            return
         exit_code = run_now(_repository().database_path, identifier)
-    except KeyError as exc:
+    except (KeyError, RuntimeError) as exc:
         raise click.ClickException(str(exc)) from exc
     if exit_code is None:
         raise click.ClickException("task was not started because its overlap limit was reached")
@@ -443,7 +466,11 @@ def schedule_logs(identifier: str, stream: str, lines: int) -> None:
             continue
         path = _safe_log_path(repository, value)
         try:
-            content = path.read_text(errors="replace").splitlines()
+            with path.open("rb") as log_file:
+                log_file.seek(0, 2)
+                size = log_file.tell()
+                log_file.seek(max(size - 1024 * 1024, 0))
+                content = log_file.read(1024 * 1024).decode(errors="replace").splitlines()
         except OSError as exc:
             raise click.ClickException(f"could not read {name} log {path}: {exc}") from exc
         if stream == "both":

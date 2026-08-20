@@ -31,6 +31,8 @@ commands with unnecessary privileges.
 - `misfire_grace_time`: discard occurrences older than this limit
 - `coalesce`: combine retained missed occurrences into one execution
 - `max_instances`: per-task overlap limit; the default is one
+- intervals are at least one second; retained catch-up is capped at 1,000
+  occurrences per dispatch and the durable queue is capped at 10,000
 
 APScheduler's persistent SQLAlchemy job store retains dispatch times during a
 daemon outage. The `scheduled_tasks` table remains authoritative: startup and
@@ -53,6 +55,8 @@ slot transactionally, and starts the command without a shell. Taskflows:
   Windows and POSIX;
 - uses a dedicated process group and terminates the process tree on timeout;
 - captures stdout and stderr in owner-only run directories;
+- defaults to a one-hour execution timeout (`--no-timeout` is an explicit
+  escape hatch) and caps each stdout/stderr capture at 10 MiB;
 - records queued, starting, running, success, failure, timeout, missed, skipped,
   and interrupted states; orphaned pre-launch `starting` work returns to the
   durable queue;
@@ -63,6 +67,9 @@ slot transactionally, and starts the command without a shell. Taskflows:
   children exit without requiring another daemon restart;
 - records native process-creation identities as well as PIDs, so PID reuse
   cannot make an unrelated process look like a live daemon or command.
+- rejects stale manual-run revisions, supports durable run handles and
+  cross-process cancellation, and never starts pending work after shutdown
+  begins.
 
 Environment values are never returned from list APIs. The SQLite database and
 run logs are created with owner-only permissions on POSIX systems.
@@ -91,7 +98,7 @@ tf schedule preview NAME [--count 5] [--from TIMESTAMP] [--json]
 tf schedule history [NAME]
 tf schedule logs NAME [--stream stdout|stderr|both] [--lines 200]
 tf schedule prune [--older-than 30d] [--keep-latest 10] [--dry-run]
-tf schedule run NAME
+tf schedule run NAME [--wait/--no-wait]
 tf schedule enable NAME
 tf schedule disable NAME
 tf schedule remove NAME
@@ -110,6 +117,13 @@ executable preflight, native log hints, and dispatch-readiness checks with
 concrete remedies. Unhealthy results exit non-zero, making both commands useful
 in shell scripts and monitoring checks.
 
+The combined state distinguishes `running` from `degraded` (the process is
+healthy but automatic start or its native definition cannot be validated) and
+`unmanaged` (a healthy foreground/orphan daemon exists while the native manager
+is stopped). Every native definition carries a fingerprint of the interpreter,
+database and data directory. `ensure` refreshes a stale fingerprint rather than
+accepting a healthy process registered against old paths.
+
 `tf scheduler ensure` is the idempotent entry point for provisioning and repair:
 it does nothing when the registered daemon and automatic-start configuration are
 healthy, installs when registration is absent or disabled, starts a stopped
@@ -127,6 +141,9 @@ removes it.
 History pruning never deletes active attempts and protects the requested number
 of newest terminal attempts per task definition. Captured logs are removed only
 when their resolved path is beneath the registry's Taskflows run directory.
+The daemon automatically applies a 30-day policy while retaining the newest 100
+runs per definition. Its own cross-platform rotating log is
+`$TASKFLOWS_DATA_DIR/logs/scheduler-daemon.log`.
 
 `tf status` now uses the fast bulk systemd summary path for legacy Linux
 services. Use `tf status --details` when last/next activation and timer
@@ -144,6 +161,16 @@ silently overwriting a concurrent change. CLI replacements offer the same
 guard through `--replace --revision N`. `GET /api/schedules/{id-or-name}`
 returns the same non-secret representation used by CLI JSON output. Interval
 requests may provide an offset-aware `start_at` timestamp.
+
+`POST /api/schedules/{id}/run` accepts work asynchronously and returns HTTP 202
+with a durable run handle. `wait=true` retains synchronous behavior when it is
+actually wanted. Run detail, bounded stdout/stderr tails, and cancellation are
+available at `/api/schedule-runs/{run_id}` and its `/logs` and `/cancel`
+subresources. `PATCH /api/schedules/{id}` preserves omitted fields, including
+secret environment values; `environment` upserts selected secrets and
+`remove_environment` deletes them explicitly. The web UI exposes scheduler
+health/repair, creation, preview, run/retry, enable/disable, history, logs and
+cancellation on the **Schedules** page.
 
 `tf schedule preview` and `GET /api/schedules/{id-or-name}/preview` calculate
 upcoming occurrences with the exact APScheduler trigger used by the daemon.

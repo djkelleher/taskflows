@@ -4,6 +4,8 @@ import threading
 import time
 import traceback
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from pathlib import Path
 from typing import Any, Literal
 
 import click
@@ -22,6 +24,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
     status,
 )
@@ -48,7 +51,7 @@ from taskflows.admin.core import (
     status as service_status,
 )
 from taskflows.admin.grafana_proxy import router as grafana_router
-from taskflows.admin.models import PortableScheduleRequest
+from taskflows.admin.models import PortableSchedulePatch, PortableScheduleRequest
 from taskflows.admin.security import (
     create_csrf_token_data,
     get_csrf_token_data,
@@ -62,9 +65,15 @@ from taskflows.admin.utils import with_hostname
 from taskflows.common import Config, logger
 from taskflows.exceptions import RevisionConflict
 from taskflows.middleware.prometheus_middleware import PrometheusMiddleware
-from taskflows.scheduler.models import ScheduledTask, ScheduleSpec, schedule_preview
+from taskflows.scheduler.models import (
+    RunHandle,
+    ScheduledTask,
+    ScheduleSpec,
+    merge_environment,
+    schedule_preview,
+)
 from taskflows.scheduler.repository import SchedulerRepository
-from taskflows.scheduler.runner import run_now as run_scheduled_now
+from taskflows.scheduler.runner import cancel_run, submit_now
 from taskflows.scheduler.status import diagnose_scheduler, operate_scheduler, scheduler_status
 from taskflows.service import RestartPolicy, Service, Venv
 
@@ -700,9 +709,19 @@ async def create_portable_schedule(request: PortableScheduleRequest) -> dict[str
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="expected_revision requires replace_existing=true",
         )
+    if request.no_timeout and "timeout" in request.model_fields_set:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="no_timeout cannot be combined with timeout",
+        )
+    if request.timeout is None and not request.no_timeout:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="use no_timeout=true to create an unbounded command",
+        )
     try:
         if request.run_at is not None:
-            schedule = ScheduleSpec.once(request.run_at)
+            schedule = ScheduleSpec.once(request.run_at, timezone=request.timezone)
         elif request.interval_seconds is not None:
             schedule = ScheduleSpec.interval(
                 request.interval_seconds,
@@ -716,7 +735,7 @@ async def create_portable_schedule(request: PortableScheduleRequest) -> dict[str
             request.command,
             schedule,
             enabled=request.enabled,
-            timeout=request.timeout,
+            timeout=None if request.no_timeout else request.timeout,
             cwd=request.cwd,
             environment=request.environment,
             misfire_grace_time=request.misfire_grace_time,
@@ -727,6 +746,114 @@ async def create_portable_schedule(request: PortableScheduleRequest) -> dict[str
             SchedulerRepository().add,
             task,
             replace_existing=request.replace_existing,
+            expected_revision=request.expected_revision,
+        )
+    except RevisionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        code = (
+            status.HTTP_409_CONFLICT
+            if "already exists" in str(exc)
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return _portable_task_data(saved)
+
+
+@app.patch("/api/schedules/{identifier}")
+async def patch_portable_schedule(
+    identifier: str, request: PortableSchedulePatch
+) -> dict[str, Any]:
+    """Update selected fields without requiring secret environment values again."""
+
+    repository = SchedulerRepository()
+    try:
+        current = await asyncio.to_thread(repository.resolve, identifier)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    fields = request.model_fields_set
+    trigger_fields = fields & {"run_at", "interval_seconds", "cron"}
+    try:
+        if trigger_fields:
+            selected = [
+                ("date", request.run_at),
+                ("interval", request.interval_seconds),
+                ("cron", request.cron),
+            ]
+            chosen = [(kind, value) for kind, value in selected if value is not None]
+            if len(chosen) != 1:
+                raise ValueError("provide exactly one of run_at, interval_seconds, or cron")
+            kind, value = chosen[0]
+            timezone = request.timezone or current.schedule.timezone
+            if kind == "date":
+                schedule = ScheduleSpec.once(str(value), timezone=timezone)
+            elif kind == "interval":
+                schedule = ScheduleSpec.interval(
+                    float(value), start_at=request.start_at, timezone=timezone
+                )
+            else:
+                schedule = ScheduleSpec.cron(str(value), timezone=timezone)
+        elif fields & {"timezone", "start_at"}:
+            timezone = request.timezone or current.schedule.timezone
+            if current.schedule.kind == "date":
+                if "start_at" in fields:
+                    raise ValueError("start_at can only be used with an interval schedule")
+                schedule = ScheduleSpec.once(str(current.schedule.value), timezone=timezone)
+            elif current.schedule.kind == "interval":
+                schedule = ScheduleSpec.interval(
+                    float(current.schedule.value),
+                    start_at=request.start_at
+                    if "start_at" in fields
+                    else current.schedule.start_at,
+                    timezone=timezone,
+                )
+            else:
+                if "start_at" in fields:
+                    raise ValueError("start_at can only be used with an interval schedule")
+                schedule = ScheduleSpec.cron(str(current.schedule.value), timezone=timezone)
+        else:
+            schedule = current.schedule
+
+        environment = dict(current.environment)
+        for name in request.remove_environment:
+            for existing in tuple(environment):
+                if existing.casefold() == name.casefold():
+                    environment.pop(existing)
+        if request.environment is not None:
+            environment = merge_environment(environment, request.environment)
+
+        timeout = current.timeout
+        if request.no_timeout:
+            if "timeout" in fields:
+                raise ValueError("no_timeout cannot be combined with timeout")
+            timeout = None
+        elif "timeout" in fields:
+            if request.timeout is None:
+                raise ValueError("use no_timeout=true to create an unbounded command")
+            timeout = request.timeout
+
+        candidate = replace(
+            current,
+            name=request.name if request.name is not None else current.name,
+            command=tuple(request.command) if request.command is not None else current.command,
+            schedule=schedule,
+            enabled=request.enabled if request.enabled is not None else current.enabled,
+            timeout=timeout,
+            cwd=request.cwd if "cwd" in fields else current.cwd,
+            environment=environment,
+            misfire_grace_time=request.misfire_grace_time
+            if "misfire_grace_time" in fields
+            else current.misfire_grace_time,
+            coalesce=request.coalesce if request.coalesce is not None else current.coalesce,
+            max_instances=request.max_instances
+            if request.max_instances is not None
+            else current.max_instances,
+        )
+        saved = await asyncio.to_thread(
+            repository.update,
+            current.id,
+            candidate,
             expected_revision=request.expected_revision,
         )
     except RevisionConflict as exc:
@@ -778,19 +905,42 @@ async def delete_portable_schedule(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
-@app.post("/api/schedules/{identifier}/run")
-async def run_portable_schedule(identifier: str) -> dict[str, int]:
+@app.post("/api/schedules/{identifier}/run", status_code=status.HTTP_202_ACCEPTED)
+async def run_portable_schedule(
+    identifier: str,
+    response: Response = None,  # type: ignore[assignment]
+    wait: bool = Query(False),
+    timeout: float = Query(60.0, gt=0, le=3600),
+) -> dict[str, Any]:
     repository = SchedulerRepository()
+    legacy_direct_call = response is None
+    if legacy_direct_call:
+        # Preserve the pre-handle Python-call contract. HTTP clients always
+        # receive the durable RunHandle representation.
+        wait = True
+        timeout = 60.0
+    else:
+        response.status_code = status.HTTP_202_ACCEPTED
     try:
-        exit_code = await asyncio.to_thread(run_scheduled_now, repository.database_path, identifier)
+        handle = await asyncio.to_thread(submit_now, repository.database_path, identifier)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    if exit_code is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="task was not started because its overlap limit was reached",
-        )
-    return {"exit_code": exit_code}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    if wait:
+        deadline = time.monotonic() + timeout
+        while not handle.terminal and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+            handle = await asyncio.to_thread(repository.get_run, handle.id)
+        if not handle.terminal:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="run is still active"
+            )
+        if response is not None:
+            response.status_code = status.HTTP_200_OK
+    if legacy_direct_call:
+        return {"exit_code": handle.exit_code}
+    return handle.to_dict()
 
 
 @app.get("/api/schedule-runs")
@@ -801,7 +951,66 @@ async def portable_schedule_history(
         runs = await asyncio.to_thread(SchedulerRepository().history, identifier, limit=limit)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    return {"runs": runs}
+    return {"runs": [RunHandle.from_row(run).to_dict() for run in runs]}
+
+
+@app.get("/api/schedule-runs/{run_id}")
+async def portable_schedule_run(run_id: str) -> dict[str, Any]:
+    try:
+        run = await asyncio.to_thread(SchedulerRepository().get_run, run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return run.to_dict()
+
+
+@app.post("/api/schedule-runs/{run_id}/cancel")
+async def cancel_portable_schedule_run(run_id: str) -> dict[str, Any]:
+    repository = SchedulerRepository()
+    try:
+        run = await asyncio.to_thread(cancel_run, repository.database_path, run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return run.to_dict()
+
+
+def _safe_run_log(repository: SchedulerRepository, value: str) -> Path:
+    root = (repository.database_path.parent / "runs").resolve()
+    path = Path(value).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("run log is outside the Taskflows run directory")
+    return path
+
+
+def _tail_file(path: Path, lines: int, *, max_bytes: int = 1024 * 1024) -> str:
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(max(size - max_bytes, 0))
+        content = stream.read(max_bytes)
+    return b"\n".join(content.splitlines()[-lines:]).decode(errors="replace")
+
+
+@app.get("/api/schedule-runs/{run_id}/logs")
+async def portable_schedule_run_logs(
+    run_id: str,
+    stream: Literal["stdout", "stderr", "both"] = Query("both"),
+    lines: int = Query(200, ge=1, le=10000),
+) -> dict[str, str]:
+    repository = SchedulerRepository()
+    try:
+        run = await asyncio.to_thread(repository.get_run, run_id)
+        selected = ("stdout", "stderr") if stream == "both" else (stream,)
+        result: dict[str, str] = {}
+        for name in selected:
+            value = run.stdout_path if name == "stdout" else run.stderr_path
+            if value:
+                path = _safe_run_log(repository, value)
+                result[name] = await asyncio.to_thread(_tail_file, path, lines)
+        return result
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @app.get("/api/scheduler/status")
