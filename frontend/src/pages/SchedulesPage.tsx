@@ -21,8 +21,14 @@ import type {
   ScheduleRun,
   UpdateScheduleRequest,
 } from "@/types";
+import {
+  parseCommandArguments,
+  parseEnvironmentOverrides,
+} from "@/utils/scheduler";
 
 type ScheduleKind = "interval" | "cron" | "date";
+const browserTimezone =
+  Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 function formatDate(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "—";
@@ -43,10 +49,15 @@ export function SchedulesPage() {
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
   const [scheduleValue, setScheduleValue] = useState("300");
-  const [timezone, setTimezone] = useState(
-    Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-  );
+  const [timezone, setTimezone] = useState(browserTimezone);
   const [timeout, setTimeout] = useState("3600");
+  const [cwd, setCwd] = useState("");
+  const [environment, setEnvironment] = useState("");
+  const [removeEnvironment, setRemoveEnvironment] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [coalesce, setCoalesce] = useState(true);
+  const [misfireGrace, setMisfireGrace] = useState("3600");
+  const [maxInstances, setMaxInstances] = useState("1");
   const [editing, setEditing] = useState<PortableSchedule | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [preview, setPreview] = useState<string[]>([]);
@@ -55,6 +66,24 @@ export function SchedulesPage() {
     stdout?: string;
     stderr?: string;
   } | null>(null);
+
+  const resetForm = () => {
+    setEditing(null);
+    setKind("interval");
+    setName("");
+    setCommand("");
+    setScheduleValue("300");
+    setTimezone(browserTimezone);
+    setTimeout("3600");
+    setCwd("");
+    setEnvironment("");
+    setRemoveEnvironment("");
+    setEnabled(true);
+    setCoalesce(true);
+    setMisfireGrace("3600");
+    setMaxInstances("1");
+    setPreview([]);
+  };
 
   const schedulesQuery = useQuery({
     queryKey: ["schedules"],
@@ -83,8 +112,7 @@ export function SchedulesPage() {
   const mutation = useMutation({
     mutationFn: createSchedule,
     onSuccess: async () => {
-      setName("");
-      setCommand("");
+      resetForm();
       setMessage("Schedule created");
       await refresh();
     },
@@ -100,9 +128,7 @@ export function SchedulesPage() {
       request: UpdateScheduleRequest;
     }) => updateSchedule(id, request),
     onSuccess: async () => {
-      setEditing(null);
-      setName("");
-      setCommand("");
+      resetForm();
       setMessage("Schedule updated");
       await refresh();
     },
@@ -121,12 +147,11 @@ export function SchedulesPage() {
     const args =
       editing && command === editing.command.join("\n")
         ? editing.command
-        : command
-            .split("\n")
-            .map((part) => part.trim())
-            .filter(Boolean);
-    if (!name.trim() || args.length === 0) {
-      setMessage("Enter a name and one command argument per line");
+        : parseCommandArguments(command);
+    if (!name.trim() || args.length === 0 || !args[0]) {
+      setMessage(
+        "Enter a name and a non-empty executable on the first command line",
+      );
       return;
     }
     const timeoutSeconds = Number(timeout);
@@ -137,11 +162,39 @@ export function SchedulesPage() {
       setMessage("Timeout must be a positive number or blank for no timeout");
       return;
     }
+    const maxInstanceCount = Number(maxInstances);
+    if (!Number.isInteger(maxInstanceCount) || maxInstanceCount < 1) {
+      setMessage("Maximum instances must be a positive integer");
+      return;
+    }
+    const misfireSeconds = Number(misfireGrace);
+    if (
+      misfireGrace.trim() &&
+      (!Number.isInteger(misfireSeconds) || misfireSeconds < 1)
+    ) {
+      setMessage("Misfire grace must be a positive whole number or blank");
+      return;
+    }
+    let environmentOverrides: Record<string, string>;
+    try {
+      environmentOverrides = parseEnvironmentOverrides(environment);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+      return;
+    }
     const request: CreateScheduleRequest = {
       name: name.trim(),
       command: args,
       timezone,
       ...(timeout.trim() ? { timeout: timeoutSeconds } : { no_timeout: true }),
+      enabled,
+      ...(cwd.trim() ? { cwd: cwd.trim() } : {}),
+      ...(Object.keys(environmentOverrides).length
+        ? { environment: environmentOverrides }
+        : {}),
+      misfire_grace_time: misfireGrace.trim() ? misfireSeconds : null,
+      coalesce,
+      max_instances: maxInstanceCount,
     };
     if (kind === "interval") {
       const seconds = Number(scheduleValue);
@@ -157,13 +210,32 @@ export function SchedulesPage() {
     if (kind === "cron") request.cron = scheduleValue;
     if (kind === "date") request.run_at = scheduleValue;
     if (editing) {
+      const removedNames = removeEnvironment
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
       updateMutation.mutate({
         id: editing.id,
-        request: { ...request, expected_revision: editing.revision },
+        request: {
+          ...request,
+          ...(removedNames.length ? { remove_environment: removedNames } : {}),
+          expected_revision: editing.revision,
+        },
       });
     } else {
       mutation.mutate(request);
     }
+  };
+
+  const changeScheduleKind = (nextKind: ScheduleKind) => {
+    setKind(nextKind);
+    setScheduleValue(
+      nextKind === "interval"
+        ? "300"
+        : nextKind === "cron"
+          ? "0 9 * * 1-5"
+          : new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    );
   };
 
   const edit = (schedule: PortableSchedule) => {
@@ -174,6 +246,17 @@ export function SchedulesPage() {
     setScheduleValue(String(schedule.schedule.value));
     setTimezone(schedule.schedule.timezone);
     setTimeout(schedule.timeout === null ? "" : String(schedule.timeout));
+    setCwd(schedule.cwd || "");
+    setEnvironment("");
+    setRemoveEnvironment("");
+    setEnabled(schedule.enabled);
+    setCoalesce(schedule.coalesce);
+    setMisfireGrace(
+      schedule.misfire_grace_time === null
+        ? ""
+        : String(schedule.misfire_grace_time),
+    );
+    setMaxInstances(String(schedule.max_instances));
     setPreview([]);
     setMessage(
       `Editing ${schedule.name}; secret environment values will be preserved`,
@@ -293,9 +376,7 @@ export function SchedulesPage() {
             <button
               className="text-sm text-muted hover:text-foreground"
               onClick={() => {
-                setEditing(null);
-                setName("");
-                setCommand("");
+                resetForm();
                 setMessage(null);
               }}
             >
@@ -329,13 +410,19 @@ export function SchedulesPage() {
               onChange={(event) => setCommand(event.target.value)}
               placeholder={"python\n/path/to/job.py\n--flag"}
             />
+            <span className="mt-1 block text-xs text-muted">
+              Arguments are preserved exactly; a blank line represents an empty
+              argument.
+            </span>
           </label>
           <label className="text-sm">
             Schedule type
             <select
               className="mt-1 w-full rounded border border-border bg-background px-3 py-2"
               value={kind}
-              onChange={(event) => setKind(event.target.value as ScheduleKind)}
+              onChange={(event) =>
+                changeScheduleKind(event.target.value as ScheduleKind)
+              }
             >
               <option value="interval">Interval seconds</option>
               <option value="cron">Cron (five fields)</option>
@@ -365,6 +452,86 @@ export function SchedulesPage() {
             />
           </label>
         </div>
+        <details className="rounded border border-border p-4">
+          <summary className="cursor-pointer text-sm font-medium">
+            Execution and recovery options
+          </summary>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <label className="text-sm md:col-span-2">
+              Working directory
+              <input
+                className="mt-1 w-full rounded border border-border bg-background px-3 py-2 font-mono"
+                value={cwd}
+                onChange={(event) => setCwd(event.target.value)}
+                placeholder="Defaults to the directory where the definition is created"
+              />
+            </label>
+            <label className="text-sm">
+              Misfire grace seconds (blank for no limit)
+              <input
+                type="number"
+                min="1"
+                step="1"
+                className="mt-1 w-full rounded border border-border bg-background px-3 py-2"
+                value={misfireGrace}
+                onChange={(event) => setMisfireGrace(event.target.value)}
+              />
+            </label>
+            <label className="text-sm">
+              Maximum concurrent instances
+              <input
+                type="number"
+                min="1"
+                step="1"
+                className="mt-1 w-full rounded border border-border bg-background px-3 py-2"
+                value={maxInstances}
+                onChange={(event) => setMaxInstances(event.target.value)}
+              />
+            </label>
+            <label className="text-sm md:col-span-2">
+              Environment overrides (KEY=VALUE, one per line)
+              <textarea
+                className="mt-1 w-full rounded border border-border bg-background px-3 py-2 font-mono"
+                rows={3}
+                value={environment}
+                onChange={(event) => setEnvironment(event.target.value)}
+                placeholder="REPORT_FORMAT=json"
+              />
+              <span className="mt-1 block text-xs text-muted">
+                {editing?.environment_names.length
+                  ? `Stored values remain secret and unchanged unless replaced. Existing names: ${editing.environment_names.join(", ")}`
+                  : "Values are stored in the owner-only scheduler registry."}
+              </span>
+            </label>
+            {editing && editing.environment_names.length > 0 && (
+              <label className="text-sm md:col-span-2">
+                Remove stored variables (comma-separated names)
+                <input
+                  className="mt-1 w-full rounded border border-border bg-background px-3 py-2 font-mono"
+                  value={removeEnvironment}
+                  onChange={(event) => setRemoveEnvironment(event.target.value)}
+                  placeholder={editing.environment_names.join(", ")}
+                />
+              </label>
+            )}
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(event) => setEnabled(event.target.checked)}
+              />
+              Enable this definition
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={coalesce}
+                onChange={(event) => setCoalesce(event.target.checked)}
+              />
+              Coalesce missed occurrences
+            </label>
+          </div>
+        </details>
         <button
           disabled={mutation.isPending || updateMutation.isPending}
           className="px-4 py-2 rounded bg-electric-blue text-black disabled:opacity-50"
@@ -401,7 +568,7 @@ export function SchedulesPage() {
                     <td className="p-3">
                       <div className="font-medium">{schedule.name}</div>
                       <code className="text-xs text-muted">
-                        {schedule.command.join(" ")}
+                        {JSON.stringify(schedule.command)}
                       </code>
                     </td>
                     <td className="p-3">

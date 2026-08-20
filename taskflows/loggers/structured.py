@@ -3,7 +3,7 @@ import os
 import time
 import uuid
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, cast
 
 import structlog
 import xxhash
@@ -11,6 +11,7 @@ from structlog.contextvars import (
     bind_contextvars,
     clear_contextvars,
 )
+from structlog.typing import BindableLogger, EventDict
 
 # Context variable for request tracking
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
@@ -27,7 +28,7 @@ _loki_config: dict[str, Any] = {
 
 
 # Custom processor to add static labels for Loki
-def add_loki_labels(logger, method_name, event_dict):
+def add_loki_labels(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
     """Add static labels that Loki can use for indexing"""
     # Direct use should reflect the active process environment; configured
     # structlog pipelines install a scoped processor with explicit labels.
@@ -50,7 +51,7 @@ def add_loki_labels(logger, method_name, event_dict):
 
 
 # Custom processor to ensure proper severity levels for Loki
-def normalize_log_level(logger, method_name, event_dict):
+def normalize_log_level(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
     """Normalize log level names for Loki compatibility"""
     if "level" in event_dict:
         event_dict["severity"] = event_dict["level"].upper()
@@ -67,14 +68,14 @@ def normalize_log_level(logger, method_name, event_dict):
 
 
 # Add nanosecond timestamp for better Loki precision
-def add_nano_timestamp(logger, method_name, event_dict):
+def add_nano_timestamp(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
     """Add nanosecond precision timestamp for Loki"""
     event_dict["timestamp_ns"] = time.time_ns()
     return event_dict
 
 
 # Add event fingerprint for deduplication
-def add_event_fingerprint(logger, method_name, event_dict):
+def add_event_fingerprint(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
     """Add event fingerprint for identifying duplicate events"""
     # Create fingerprint from stable fields using xxhash (faster than MD5)
     fingerprint_fields = [
@@ -107,7 +108,7 @@ _LOKI_TOP_LEVEL_FIELDS = {
 }
 
 
-def organize_fields_for_loki(logger, method_name, event_dict):
+def organize_fields_for_loki(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
     """Move high-cardinality fields into a nested context object.
 
     Loki labels should stay low-cardinality. This processor keeps stable fields
@@ -132,7 +133,7 @@ def organize_fields_for_loki(logger, method_name, event_dict):
 
 
 # Default structlog configuration (can be overridden by configure_loki_logging)
-_default_processors = [
+_default_processors: list[Any] = [
     # Add context early
     structlog.contextvars.merge_contextvars,
     structlog.processors.add_log_level,
@@ -200,7 +201,7 @@ def get_struct_logger(
     request_id: str | None = None,
     trace_id: str | None = None,
     **context: Any,
-) -> structlog.BoundLogger:
+) -> BindableLogger:
     """Get a structured logger with optional context.
 
     Args:
@@ -226,11 +227,11 @@ def get_struct_logger(
     if context:
         logger = logger.bind(**context)
 
-    return logger
+    return cast(BindableLogger, logger)
 
 
 def set_request_context(
-    request_id: str | None = None, trace_id: str | None = None, **kwargs
+    request_id: str | None = None, trace_id: str | None = None, **kwargs: Any
 ) -> None:
     """Set request-scoped context that will be included in all logs.
 
@@ -293,7 +294,7 @@ def configure_loki_logging(
 
     labels = extra_labels or {}
 
-    def add_custom_loki_labels(logger, method_name, event_dict):
+    def add_custom_loki_labels(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
         """Add static labels that Loki can use for indexing"""
         event_dict["app"] = app_name
         event_dict["environment"] = environment or os.getenv("ENVIRONMENT", "production")
@@ -316,10 +317,10 @@ def configure_loki_logging(
 
         return event_dict
 
-    def truncate_strings(logger, method_name, event_dict):
+    def truncate_strings(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
         """Truncate long strings to prevent huge log entries"""
 
-        def truncate(obj, max_len=max_string_length):
+        def truncate(obj: Any, max_len: int = max_string_length) -> Any:
             if isinstance(obj, str) and len(obj) > max_len:
                 return obj[:max_len] + "... (truncated)"
             if isinstance(obj, dict):
@@ -328,10 +329,10 @@ def configure_loki_logging(
                 return [truncate(item, max_len) for item in obj]
             return obj
 
-        return truncate(event_dict)
+        return cast(EventDict, truncate(event_dict))
 
     # Build processor list
-    processors = [
+    processors: list[Any] = [
         # Add context early
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,

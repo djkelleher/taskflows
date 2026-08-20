@@ -8,7 +8,7 @@ Windows.
 
 from .models import RunHandle, ScheduledTask, ScheduleSpec, schedule_preview
 from .repository import HistoryPruneResult, SchedulerRepository
-from .runner import cancel_run, submit_now
+from .runner import cancel_run, enqueue_now, submit_now
 from .status import (
     DiagnosticCheck,
     SchedulerOperation,
@@ -35,6 +35,7 @@ __all__ = [
     "SupervisorStatus",
     "diagnose_scheduler",
     "cancel_run",
+    "enqueue_now",
     "get_supervisor",
     "operate_scheduler",
     "schedule_preview",

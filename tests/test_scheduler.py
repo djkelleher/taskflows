@@ -4,6 +4,7 @@ import plistlib
 import socket
 import sqlite3
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -43,6 +44,7 @@ from taskflows.schedule import Calendar
 from taskflows.scheduler import installer, supervisor
 from taskflows.scheduler import repository as repository_module
 from taskflows.scheduler.daemon import DaemonAlreadyRunning, SchedulerDaemon, _SingletonLock
+from taskflows.scheduler.executor import DurableThreadPoolExecutor
 from taskflows.scheduler.models import (
     ScheduledTask,
     ScheduleSpec,
@@ -61,6 +63,7 @@ from taskflows.scheduler.runner import (
     _assign_windows_job,
     _finish_process_tree,
     cancel_run,
+    enqueue_now,
     execute_scheduled_task,
     run_now,
     submit_now,
@@ -522,6 +525,65 @@ def test_repository_deduplicates_and_adopts_durable_occurrences(tmp_path):
     assert repository.history(task.id)[0]["status"] == "queued"
 
 
+def test_recovered_manual_run_preserves_disabled_run_semantics(tmp_path):
+    repository = make_repository(tmp_path)
+    marker = tmp_path / "manual-disabled"
+    task = repository.add(
+        ScheduledTask.create(
+            "manual-disabled",
+            [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"],
+            ScheduleSpec.interval(60),
+            enabled=False,
+        )
+    )
+
+    handle = enqueue_now(repository.database_path, task.id)
+    adopted = repository.adopt_orphaned_occurrences()
+
+    assert [occurrence.run_id for occurrence in adopted] == [handle.id]
+    assert adopted[0].allow_disabled is True
+    occurrence = adopted[0]
+    assert (
+        execute_scheduled_task(
+            str(repository.database_path),
+            occurrence.task_id,
+            occurrence.revision,
+            run_id=occurrence.run_id,
+            scheduled_for=occurrence.scheduled_for.isoformat(),
+            allow_disabled=occurrence.allow_disabled,
+        )
+        == 0
+    )
+    assert marker.exists()
+    assert repository.get_run(handle.id).status == "succeeded"
+
+
+def test_executor_capacity_admission_is_atomic(tmp_path):
+    executor = DurableThreadPoolExecutor(
+        str(tmp_path / "scheduler.sqlite3"), max_workers=1, max_pending_jobs=1
+    )
+    barrier = threading.Barrier(3)
+
+    def reserve() -> bool:
+        barrier.wait()
+        return executor._reserve_capacity()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as callers:
+            futures = [callers.submit(reserve) for _ in range(2)]
+            barrier.wait()
+            results = [future.result() for future in futures]
+        assert sorted(results) == [False, True]
+        assert executor.pending_count == 1
+        executor._release_capacity()
+        assert executor.pending_count == 0
+    finally:
+        executor._pool.shutdown(wait=True)
+
+    with pytest.raises(ValueError, match="max_pending_jobs must be at least one"):
+        DurableThreadPoolExecutor(str(tmp_path / "invalid.sqlite3"), max_pending_jobs=0)
+
+
 def test_reserved_occurrence_records_the_actual_fire_time(tmp_path):
     repository = make_repository(tmp_path)
     task = repository.add(
@@ -783,6 +845,28 @@ def test_legacy_task_without_cwd_uses_home_consistently(tmp_path, monkeypatch):
 
     assert run_now(repository.database_path, task.id) == 0
     assert marker.read_text() == str(home)
+
+
+def test_legacy_relative_cwd_uses_home_as_its_stable_base(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    home = tmp_path / "home"
+    working_directory = home / "jobs"
+    working_directory.mkdir(parents=True)
+    marker = tmp_path / "relative-cwd.txt"
+    task = ScheduledTask.create(
+        "legacy-relative-cwd",
+        [
+            sys.executable,
+            "-c",
+            f"import pathlib; pathlib.Path({str(marker)!r}).write_text(str(pathlib.Path.cwd()))",
+        ],
+        ScheduleSpec.interval(60),
+    )
+    repository.add(replace(task, cwd="jobs"))
+    monkeypatch.setattr("taskflows.scheduler.models.Path.home", lambda: home)
+
+    assert run_now(repository.database_path, task.id) == 0
+    assert marker.read_text() == str(working_directory)
 
 
 def test_runner_enforces_timeout(tmp_path):
@@ -1077,6 +1161,77 @@ def test_schedule_cli_add_list_and_run(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert marker.exists()
     assert repository.resolve("cli-job").enabled is True
+    assert repository.resolve("cli-job").timeout == 3600
+
+
+def test_schedule_cli_no_wait_requires_daemon_and_only_enqueues(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("queued-cli", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        "taskflows.scheduler.cli.runtime_status", lambda repository: SimpleNamespace(healthy=False)
+    )
+    unavailable = runner.invoke(cli, ["schedule", "run", task.id, "--no-wait"])
+    assert unavailable.exit_code == 1
+    assert "scheduler daemon is not responding" in unavailable.output
+    assert repository.history(task.id) == []
+
+    monkeypatch.setattr(
+        "taskflows.scheduler.cli.runtime_status", lambda repository: SimpleNamespace(healthy=True)
+    )
+    accepted = runner.invoke(cli, ["schedule", "run", task.id, "--no-wait"])
+    assert accepted.exit_code == 0, accepted.output
+    assert "Accepted run" in accepted.output
+    assert repository.history(task.id)[0]["status"] == "queued"
+
+
+def test_schedule_cli_rejects_conflicting_timeout_options(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "schedule",
+            "add",
+            "timeout-conflict",
+            "--interval",
+            "1m",
+            "--timeout",
+            "5m",
+            "--no-timeout",
+            "--",
+            "echo",
+            "ok",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--no-timeout cannot be combined with --timeout" in result.output
+
+
+def test_schedule_cli_remove_uses_revision_precondition(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("remove-safely", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    monkeypatch.setattr("taskflows.scheduler.cli._repository", lambda: repository)
+    calls: list[tuple[str, int | None]] = []
+
+    def delete(identifier: str, *, expected_revision: int | None = None) -> bool:
+        calls.append((identifier, expected_revision))
+        return True
+
+    monkeypatch.setattr(repository, "delete", delete)
+
+    result = CliRunner().invoke(cli, ["schedule", "remove", task.id, "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [(task.id, task.revision)]
 
 
 def test_schedule_cli_accepts_human_durations_env_files_and_reads_logs(tmp_path, monkeypatch):
@@ -2054,6 +2209,9 @@ async def test_schedule_api_accepts_manual_run_asynchronously(tmp_path, monkeypa
         )
     )
     monkeypatch.setattr("taskflows.admin.api.SchedulerRepository", lambda: repository)
+    monkeypatch.setattr(
+        "taskflows.admin.api.runtime_status", lambda repository: SimpleNamespace(healthy=True)
+    )
     response = Response()
 
     result = await run_portable_schedule(task.id, response, wait=False, timeout=1)
@@ -2061,10 +2219,25 @@ async def test_schedule_api_accepts_manual_run_asynchronously(tmp_path, monkeypa
     assert response.status_code == 202
     assert result["id"]
     assert result["task_revision"] == task.revision
-    deadline = time.monotonic() + 5
-    while not repository.get_run(result["id"]).terminal and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert repository.get_run(result["id"]).status == "succeeded"
+    assert repository.get_run(result["id"]).status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_schedule_api_rejects_async_run_without_daemon(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        ScheduledTask.create("offline-run", ["echo", "ok"], ScheduleSpec.interval(60))
+    )
+    monkeypatch.setattr("taskflows.admin.api.SchedulerRepository", lambda: repository)
+    monkeypatch.setattr(
+        "taskflows.admin.api.runtime_status", lambda repository: SimpleNamespace(healthy=False)
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await run_portable_schedule(task.id, Response(), wait=False, timeout=1)
+
+    assert error.value.status_code == 503
+    assert repository.history(task.id) == []
 
 
 def test_launchd_restart_bootstraps_an_unloaded_agent(tmp_path, monkeypatch):

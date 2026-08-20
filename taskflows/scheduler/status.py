@@ -587,7 +587,7 @@ def _task_definition_errors(tasks: list[ScheduledTask]) -> list[str]:
     """Return portable preflight failures without executing user commands."""
     errors: list[str] = []
     for task in tasks:
-        working_directory = Path(task.cwd) if task.cwd else Path.home()
+        working_directory = task.working_directory
         if not working_directory.is_dir():
             errors.append(f"{task.name}: working directory does not exist ({working_directory})")
             # A relative executable cannot be evaluated against an invalid cwd.

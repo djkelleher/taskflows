@@ -1,7 +1,8 @@
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 from loguru import logger
 
@@ -24,7 +25,7 @@ def any_case_env_var(var: str, default: str | None = None) -> str | bool | None:
     return value
 
 
-_configured_loggers = set()
+_configured_loggers: set[str] = set()
 _configured_file_sinks: dict[Path, int] = {}
 _logger_levels: dict[str, int] = {}
 _logger_file_paths: dict[str, Path] = {}
@@ -68,8 +69,8 @@ def _build_format_string(
     return " ".join(format_parts)
 
 
-def _shared_file_filter(file_path: Path):
-    def filter_record(record) -> bool:
+def _shared_file_filter(file_path: Path) -> Callable[[Any], bool]:
+    def filter_record(record: Any) -> bool:
         logger_name = record["extra"].get("logger_name")
         if logger_name is None:
             return False
@@ -79,6 +80,41 @@ def _shared_file_filter(file_path: Path):
         return minimum_level is None or record["level"].no >= minimum_level
 
     return filter_record
+
+
+def _env_bool(var: str, default: str | None = None) -> bool | None:
+    value = any_case_env_var(var, default)
+    if value is None or isinstance(value, bool):
+        return value
+    raise ValueError(f"{var} must be a boolean value")
+
+
+def _env_text(var: str, default: str | None = None) -> str | None:
+    value = any_case_env_var(var, default)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{var} must be a text value")
+    return value
+
+
+def _env_int(var: str) -> int | None:
+    value = _env_text(var)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{var} must be an integer") from exc
+
+
+def _env_source(var: str, default: str | None = None) -> Literal["pathname", "filename"] | None:
+    value = _env_text(var, default)
+    if value is None:
+        return None
+    if value not in {"pathname", "filename"}:
+        raise ValueError(f"{var} must be 'pathname' or 'filename'")
+    return cast(Literal["pathname", "filename"], value)
 
 
 def get_logger(
@@ -91,7 +127,7 @@ def get_logger(
     max_rotations: int | None = 2,
     file_name: str | Path | None = None,
     single_file: bool | None = None,
-):
+) -> Any:
     """Create a new logger or return an existing logger with the given name.
 
     All arguments besides for `name` can be set via environment variables in the form `{LOGGER NAME}_{VARIABLE NAME}` or `LOGGERS_{VARIABLE NAME}`.
@@ -122,56 +158,52 @@ def get_logger(
     # Resolve configuration from environment variables, named overrides global
     if no_terminal is None:
         if name:
-            no_terminal = any_case_env_var(f"{name}_NO_TERMINAL")
+            no_terminal = _env_bool(f"{name}_NO_TERMINAL")
         if no_terminal is None:
-            no_terminal = any_case_env_var("LOGGERS_NO_TERMINAL")
+            no_terminal = _env_bool("LOGGERS_NO_TERMINAL")
 
     if file_dir is None:
         if name:
-            file_dir = any_case_env_var(f"{name}_FILE_DIR")
+            file_dir = _env_text(f"{name}_FILE_DIR")
         if file_dir is None:
-            file_dir = any_case_env_var("LOGGERS_FILE_DIR")
+            file_dir = _env_text("LOGGERS_FILE_DIR")
 
     if level is None:
         if name:
-            level = any_case_env_var(f"{name}_LOG_LEVEL")
+            level = _env_text(f"{name}_LOG_LEVEL")
         if level is None:
-            level = any_case_env_var("LOGGERS_LOG_LEVEL", "INFO")
+            level = _env_text("LOGGERS_LOG_LEVEL", "INFO")
 
     if show_source is None:
         if name:
-            show_source = any_case_env_var(f"{name}_SHOW_SOURCE")
+            show_source = _env_source(f"{name}_SHOW_SOURCE")
         if show_source is None:
-            show_source = any_case_env_var("LOGGERS_SHOW_SOURCE", "filename")
+            show_source = _env_source("LOGGERS_SHOW_SOURCE", "filename")
 
     if file_max_bytes is None:
         if name:
-            file_max_bytes = any_case_env_var(f"{name}_FILE_MAX_BYTES")
+            file_max_bytes = _env_int(f"{name}_FILE_MAX_BYTES")
         if file_max_bytes is None:
-            file_max_bytes = any_case_env_var("LOGGERS_FILE_MAX_BYTES")
-    if file_max_bytes:
-        file_max_bytes = int(file_max_bytes)
+            file_max_bytes = _env_int("LOGGERS_FILE_MAX_BYTES")
 
     if max_rotations is None:
         if name:
-            max_rotations = any_case_env_var(f"{name}_MAX_ROTATIONS")
+            max_rotations = _env_int(f"{name}_MAX_ROTATIONS")
         if max_rotations is None:
-            max_rotations = any_case_env_var("LOGGERS_MAX_ROTATIONS")
-    if max_rotations:
-        max_rotations = int(max_rotations)
+            max_rotations = _env_int("LOGGERS_MAX_ROTATIONS")
 
     if single_file is None:
         if name:
-            single_file = any_case_env_var(f"{name}_SINGLE_FILE")
+            single_file = _env_bool(f"{name}_SINGLE_FILE")
         if single_file is None:
-            single_file = any_case_env_var("LOGGERS_SINGLE_FILE", "true")
+            single_file = _env_bool("LOGGERS_SINGLE_FILE", "true")
     single_file = bool(single_file)
 
     if file_name is None:
         if name:
-            file_name = any_case_env_var(f"{name}_FILE_NAME")
+            file_name = _env_text(f"{name}_FILE_NAME")
         if file_name is None:
-            file_name = any_case_env_var("LOGGERS_FILE_NAME", "taskflows.log")
+            file_name = _env_text("LOGGERS_FILE_NAME", "taskflows.log")
 
     normalized_level, level_no = _normalize_level(level)
 

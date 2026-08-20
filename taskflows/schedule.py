@@ -90,7 +90,7 @@ class Calendar(Schedule):
             self.unit_entries.add(f"RandomizedDelaySec={self.randomized_delay}")
 
     @classmethod
-    def from_datetime(cls, dt: datetime):
+    def from_datetime(cls, dt: datetime) -> "Calendar":
         # Preserve fractional seconds. Dropping them can place a near-future
         # timer before the requested instant while the unit is being created.
         time_format = "%H:%M:%S.%f" if dt.microsecond else "%H:%M:%S"

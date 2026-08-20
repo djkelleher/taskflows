@@ -40,7 +40,7 @@ class SecurityConfig(BaseModel):
     # CORS (enabled when UI is enabled)
     enable_cors: bool = False
     allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:7777"]
-    allowed_methods: list[str] = ["GET", "POST", "PUT", "DELETE"]
+    allowed_methods: list[str] = ["GET", "POST", "PUT", "PATCH", "DELETE"]
     # Restrict allowed headers to prevent CSRF - only allow necessary headers
     allowed_headers: list[str] = [
         "Authorization",

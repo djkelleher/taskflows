@@ -322,9 +322,8 @@ def execute_scheduled_task(
         # still contain NULL. Use one documented fallback rather than inheriting
         # the platform supervisor's process directory (/, $HOME, or another
         # backend-specific value).
-        working_directory = task.cwd or str(Path.home())
         popen_kwargs: dict[str, Any] = {
-            "cwd": working_directory,
+            "cwd": str(task.working_directory),
             "env": environment,
         }
         if os.name == "nt":
@@ -478,18 +477,32 @@ def run_now(database_path: str | Path, identifier: str) -> int | None:
     return handle.exit_code
 
 
-def submit_now(database_path: str | Path, identifier: str) -> RunHandle:
-    """Accept a manual run and return immediately with a durable run handle."""
+def enqueue_now(database_path: str | Path, identifier: str) -> RunHandle:
+    """Durably queue a manual run for adoption by the scheduler daemon."""
 
     repository = SchedulerRepository(database_path)
     task = repository.resolve(identifier)
-    handle = repository.reserve_manual_run(task)
+    return repository.reserve_manual_run(task)
+
+
+def submit_now(database_path: str | Path, identifier: str) -> RunHandle:
+    """Accept a manual run and execute it in this long-lived process.
+
+    CLI/API callers that return before completion should use :func:`enqueue_now`
+    so command ownership belongs to the scheduler daemon rather than a daemon
+    thread that disappears with the submitting process.
+    """
+
+    repository = SchedulerRepository(database_path)
+    handle = enqueue_now(repository.database_path, identifier)
+    if handle.task_id is None or handle.task_revision is None:
+        raise RuntimeError(f"manual run {handle.id} has no scheduled definition")
     worker = threading.Thread(
         target=execute_scheduled_task,
         kwargs={
             "database_path": str(repository.database_path),
-            "task_id": task.id,
-            "revision": task.revision,
+            "task_id": handle.task_id,
+            "revision": handle.task_revision,
             "run_id": handle.id,
             "scheduled_for": handle.scheduled_for,
             "allow_disabled": True,

@@ -8,6 +8,10 @@ import {
   getSchedules,
   updateSchedule,
 } from "@/api";
+import {
+  parseCommandArguments,
+  parseEnvironmentOverrides,
+} from "@/utils/scheduler";
 import { SchedulesPage } from "../SchedulesPage";
 
 vi.mock("@/api", () => ({
@@ -74,6 +78,24 @@ describe("SchedulesPage", () => {
       name: "cleanup-new",
     });
     vi.stubGlobal("scrollTo", vi.fn());
+  });
+
+  it("preserves whitespace and empty command arguments", () => {
+    expect(
+      parseCommandArguments("python\r\n padded value \r\n\r\n--flag"),
+    ).toEqual(["python", " padded value ", "", "--flag"]);
+  });
+
+  it("parses environment overrides case-insensitively and preserves values", () => {
+    expect(
+      parseEnvironmentOverrides("Path=first\nPATH= second value \nEMPTY="),
+    ).toEqual({
+      PATH: " second value ",
+      EMPTY: "",
+    });
+    expect(() => parseEnvironmentOverrides("MISSING_VALUE")).toThrow(
+      "Environment entry must be KEY=VALUE",
+    );
   });
 
   it("edits a definition without resetting its interval anchor or secrets", async () => {

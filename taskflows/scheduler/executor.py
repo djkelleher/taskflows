@@ -86,6 +86,7 @@ def _run_recovered(database_path: str, occurrences: list[QueuedOccurrence]) -> N
             occurrence.revision,
             run_id=occurrence.run_id,
             scheduled_for=occurrence.scheduled_for.isoformat(),
+            allow_disabled=occurrence.allow_disabled,
         )
 
 
@@ -99,21 +100,34 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
         *,
         max_pending_jobs: int | None = None,
     ) -> None:
+        if max_pending_jobs is not None and max_pending_jobs < 1:
+            raise ValueError("max_pending_jobs must be at least one")
         super().__init__(max_workers=max_workers)
         self.database_path = database_path
-        self.max_pending_jobs = max_pending_jobs or max_workers * 2
+        self.max_pending_jobs = (
+            max_pending_jobs if max_pending_jobs is not None else max_workers * 2
+        )
         self._pending: set[Any] = set()
+        self._reserved_slots = 0
         self._pending_lock = threading.RLock()
         self._stopping = False
 
     @property
     def pending_count(self) -> int:
         with self._pending_lock:
-            return len(self._pending)
+            return self._reserved_slots
 
-    def _has_capacity(self) -> bool:
+    def _reserve_capacity(self) -> bool:
         with self._pending_lock:
-            return not self._stopping and len(self._pending) < self.max_pending_jobs
+            if self._stopping or self._reserved_slots >= self.max_pending_jobs:
+                return False
+            self._reserved_slots += 1
+            return True
+
+    def _release_capacity(self) -> None:
+        with self._pending_lock:
+            if self._reserved_slots:
+                self._reserved_slots -= 1
 
     def _track(self, future: Any) -> None:
         with self._pending_lock:
@@ -122,6 +136,7 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
         def forget(completed: Any) -> None:
             with self._pending_lock:
                 self._pending.discard(completed)
+                self._reserved_slots -= 1
 
         future.add_done_callback(forget)
 
@@ -170,18 +185,25 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
             else:
                 executable_times.append(run_time)
 
-        if executable_times and not self._has_capacity():
+        if executable_times and not self._reserve_capacity():
             if task is not None and task.revision == revision:
                 for run_time in executable_times:
                     repository.record_missed(task, run_time, "scheduler worker queue is full")
             self._run_job_success(job.id, missed_events)
             return
 
+        slot_reserved = bool(executable_times)
+
         occurrences = (
             repository.reserve_occurrences(task, executable_times)
             if task is not None and task.revision == revision
             else []
         )
+        if not occurrences:
+            if slot_reserved:
+                self._release_capacity()
+            self._run_job_success(job.id, missed_events)
+            return
         reserved_times = {occurrence.scheduled_for for occurrence in occurrences}
         if task is not None and task.revision == revision:
             for run_time in executable_times:
@@ -222,6 +244,7 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
             )
         except BaseException:
             repository.release_queued_owners([occurrence.run_id for occurrence in occurrences])
+            self._release_capacity()
             raise
         self._track(future)
         future.add_done_callback(callback)
@@ -233,7 +256,7 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
             grouped[occurrence.task_id].append(occurrence)
         for task_occurrences in grouped.values():
             run_ids = [occurrence.run_id for occurrence in task_occurrences]
-            if not self._has_capacity():
+            if not self._reserve_capacity():
                 SchedulerRepository(self.database_path).release_queued_owners(run_ids)
                 continue
             try:
@@ -243,6 +266,7 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
                     task_occurrences,
                 )
             except RuntimeError:
+                self._release_capacity()
                 SchedulerRepository(self.database_path).release_queued_owners(run_ids)
                 continue
             self._track(future)

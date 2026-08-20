@@ -22,7 +22,9 @@ _SYSTEMD_FILE_PREFIX = "taskflows-"
 _default_data_dir = Path.home() / ".taskflows" / "data"
 
 # Allow configuring data directory via environment variable for testing
-services_data_dir = Path(os.environ.get("TASKFLOWS_DATA_DIR", str(_default_data_dir)))
+services_data_dir = (
+    Path(os.environ.get("TASKFLOWS_DATA_DIR", str(_default_data_dir))).expanduser().resolve()
+)
 
 systemd_dir = Path.home().joinpath(".config", "systemd", "user")
 
@@ -158,7 +160,13 @@ def sort_service_names(services: Iterable[str]) -> list[str]:
             if part
         )
 
-    def key(value: str):
+    def key(
+        value: str,
+    ) -> tuple[
+        tuple[tuple[bool, int | str], ...],
+        int,
+        tuple[tuple[bool, int | str], ...],
+    ]:
         auxiliary_rank = 0
         base = value
         for rank, prefix in enumerate(auxiliary_prefixes, start=1):

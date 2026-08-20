@@ -10,12 +10,17 @@ import pytest
 
 from taskflows.admin import auth as admin_auth
 from taskflows.admin import security as admin_security
+from taskflows.admin.security import SecurityConfig
 from taskflows.exceptions import SecurityError, ValidationError
 from taskflows.security_validation import (
     validate_command,
     validate_env_file_path,
     validate_service_name,
 )
+
+
+def test_default_cors_methods_cover_scheduler_updates():
+    assert "PATCH" in SecurityConfig().allowed_methods
 
 
 class TestPathTraversalPrevention:

@@ -74,8 +74,13 @@ from taskflows.scheduler.models import (
     schedule_preview,
 )
 from taskflows.scheduler.repository import SchedulerRepository
-from taskflows.scheduler.runner import cancel_run, submit_now
-from taskflows.scheduler.status import diagnose_scheduler, operate_scheduler, scheduler_status
+from taskflows.scheduler.runner import cancel_run, enqueue_now, submit_now
+from taskflows.scheduler.status import (
+    diagnose_scheduler,
+    operate_scheduler,
+    runtime_status,
+    scheduler_status,
+)
 from taskflows.service import RestartPolicy, Service, Venv
 
 config = Config()
@@ -289,6 +294,7 @@ async def add_security_headers(request: Request, call_next):
 @app.middleware("http")
 async def hmac_validation(request: Request, call_next):
     """Validate HMAC/JWT headers for service-management endpoints."""
+    client_host = request.client.host if request.client is not None else "unknown client"
     if not security_config.enable_hmac or not _requires_api_auth(request.url.path):
         logger.debug(f"HMAC skipped for {request.url.path}")
         return await call_next(request)
@@ -336,7 +342,7 @@ async def hmac_validation(request: Request, call_next):
     timestamp = request.headers.get(security_config.hmac_timestamp_header)
     nonce = request.headers.get(security_config.hmac_nonce_header)
     if not signature or not timestamp or not nonce:
-        logger.warning(f"Missing HMAC headers for {request.url.path} from {request.client.host}")
+        logger.warning(f"Missing HMAC headers for {request.url.path} from {client_host}")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"detail": "HMAC signature, timestamp, and nonce required"},
@@ -368,15 +374,13 @@ async def hmac_validation(request: Request, call_next):
         nonce=nonce,
     )
     if not is_valid:
-        logger.warning(
-            f"Invalid HMAC from {request.client.host} on {request.url.path}: {error_msg}"
-        )
+        logger.warning(f"Invalid HMAC from {client_host} on {request.url.path}: {error_msg}")
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"detail": error_msg},
         )
 
-    logger.debug(f"HMAC validated for {request.url.path} from {request.client.host}")
+    logger.debug(f"HMAC validated for {request.url.path} from {client_host}")
     return await call_next(request)
 
 
@@ -929,7 +933,16 @@ async def run_portable_schedule(
     else:
         response.status_code = status.HTTP_202_ACCEPTED
     try:
-        handle = await asyncio.to_thread(submit_now, repository.database_path, identifier)
+        if wait:
+            handle = await asyncio.to_thread(submit_now, repository.database_path, identifier)
+        else:
+            runtime = await asyncio.to_thread(runtime_status, repository)
+            if not runtime.healthy:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="scheduler daemon is not responding; repair it before queuing a run",
+                )
+            handle = await asyncio.to_thread(enqueue_now, repository.database_path, identifier)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RuntimeError as exc:

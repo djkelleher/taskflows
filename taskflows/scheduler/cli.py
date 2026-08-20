@@ -20,7 +20,7 @@ from .models import (
     utc_now,
 )
 from .repository import SchedulerRepository
-from .runner import run_now, submit_now
+from .runner import enqueue_now, run_now
 from .status import (
     diagnose_scheduler,
     operate_scheduler,
@@ -147,8 +147,8 @@ def schedule_cli() -> None:
 @click.option(
     "--timeout",
     type=DURATION,
-    default=DEFAULT_TASK_TIMEOUT_SECONDS,
-    show_default=True,
+    default=None,
+    show_default=f"{DEFAULT_TASK_TIMEOUT_SECONDS:g}s",
     help="Terminate after a duration, e.g. 90s or 5m.",
 )
 @click.option(
@@ -193,6 +193,8 @@ def add_schedule(
         raise click.UsageError("--start-at can only be used with --interval")
     if revision is not None and not replace:
         raise click.UsageError("--revision can only be used with --replace")
+    if no_timeout and timeout is not None:
+        raise click.UsageError("--no-timeout cannot be combined with --timeout")
     try:
         if run_at is not None:
             spec = ScheduleSpec.once(run_at, timezone=timezone)
@@ -208,7 +210,7 @@ def add_schedule(
             command=command,
             schedule=spec,
             enabled=not disabled,
-            timeout=None if no_timeout else timeout,
+            timeout=None if no_timeout else timeout or DEFAULT_TASK_TIMEOUT_SECONDS,
             cwd=cwd,
             environment=_parse_environment(environment, env_files),
             misfire_grace_time=misfire_grace,
@@ -341,7 +343,10 @@ def remove_schedule(identifier: str, yes: bool) -> None:
         raise click.ClickException(str(exc)) from exc
     if not yes and not click.confirm(f"Remove scheduled task {task.name}?"):
         return
-    repository.delete(task.id)
+    try:
+        repository.delete(task.id, expected_revision=task.revision)
+    except RevisionConflict as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Removed {task.name}")
 
 
@@ -351,7 +356,13 @@ def remove_schedule(identifier: str, yes: bool) -> None:
 def run_schedule(identifier: str, wait: bool) -> None:
     try:
         if not wait:
-            handle = submit_now(_repository().database_path, identifier)
+            repository = _repository()
+            if not runtime_status(repository).healthy:
+                raise RuntimeError(
+                    "the scheduler daemon is not responding; run 'tf scheduler ensure' "
+                    "or omit --no-wait"
+                )
+            handle = enqueue_now(repository.database_path, identifier)
             click.echo(f"Accepted run {handle.id} ({handle.status})")
             return
         exit_code = run_now(_repository().database_path, identifier)

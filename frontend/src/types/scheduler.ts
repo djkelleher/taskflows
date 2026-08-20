@@ -75,6 +75,12 @@ export interface CreateScheduleRequest {
   timezone: string;
   timeout?: number;
   no_timeout?: boolean;
+  enabled?: boolean;
+  cwd?: string;
+  environment?: Record<string, string>;
+  misfire_grace_time?: number | null;
+  coalesce?: boolean;
+  max_instances?: number;
 }
 
 export interface UpdateScheduleRequest {
@@ -88,4 +94,11 @@ export interface UpdateScheduleRequest {
   timezone?: string;
   timeout?: number;
   no_timeout?: boolean;
+  enabled?: boolean;
+  cwd?: string;
+  environment?: Record<string, string>;
+  remove_environment?: string[];
+  misfire_grace_time?: number | null;
+  coalesce?: boolean;
+  max_instances?: number;
 }

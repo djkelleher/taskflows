@@ -47,6 +47,7 @@ class QueuedOccurrence:
     task_id: str
     revision: int
     scheduled_for: datetime
+    allow_disabled: bool = False
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -850,7 +851,7 @@ class SchedulerRepository:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute(
-                """SELECT id, task_id, task_revision, scheduled_for,
+                """SELECT id, task_id, task_revision, scheduled_for, occurrence_key,
                           runner_pid, runner_identity
                    FROM task_runs WHERE status IN ('queued', 'starting')
                    ORDER BY scheduled_for, id"""
@@ -887,6 +888,11 @@ class SchedulerRepository:
                         row["task_id"],
                         row["task_revision"],
                         parse_datetime(row["scheduled_for"]),
+                        # Manual requests deliberately have no scheduler
+                        # occurrence key. Preserve their documented ability to
+                        # run a disabled definition when a daemon adopts them
+                        # after an API/CLI process exits.
+                        allow_disabled=row["occurrence_key"] is None,
                     )
                 )
         return adopted

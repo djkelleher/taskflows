@@ -361,8 +361,16 @@ class ScheduledTask:
         )
 
     @property
-    def working_directory(self) -> Path | None:
-        return Path(self.cwd) if self.cwd else None
+    def working_directory(self) -> Path:
+        """Return the platform-neutral execution directory.
+
+        Current definitions persist an absolute creation-time directory. Older
+        registries may contain NULL or relative values; native daemon backends
+        all use the account home as their stable compatibility base.
+        """
+
+        path = Path(self.cwd).expanduser() if self.cwd else Path.home()
+        return path if path.is_absolute() else Path.home() / path
 
     def to_public_dict(self) -> dict[str, Any]:
         """Return the non-secret representation shared by the CLI and API.
