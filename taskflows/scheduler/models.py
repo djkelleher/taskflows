@@ -53,18 +53,19 @@ def parse_datetime(value: str | datetime) -> datetime:
 def merge_environment(base: Mapping[str, str], overrides: Mapping[str, str]) -> dict[str, str]:
     """Overlay environment values without cross-platform name aliases.
 
-    Windows treats names case-insensitively while POSIX does not. Removing an
-    existing case-folded alias before applying each override makes definitions
-    such as ``Path=...`` behave consistently and avoids handing Windows two
-    conflicting PATH entries.
+    Windows treats names case-insensitively while POSIX does not. Reusing the
+    spelling already present in the base environment makes an override such as
+    ``Path=...`` update POSIX ``PATH`` instead of creating an inert second name,
+    while still ensuring Windows never receives conflicting aliases.
     """
     merged = dict(base)
     for name, value in overrides.items():
         folded_name = name.casefold()
-        for previous in tuple(merged):
-            if previous != name and previous.casefold() == folded_name:
-                merged.pop(previous)
-        merged[name] = value
+        aliases = [previous for previous in merged if previous.casefold() == folded_name]
+        output_name = name if name in aliases else aliases[0] if aliases else name
+        for previous in aliases:
+            merged.pop(previous)
+        merged[output_name] = value
     return merged
 
 

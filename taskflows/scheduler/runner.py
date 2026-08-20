@@ -117,9 +117,7 @@ def _assign_windows_job(process: subprocess.Popen[Any]) -> Any | None:
             f"could not contain scheduled process {process.pid} in a Job Object: {exc}"
         ) from exc
     try:
-        native_process = process
-        win32process = import_module("win32process")
-        win32process.ResumeThread(native_process._thread)
+        _resume_windows_process(process.pid)
     except Exception as exc:
         if job is not None and win32api is not None:
             with suppress(Exception):
@@ -128,6 +126,76 @@ def _assign_windows_job(process: subprocess.Popen[Any]) -> Any | None:
             process.kill()
         raise RuntimeError(f"could not resume scheduled process {process.pid}: {exc}") from exc
     return job
+
+
+def _resume_windows_process(pid: int) -> None:
+    """Resume the sole primary thread of a process created suspended.
+
+    ``subprocess.Popen`` closes the primary thread handle returned by
+    ``CreateProcess`` and does not expose a ``_thread`` attribute.  Enumerating
+    the still-suspended process therefore provides a reliable way to retain
+    Popen's pipe/wait integration while assigning the process to a Job Object
+    before any user code can run.
+    """
+
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPTHREAD = 0x00000004
+    THREAD_SUSPEND_RESUME = 0x0002
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    RESUME_FAILED = 0xFFFFFFFF
+
+    class ThreadEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry32)]
+    kernel32.Thread32First.restype = wintypes.BOOL
+    kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry32)]
+    kernel32.Thread32Next.restype = wintypes.BOOL
+    kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    kernel32.ResumeThread.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if not snapshot or snapshot == INVALID_HANDLE_VALUE:
+        error = int(ctypes.get_last_error())  # type: ignore[attr-defined]
+        raise OSError(error, "could not enumerate suspended process threads")
+    try:
+        entry = ThreadEntry32()
+        entry.dwSize = ctypes.sizeof(entry)
+        found = bool(kernel32.Thread32First(snapshot, ctypes.byref(entry)))
+        while found:
+            if int(entry.th32OwnerProcessID) == pid:
+                thread = kernel32.OpenThread(THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                if not thread:
+                    error = int(ctypes.get_last_error())  # type: ignore[attr-defined]
+                    raise OSError(error, f"could not open suspended thread {entry.th32ThreadID}")
+                try:
+                    if int(kernel32.ResumeThread(thread)) == RESUME_FAILED:
+                        error = int(ctypes.get_last_error())  # type: ignore[attr-defined]
+                        raise OSError(error, f"could not resume thread {entry.th32ThreadID}")
+                finally:
+                    kernel32.CloseHandle(thread)
+                return
+            found = bool(kernel32.Thread32Next(snapshot, ctypes.byref(entry)))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    raise RuntimeError(f"suspended process {pid} has no discoverable primary thread")
 
 
 def _finish_process_tree(process: subprocess.Popen[Any], windows_job: Any | None) -> None:
@@ -191,21 +259,21 @@ def _copy_bounded(
             if remaining and writable:
                 try:
                     destination.write(chunk[:remaining])
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     errors.append(str(exc))
                     writable = False
                 else:
                     written += min(len(chunk), remaining)
             if len(chunk) > remaining:
                 truncated = True
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         errors.append(str(exc))
     if writable:
         try:
             if truncated:
                 destination.write(f"\n[taskflows: output truncated after {limit} bytes]\n".encode())
             destination.flush()
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             errors.append(str(exc))
 
 

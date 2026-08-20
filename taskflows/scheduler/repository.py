@@ -6,6 +6,7 @@ import os
 import platform
 import sqlite3
 import subprocess
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
@@ -254,7 +255,7 @@ class SchedulerRepository:
                     f"scheduler database schema {schema_version} is newer than "
                     f"this Taskflows version supports ({SCHEMA_VERSION})"
                 )
-            db.execute("PRAGMA journal_mode=WAL")
+            self._ensure_wal(db)
             if schema_version == SCHEMA_VERSION:
                 # Repository objects are intentionally cheap: the runner and
                 # API create them per operation. Once the version marker says
@@ -417,6 +418,32 @@ class SchedulerRepository:
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if os.name != "nt":
             os.chmod(self.database_path, 0o600)
+
+    @staticmethod
+    def _ensure_wal(db: sqlite3.Connection) -> None:
+        """Enable persistent WAL mode without racing first-time openers.
+
+        SQLite's journal-mode transition can report ``database is locked``
+        immediately even when ``busy_timeout`` is configured. This occurs only
+        while another fresh client is changing the same persistent setting or
+        performing the initial schema migration, so retry it within the
+        connection's existing ten-second lock budget.
+        """
+
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                mode = str(db.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
+                if mode == "wal":
+                    return
+                selected = str(db.execute("PRAGMA journal_mode=WAL").fetchone()[0]).casefold()
+                if selected == "wal":
+                    return
+                raise RuntimeError(f"could not enable SQLite WAL mode (selected {selected!r})")
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).casefold() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
 
     @staticmethod
     def _task_from_row(row: sqlite3.Row) -> ScheduledTask:

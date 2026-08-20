@@ -100,6 +100,15 @@ def test_schedule_specs_are_portable_and_validated():
 
     with pytest.raises(ValueError, match="UTC offset"):
         ScheduleSpec.once("2026-08-19T10:00:00")
+    with pytest.raises(ValueError, match="five fields"):
+        ScheduleSpec.cron("0 9 *")
+    with pytest.raises(ValueError, match="greater than zero"):
+        ScheduleSpec.interval(0)
+    with pytest.raises(ValueError, match="unknown IANA time zone"):
+        ScheduleSpec.cron("0 9 * * *", timezone="Not/AZone")
+    for invalid in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="greater than zero"):
+            ScheduleSpec.interval(invalid)
 
 
 def test_commands_preserve_empty_non_executable_arguments(tmp_path):
@@ -201,12 +210,13 @@ def test_windows_job_object_is_assigned_before_process_resumes(monkeypatch):
         ("configure", handle)
     )
     win32job.AssignProcessToJobObject = lambda handle, process: calls.append(("assign", process))
-    win32process = ModuleType("win32process")
-    win32process.ResumeThread = lambda thread: calls.append(("resume", thread))
     monkeypatch.setitem(sys.modules, "win32api", win32api)
     monkeypatch.setitem(sys.modules, "win32job", win32job)
-    monkeypatch.setitem(sys.modules, "win32process", win32process)
-    process = SimpleNamespace(pid=123, _handle="process", _thread="thread")
+    monkeypatch.setattr(
+        "taskflows.scheduler.runner._resume_windows_process",
+        lambda pid: calls.append(("resume", pid)),
+    )
+    process = SimpleNamespace(pid=123, _handle="process")
 
     handle = _assign_windows_job(process)
     _finish_process_tree(process, handle)
@@ -215,7 +225,7 @@ def test_windows_job_object_is_assigned_before_process_resumes(monkeypatch):
     assert calls == [
         ("configure", job),
         ("assign", "process"),
-        ("resume", "thread"),
+        ("resume", 123),
         ("close", job),
     ]
 
@@ -235,27 +245,19 @@ def test_windows_job_assignment_failure_never_resumes_uncontained_process(monkey
     win32job.AssignProcessToJobObject = lambda handle, process: (_ for _ in ()).throw(
         OSError("assignment denied")
     )
-    win32process = ModuleType("win32process")
-    win32process.ResumeThread = lambda thread: calls.append("resume")
     monkeypatch.setitem(sys.modules, "win32api", win32api)
     monkeypatch.setitem(sys.modules, "win32job", win32job)
-    monkeypatch.setitem(sys.modules, "win32process", win32process)
-    process = SimpleNamespace(pid=123, _handle="process", _thread="thread")
+    monkeypatch.setattr(
+        "taskflows.scheduler.runner._resume_windows_process",
+        lambda pid: calls.append("resume"),
+    )
+    process = SimpleNamespace(pid=123, _handle="process")
     process.kill = lambda: calls.append("kill")
 
     with pytest.raises(RuntimeError, match="could not contain"):
         _assign_windows_job(process)
 
     assert calls == ["close", "kill"]
-    with pytest.raises(ValueError, match="five fields"):
-        ScheduleSpec.cron("0 9 *")
-    with pytest.raises(ValueError, match="greater than zero"):
-        ScheduleSpec.interval(0)
-    with pytest.raises(ValueError, match="unknown IANA time zone"):
-        ScheduleSpec.cron("0 9 * * *", timezone="Not/AZone")
-    for invalid in (float("nan"), float("inf"), float("-inf")):
-        with pytest.raises(ValueError, match="greater than zero"):
-            ScheduleSpec.interval(invalid)
 
 
 def test_schedule_preview_reuses_real_trigger_and_reports_local_and_utc_times():
@@ -328,10 +330,11 @@ def test_environment_overrides_are_case_insensitive_for_portable_execution():
     )
 
     assert merged == {
-        "Path": "task-path",
+        "PATH": "task-path",
         "UNCHANGED": "yes",
         "MODE": "scheduled",
     }
+    assert merge_environment({"PATH": "host-path"}, {"Path": "task-path"}) == {"PATH": "task-path"}
 
 
 def test_new_tasks_persist_absolute_working_directories(tmp_path, monkeypatch):
@@ -1070,8 +1073,11 @@ def test_daemon_executes_and_disables_one_time_task(tmp_path):
     daemon.start()
     try:
         deadline = time.monotonic() + 5
-        while not marker.exists() and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
             daemon.reconcile()
+            runs = repository.history(task.id)
+            if runs and runs[0]["status"] == "succeeded":
+                break
             time.sleep(0.05)
     finally:
         daemon.shutdown()
@@ -1942,11 +1948,25 @@ def test_linux_installer_writes_one_user_service(tmp_path, monkeypatch):
     assert f"TASKFLOWS_DATA_DIR={tmp_path / 'data%%dir'}" in content
     assert unit_path.stat().st_mode & 0o777 == 0o600
     assert "Restart=on-failure" in content
-    assert f"WorkingDirectory={tmp_path}" in content
+    assert f'WorkingDirectory="{tmp_path}"' in content
     assert calls[-2:] == [
         ["systemctl", "--user", "enable", installer.LINUX_UNIT_NAME],
         ["systemctl", "--user", "restart", installer.LINUX_UNIT_NAME],
     ]
+
+
+def test_linux_definition_uses_systemd_quoting_not_shell_quoting(tmp_path, monkeypatch):
+    home = tmp_path / 'home "quoted"\ncontinued%dir'
+    data = tmp_path / "data\\backslash%dir"
+    monkeypatch.setattr(installer, "_home_dir", lambda: home)
+    monkeypatch.setattr(installer, "services_data_dir", data)
+
+    content = installer._linux_unit_content()
+
+    assert 'WorkingDirectory="' in content
+    assert '\\"quoted\\"\\ncontinued%%dir"' in content
+    assert "data\\\\backslash%%dir" in content
+    assert len([line for line in content.splitlines() if line.startswith("WorkingDirectory=")]) == 1
 
 
 def test_supervisor_selection_exposes_one_common_lifecycle():
@@ -2127,6 +2147,58 @@ def test_windows_supervisor_rejects_enabled_task_without_logon_trigger(monkeypat
 
     assert status.automatic is False
     assert status.registration_valid is None
+
+
+def test_windows_registration_validates_action_trigger_principal_and_settings(
+    tmp_path, monkeypatch
+):
+    expected = installer.WindowsTaskDefinition(
+        user_id="EXAMPLE\\scheduler-user",
+        source="definition-fingerprint",
+        command=("C:\\Python\\python.exe", "-m", "taskflows.scheduler.daemon"),
+        working_directory=str(tmp_path),
+    )
+    monkeypatch.setattr(installer, "_windows_definition", lambda: expected)
+    action = SimpleNamespace(
+        Path=expected.command[0],
+        Arguments=__import__("subprocess").list2cmdline(list(expected.command[1:])),
+        WorkingDirectory=expected.working_directory,
+    )
+    trigger = SimpleNamespace(
+        Type=installer._TASK_TRIGGER_LOGON,
+        Enabled=True,
+        UserId=expected.user_id,
+    )
+    settings = SimpleNamespace(
+        Enabled=True,
+        StartWhenAvailable=True,
+        DisallowStartIfOnBatteries=False,
+        StopIfGoingOnBatteries=False,
+        RunOnlyIfIdle=False,
+        RunOnlyIfNetworkAvailable=False,
+        AllowDemandStart=True,
+        ExecutionTimeLimit="PT0S",
+        RestartCount=3,
+        RestartInterval="PT1M",
+        MultipleInstances=installer._TASK_INSTANCES_IGNORE_NEW,
+    )
+    definition = SimpleNamespace(
+        RegistrationInfo=SimpleNamespace(Source=expected.source),
+        Principal=SimpleNamespace(
+            UserId=expected.user_id,
+            LogonType=installer._TASK_LOGON_INTERACTIVE_TOKEN,
+            RunLevel=installer._TASK_RUNLEVEL_LUA,
+        ),
+        Actions=SimpleNamespace(Count=1, Item=lambda index: action),
+        Triggers=SimpleNamespace(Count=1, Item=lambda index: trigger),
+        Settings=settings,
+    )
+    task = SimpleNamespace(Definition=definition)
+
+    assert supervisor._windows_registration_valid(task) is True
+
+    settings.StopIfGoingOnBatteries = True
+    assert supervisor._windows_registration_valid(task) is False
 
 
 def test_sqlalchemy_job_store_preserves_special_database_path(tmp_path):

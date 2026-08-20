@@ -4,13 +4,13 @@ import hashlib
 import json
 import os
 import plistlib
-import shlex
 import subprocess
 import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,26 @@ _TASK_LOGON_INTERACTIVE_TOKEN = 3
 _TASK_RUNLEVEL_LUA = 0
 _TASK_TRIGGER_LOGON = 9
 _COMMAND_TIMEOUT: ContextVar[float] = ContextVar("scheduler_command_timeout", default=15.0)
+
+
+@dataclass(frozen=True)
+class WindowsTaskDefinition:
+    """Canonical Windows registration shared by installation and drift checks."""
+
+    user_id: str
+    source: str
+    command: tuple[str, ...]
+    working_directory: str
+
+
+def _windows_definition() -> WindowsTaskDefinition:
+    windows_api: Any = import_module("win32api")
+    return WindowsTaskDefinition(
+        user_id=str(windows_api.GetUserNameEx(windows_api.NameSamCompatible)),
+        source=definition_fingerprint(),
+        command=tuple(_daemon_command()),
+        working_directory=str(_home_dir()),
+    )
 
 
 @contextmanager
@@ -78,17 +98,39 @@ def definition_fingerprint() -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _systemd_quote(value: str) -> str:
+    """Quote one literal systemd argument without relying on shell syntax."""
+
+    escaped: list[str] = []
+    for character in value.replace("%", "%%"):
+        if character == "\\":
+            escaped.append("\\\\")
+        elif character == '"':
+            escaped.append('\\"')
+        elif character == "\n":
+            escaped.append("\\n")
+        elif character == "\r":
+            escaped.append("\\r")
+        elif character == "\t":
+            escaped.append("\\t")
+        elif ord(character) < 32 or ord(character) == 127:
+            escaped.append(f"\\x{ord(character):02x}")
+        else:
+            escaped.append(character)
+    return f'"{"".join(escaped)}"'
+
+
 def _linux_unit_content() -> str:
     """Return the complete systemd definition expected by the supervisor."""
 
-    # systemd expands percent specifiers even in quoted command/environment
-    # values, so literal path components must double them.
-    command = shlex.join(part.replace("%", "%%") for part in _daemon_command())
-    working_directory = shlex.quote(str(_home_dir()).replace("%", "%%"))
+    # systemd expands percent specifiers even in quoted values and uses its own
+    # C-style command parser rather than a POSIX shell. Render every argument
+    # independently so spaces, quotes, control characters and literal percent
+    # signs cannot change unit structure or invocation boundaries.
+    command = " ".join(_systemd_quote(part) for part in _daemon_command())
+    working_directory = _systemd_quote(str(_home_dir()))
     data_dir = services_data_dir.resolve()
-    environment_assignment = (
-        str(data_dir).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
-    )
+    environment_assignment = _systemd_quote(f"TASKFLOWS_DATA_DIR={data_dir}")
     return f"""[Unit]
 Description=Taskflows portable scheduler
 X-Taskflows-Definition={definition_fingerprint()}
@@ -98,7 +140,7 @@ After=default.target
 Type=simple
 ExecStart={command}
 WorkingDirectory={working_directory}
-Environment="TASKFLOWS_DATA_DIR={environment_assignment}"
+Environment={environment_assignment}
 Restart=on-failure
 RestartSec=2
 
@@ -227,8 +269,6 @@ def install_windows() -> None:
     """
     import win32com.client
 
-    windows_api: Any = import_module("win32api")
-
     scheduler = win32com.client.Dispatch("Schedule.Service")
     scheduler.Connect()
     root = scheduler.GetFolder("\\")
@@ -238,11 +278,12 @@ def install_windows() -> None:
         folder = root.CreateFolder(WINDOWS_TASK_FOLDER)
 
     definition = scheduler.NewTask(0)
+    expected = _windows_definition()
     definition.RegistrationInfo.Description = "Taskflows portable scheduler daemon"
-    definition.RegistrationInfo.Source = definition_fingerprint()
+    definition.RegistrationInfo.Source = expected.source
     # A SAM-compatible name scopes both the task principal and logon trigger
     # to the installing user. An unscoped logon trigger fires for every user.
-    user_id = windows_api.GetUserNameEx(windows_api.NameSamCompatible)
+    user_id = expected.user_id
     definition.Principal.UserId = user_id
     definition.Principal.LogonType = _TASK_LOGON_INTERACTIVE_TOKEN
     definition.Principal.RunLevel = _TASK_RUNLEVEL_LUA
@@ -265,10 +306,10 @@ def install_windows() -> None:
     trigger.UserId = user_id
     trigger.Enabled = True
     action = definition.Actions.Create(_TASK_ACTION_EXEC)
-    command = _daemon_command()
+    command = list(expected.command)
     action.Path = command[0]
     action.Arguments = subprocess.list2cmdline(command[1:])
-    action.WorkingDirectory = str(_home_dir())
+    action.WorkingDirectory = expected.working_directory
     # Apply an updated interpreter/database path immediately instead of leaving
     # an old instance running until the next login.
     try:

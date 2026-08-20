@@ -9,6 +9,7 @@ import {
   getScheduleRunLogs,
   getScheduleRuns,
   getSchedulerStatus,
+  getSchedulerDiagnostics,
   getSchedules,
   previewSchedule,
   runSchedule,
@@ -35,10 +36,10 @@ function formatDate(value: string | null): string {
 }
 
 function stateClass(state: string): string {
-  if (["running", "succeeded"].includes(state)) return "text-emerald-400";
-  if (["failed", "timed_out", "unresponsive"].includes(state))
+  if (["running", "succeeded", "ok"].includes(state)) return "text-emerald-400";
+  if (["failed", "timed_out", "unresponsive", "error"].includes(state))
     return "text-red-400";
-  if (["degraded", "unmanaged", "missed", "skipped"].includes(state))
+  if (["degraded", "unmanaged", "missed", "skipped", "warning"].includes(state))
     return "text-amber-400";
   return "text-muted";
 }
@@ -105,6 +106,12 @@ export function SchedulesPage() {
     queryKey: ["scheduler-status"],
     queryFn: getSchedulerStatus,
     refetchInterval: 5000,
+  });
+  const diagnosticsQuery = useQuery({
+    queryKey: ["scheduler-diagnostics"],
+    queryFn: getSchedulerDiagnostics,
+    enabled: false,
+    retry: false,
   });
 
   const refresh = async () => {
@@ -303,9 +310,12 @@ export function SchedulesPage() {
   const schedules = schedulesQuery.data?.schedules || [];
   const runs = runsQuery.data?.runs || [];
   const queryErrors = [
-    schedulesQuery.error && `Definitions: ${errorMessage(schedulesQuery.error)}`,
+    schedulesQuery.error &&
+      `Definitions: ${errorMessage(schedulesQuery.error)}`,
     runsQuery.error && `Run history: ${errorMessage(runsQuery.error)}`,
     statusQuery.error && `Scheduler health: ${errorMessage(statusQuery.error)}`,
+    diagnosticsQuery.error &&
+      `Scheduler diagnostics: ${errorMessage(diagnosticsQuery.error)}`,
   ].filter((value): value is string => Boolean(value));
 
   return (
@@ -388,8 +398,46 @@ export function SchedulesPage() {
               <Wrench className="w-4" /> Ensure scheduler
             </button>
           )}
+          <button
+            className="px-3 py-2 rounded border border-border hover:bg-border"
+            disabled={diagnosticsQuery.isFetching}
+            onClick={() => void diagnosticsQuery.refetch()}
+          >
+            {diagnosticsQuery.isFetching ? "Checking…" : "Run diagnostics"}
+          </button>
         </div>
       </section>
+
+      {diagnosticsQuery.data && (
+        <section className="rounded border border-border bg-card p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="font-semibold">Scheduler diagnostics</h3>
+            <button
+              className="text-sm text-muted hover:text-foreground"
+              onClick={() =>
+                queryClient.removeQueries({
+                  queryKey: ["scheduler-diagnostics"],
+                })
+              }
+            >
+              Close
+            </button>
+          </div>
+          <ul className="mt-3 space-y-3">
+            {diagnosticsQuery.data.checks.map((check) => (
+              <li key={check.name} className="rounded border border-border p-3">
+                <div className={`font-medium ${stateClass(check.level)}`}>
+                  {check.level}: {check.name}
+                </div>
+                <p className="text-sm mt-1">{check.message}</p>
+                {check.remedy && (
+                  <p className="text-xs text-muted mt-1">Fix: {check.remedy}</p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="rounded border border-border bg-card p-5 space-y-4">
         <div className="flex items-center justify-between gap-3">
@@ -699,7 +747,8 @@ export function SchedulesPage() {
                 <tr key={run.id} className="border-t border-border">
                   <td className="p-3">{run.task_name}</td>
                   <td className={`p-3 ${stateClass(run.status)}`}>
-                    {run.cancellation_requested && !["cancelled"].includes(run.status)
+                    {run.cancellation_requested &&
+                    !["cancelled"].includes(run.status)
                       ? "cancelling"
                       : run.status}
                   </td>
@@ -711,18 +760,18 @@ export function SchedulesPage() {
                     <button onClick={() => void showLogs(run)}>Logs</button>
                     {["queued", "starting", "running"].includes(run.status) &&
                       !run.cancellation_requested && (
-                      <button
-                        className="text-red-400"
-                        onClick={() =>
-                          void act(
-                            () => cancelScheduleRun(run.id),
-                            "Cancellation requested",
-                          )
-                        }
-                      >
-                        Cancel
-                      </button>
-                    )}
+                        <button
+                          className="text-red-400"
+                          onClick={() =>
+                            void act(
+                              () => cancelScheduleRun(run.id),
+                              "Cancellation requested",
+                            )
+                          }
+                        >
+                          Cancel
+                        </button>
+                      )}
                   </td>
                 </tr>
               ))}

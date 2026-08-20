@@ -3,10 +3,10 @@ import re
 import stat
 import tempfile
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
-from contextlib import suppress
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -100,6 +100,41 @@ def secure_write_text(
         if tmp_path.exists():
             with suppress(OSError):
                 tmp_path.unlink()
+
+
+@contextmanager
+def advisory_file_lock(stream: TextIO, *, shared: bool = False) -> Iterator[None]:
+    """Hold a blocking cross-process lock for an already-open state file.
+
+    POSIX supports shared reader locks. Windows ``msvcrt`` byte-range locks are
+    exclusive, so reads use the same safe lock there rather than silently
+    becoming process-local.
+    """
+
+    try:
+        import fcntl
+    except ImportError:
+        # The module is available only on Windows, so POSIX type-checking stubs
+        # intentionally do not expose its byte-range locking API.
+        windows_locks: Any = __import__("msvcrt")
+
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write("\0")
+            stream.flush()
+        stream.seek(0)
+        windows_locks.locking(stream.fileno(), windows_locks.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            windows_locks.locking(stream.fileno(), windows_locks.LK_UNLCK, 1)
+    else:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 _SENSITIVE_KEY_PARTS = (

@@ -10,13 +10,20 @@ import json
 import re
 import shlex
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from taskflows.common import ensure_data_dir, logger, secure_write_text, services_data_dir
+from taskflows.common import (
+    advisory_file_lock,
+    ensure_data_dir,
+    logger,
+    secure_write_text,
+    services_data_dir,
+)
 from taskflows.docker import DockerContainer
 from taskflows.serialization import deserialize, from_dict, serialize, to_dict
 from taskflows.service import Venv
@@ -28,26 +35,18 @@ _ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]$|^[A-
 
 
 @contextmanager
-def _locked_environments(write: bool = False):
+def _locked_environments(write: bool = False) -> Iterator[dict[str, "NamedEnvironment"]]:
     lock_path = environments_file.with_suffix(environments_file.suffix + ".lock")
     ensure_data_dir()
-    with _environments_lock, open(lock_path, "a+") as lock_file:
-        try:
-            import fcntl
-
-            lock_mode = fcntl.LOCK_EX if write else fcntl.LOCK_SH
-            fcntl.flock(lock_file.fileno(), lock_mode)
-        except ImportError:
-            fcntl = None
-
-        try:
-            environments = _load_environments_unlocked()
-            yield environments
-            if write:
-                save_environments(environments)
-        finally:
-            if fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    with (
+        _environments_lock,
+        open(lock_path, "a+") as lock_file,
+        advisory_file_lock(lock_file, shared=not write),
+    ):
+        environments = _load_environments_unlocked()
+        yield environments
+        if write:
+            _save_environments_unlocked(environments)
 
 
 class NamedEnvironment(BaseModel):
@@ -158,9 +157,14 @@ def _validate_environment_definition(env: NamedEnvironment) -> None:
 
 def save_environments(environments: dict[str, NamedEnvironment]) -> None:
     """Save all environments to file."""
+    with _locked_environments(write=True) as current:
+        current.clear()
+        current.update(environments)
+
+
+def _save_environments_unlocked(environments: dict[str, NamedEnvironment]) -> None:
     env_data = {name: env.model_dump(mode="json") for name, env in environments.items()}
-    with _environments_lock:
-        secure_write_text(environments_file, json.dumps(env_data, indent=2, default=str))
+    secure_write_text(environments_file, json.dumps(env_data, indent=2, default=str))
 
 
 def get_environment(name: str) -> NamedEnvironment | None:

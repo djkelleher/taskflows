@@ -27,5 +27,6 @@ export {
   getScheduleRunLogs,
   cancelScheduleRun,
   getSchedulerStatus,
+  getSchedulerDiagnostics,
   ensureScheduler,
 } from "./client";

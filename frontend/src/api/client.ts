@@ -8,6 +8,7 @@ import type {
   PortableSchedule,
   RefreshResponse,
   SchedulerStatus,
+  SchedulerDiagnostics,
   ScheduleRun,
   UpdateScheduleRequest,
 } from "@/types";
@@ -431,6 +432,13 @@ export async function getSchedulerStatus(): Promise<SchedulerStatus> {
   const response = await fetchWithAuth("/api/scheduler/status");
   if (!response.ok)
     throw await apiError(response, "Failed to fetch scheduler status");
+  return response.json();
+}
+
+export async function getSchedulerDiagnostics(): Promise<SchedulerDiagnostics> {
+  const response = await fetchWithAuth("/api/scheduler/diagnostics");
+  if (!response.ok)
+    throw await apiError(response, "Failed to run scheduler diagnostics");
   return response.json();
 }
 

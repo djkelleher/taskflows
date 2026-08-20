@@ -35,5 +35,7 @@ export type {
   PortableSchedule,
   SchedulerState,
   SchedulerStatus,
+  SchedulerDiagnostics,
+  SchedulerDiagnosticCheck,
   ScheduleRun,
 } from "./scheduler";

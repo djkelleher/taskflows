@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getScheduleRuns,
+  getSchedulerDiagnostics,
   getSchedulerStatus,
   getSchedules,
   updateSchedule,
@@ -21,6 +22,7 @@ vi.mock("@/api", () => ({
   ensureScheduler: vi.fn(),
   getScheduleRunLogs: vi.fn(),
   getScheduleRuns: vi.fn(),
+  getSchedulerDiagnostics: vi.fn(),
   getSchedulerStatus: vi.fn(),
   getSchedules: vi.fn(),
   previewSchedule: vi.fn(),
@@ -51,27 +53,40 @@ const schedule = {
   next_run_at: null,
 };
 
+const schedulerStatus: Awaited<ReturnType<typeof getSchedulerStatus>> = {
+  state: "running",
+  supervisor: {
+    backend: "systemd",
+    installed: true,
+    state: "running",
+    automatic: true,
+    registration_valid: true,
+    log_hint: null,
+  },
+  runtime: { healthy: true, heartbeat_age_seconds: 0 },
+  task_count: 1,
+  enabled_task_count: 1,
+  queued_occurrence_count: 0,
+  running_run_count: 0,
+  queue_capacity: 10_000,
+};
+
 describe("SchedulesPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(getSchedules).mockResolvedValue({ schedules: [schedule] });
     vi.mocked(getScheduleRuns).mockResolvedValue({ runs: [] });
-    vi.mocked(getSchedulerStatus).mockResolvedValue({
-      state: "running",
-      supervisor: {
-        backend: "systemd",
-        installed: true,
-        state: "running",
-        automatic: true,
-        registration_valid: true,
-        log_hint: null,
-      },
-      runtime: { healthy: true, heartbeat_age_seconds: 0 },
-      task_count: 1,
-      enabled_task_count: 1,
-      queued_occurrence_count: 0,
-      running_run_count: 0,
-      queue_capacity: 10_000,
+    vi.mocked(getSchedulerStatus).mockResolvedValue(schedulerStatus);
+    vi.mocked(getSchedulerDiagnostics).mockResolvedValue({
+      status: schedulerStatus,
+      checks: [
+        {
+          name: "task-definitions",
+          level: "error",
+          message: "cleanup: executable is not on PATH (python)",
+          remedy: "replace the definition with an absolute executable path",
+        },
+      ],
     });
     vi.mocked(updateSchedule).mockResolvedValue({
       ...schedule,
@@ -131,7 +146,9 @@ describe("SchedulesPage", () => {
   });
 
   it("surfaces query failures instead of rendering empty data silently", async () => {
-    vi.mocked(getSchedules).mockRejectedValue(new Error("registry unavailable"));
+    vi.mocked(getSchedules).mockRejectedValue(
+      new Error("registry unavailable"),
+    );
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -144,6 +161,31 @@ describe("SchedulesPage", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Definitions: registry unavailable",
     );
+  });
+
+  it("shows actionable scheduler diagnostics on demand", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <SchedulesPage />
+      </QueryClientProvider>,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Run diagnostics" }),
+    );
+
+    expect(
+      await screen.findByText("error: task-definitions"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Fix: replace the definition with an absolute executable path",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("shows an accepted cancellation as pending and prevents duplicate requests", async () => {
@@ -174,6 +216,8 @@ describe("SchedulesPage", () => {
     );
 
     expect(await screen.findByText("cancelling")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Cancel" }),
+    ).not.toBeInTheDocument();
   });
 });

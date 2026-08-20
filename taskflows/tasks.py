@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import inspect
 import json
 import multiprocessing
 import os
@@ -641,7 +642,7 @@ async def _async_task_wrapper(
     status = "failure"  # Default status
 
     # Determine if function is async (use cached value if provided)
-    func_is_async = is_async if is_async is not None else asyncio.iscoroutinefunction(func)
+    func_is_async = is_async if is_async is not None else inspect.iscoroutinefunction(func)
     task_kwargs = task_kwargs or {}
 
     # Retry loop: range(retries + 1) gives us (retries + 1) total attempts
@@ -774,7 +775,7 @@ def task(
 
     def task_decorator(func):
         # Check if the function is async at decoration time (once)
-        func_is_async = asyncio.iscoroutinefunction(func)
+        func_is_async = inspect.iscoroutinefunction(func)
         task_name = name or func.__name__
 
         @wraps(func)

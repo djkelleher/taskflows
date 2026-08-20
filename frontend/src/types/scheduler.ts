@@ -66,6 +66,18 @@ export interface SchedulerStatus {
   queue_capacity: number;
 }
 
+export interface SchedulerDiagnosticCheck {
+  name: string;
+  level: "ok" | "warning" | "error";
+  message: string;
+  remedy: string | null;
+}
+
+export interface SchedulerDiagnostics {
+  status: SchedulerStatus;
+  checks: SchedulerDiagnosticCheck[];
+}
+
 export interface CreateScheduleRequest {
   name: string;
   command: string[];

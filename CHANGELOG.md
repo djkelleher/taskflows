@@ -49,9 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   working directories exactly like creates, reject trigger-incompatible fields,
   and preserve secret environment values. Short-lived commands retain empty
   argv values but cannot leave descendants running after their root exits;
-  Windows assigns a kill-on-close Job Object before the child resumes. History
+  Windows assigns a kill-on-close Job Object before resuming the primary thread
+  through native APIs rather than relying on private `Popen`
+  attributes. Native registration drift checks now cover complete systemd,
+  launchd, and Task Scheduler definitions, and Windows JSON state uses an
+  interprocess lock. History
   retention protects recent runs per immutable definition even after a task
-  name is deleted and reused, and the web UI supports revision-safe editing.
+  name is deleted and reused, and the web UI supports revision-safe editing and
+  actionable scheduler diagnostics.
 - **Faster service status:** systemd properties are fetched in bulk with
   bounded concurrency, repeated manager health probes and duplicate unit loads
   are removed, and independent remote servers are queried concurrently.

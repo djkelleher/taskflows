@@ -294,34 +294,60 @@ def _windows_registered_task() -> Any | None:
 
 
 def _windows_registration_valid(task: Any) -> bool | None:
-    """Validate the executable identity, not only the self-reported marker."""
+    """Validate the complete registration, not only its self-reported marker."""
 
     try:
-        windows_api: Any = __import__("win32api")
+        expected = native._windows_definition()
         definition = task.Definition
+    except Exception:
+        # COM may be temporarily unavailable even though the registered task was
+        # returned. Preserve an explicit "uninspectable" result in that case.
+        return None
+    try:
         source = definition.RegistrationInfo.Source
         principal = definition.Principal
         actions = definition.Actions
-        if int(actions.Count) != 1:
+        triggers = definition.Triggers
+        settings = definition.Settings
+        if int(actions.Count) != 1 or int(triggers.Count) != 1:
             return False
         action = actions.Item(1)
-        command = native._daemon_command()
+        trigger = triggers.Item(1)
+        command = list(expected.command)
 
         def normalized_path(value: Any) -> str:
             return ntpath.normcase(ntpath.normpath(str(value)))
 
-        expected_user = windows_api.GetUserNameEx(windows_api.NameSamCompatible)
         return all(
             (
-                source == native.definition_fingerprint(),
+                source == expected.source,
                 normalized_path(action.Path) == normalized_path(command[0]),
                 str(action.Arguments) == subprocess.list2cmdline(command[1:]),
-                normalized_path(action.WorkingDirectory) == normalized_path(native._home_dir()),
-                str(principal.UserId).casefold() == str(expected_user).casefold(),
+                normalized_path(action.WorkingDirectory)
+                == normalized_path(expected.working_directory),
+                str(principal.UserId).casefold() == expected.user_id.casefold(),
                 int(principal.LogonType) == native._TASK_LOGON_INTERACTIVE_TOKEN,
                 int(principal.RunLevel) == native._TASK_RUNLEVEL_LUA,
+                int(trigger.Type) == native._TASK_TRIGGER_LOGON,
+                bool(trigger.Enabled),
+                str(trigger.UserId).casefold() == expected.user_id.casefold(),
+                bool(settings.Enabled),
+                bool(settings.StartWhenAvailable),
+                not bool(settings.DisallowStartIfOnBatteries),
+                not bool(settings.StopIfGoingOnBatteries),
+                not bool(settings.RunOnlyIfIdle),
+                not bool(settings.RunOnlyIfNetworkAvailable),
+                bool(settings.AllowDemandStart),
+                str(settings.ExecutionTimeLimit) == "PT0S",
+                int(settings.RestartCount) == 3,
+                str(settings.RestartInterval) == "PT1M",
+                int(settings.MultipleInstances) == native._TASK_INSTANCES_IGNORE_NEW,
             )
         )
+    except (AttributeError, TypeError, ValueError):
+        # Missing or malformed properties are definition drift, not an
+        # inspection outage. Returning False lets `ensure` repair them.
+        return False
     except Exception:
         return None
 

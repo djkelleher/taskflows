@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { getServices, login, logout, updateSchedule } from "../client";
+import {
+  getSchedulerDiagnostics,
+  getServices,
+  login,
+  logout,
+  updateSchedule,
+} from "../client";
 import { useAuthStore } from "@/stores/authStore";
 import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
@@ -211,6 +217,29 @@ describe("API Client", () => {
         interval_seconds: 120,
         start_at: "2026-08-19T10:00:00Z",
       });
+    });
+
+    it("fetches actionable scheduler diagnostics", async () => {
+      useAuthStore.getState().login("valid-token", "valid-refresh");
+      server.use(
+        http.get("/api/scheduler/diagnostics", () =>
+          HttpResponse.json({
+            status: { state: "degraded" },
+            checks: [
+              {
+                name: "supervisor-definition",
+                level: "error",
+                message: "native registration drifted",
+                remedy: "run tf scheduler ensure",
+              },
+            ],
+          }),
+        ),
+      );
+
+      const result = await getSchedulerDiagnostics();
+
+      expect(result.checks[0].remedy).toBe("run tf scheduler ensure");
     });
   });
 

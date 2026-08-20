@@ -8,7 +8,12 @@ from contextlib import contextmanager
 
 from pydantic import BaseModel
 
-from taskflows.common import ensure_data_dir, secure_write_text, services_data_dir
+from taskflows.common import (
+    advisory_file_lock,
+    ensure_data_dir,
+    secure_write_text,
+    services_data_dir,
+)
 
 _hmac_nonce_lock = threading.Lock()
 _csrf_token_lock = threading.Lock()
@@ -66,33 +71,26 @@ def _locked_json_store(path, process_lock, default_factory=dict):
     """Load/update a JSON store while holding thread and process locks."""
     lock_path = path.with_suffix(path.suffix + ".lock")
     ensure_data_dir()
-    with process_lock, open(lock_path, "a+") as lock_file:
-        try:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        except ImportError:
-            fcntl = None
-
-        try:
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text())
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError(
-                        f"Security state file {path} is corrupt; refusing to reset it"
-                    ) from exc
-                if not isinstance(data, dict):
-                    raise RuntimeError(f"Security state file {path} must contain a JSON object")
-            else:
-                data = default_factory()
-            original_data = json.dumps(data, sort_keys=True, default=str)
-            yield data
-            if json.dumps(data, sort_keys=True, default=str) != original_data:
-                secure_write_text(path, json.dumps(data, indent=2, default=str))
-        finally:
-            if fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    with (
+        process_lock,
+        open(lock_path, "a+") as lock_file,
+        advisory_file_lock(lock_file),
+    ):
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"Security state file {path} is corrupt; refusing to reset it"
+                ) from exc
+            if not isinstance(data, dict):
+                raise RuntimeError(f"Security state file {path} must contain a JSON object")
+        else:
+            data = default_factory()
+        original_data = json.dumps(data, sort_keys=True, default=str)
+        yield data
+        if json.dumps(data, sort_keys=True, default=str) != original_data:
+            secure_write_text(path, json.dumps(data, indent=2, default=str))
 
 
 def load_security_config() -> SecurityConfig:
