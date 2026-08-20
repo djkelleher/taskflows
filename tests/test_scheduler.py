@@ -41,6 +41,7 @@ from taskflows.admin.cli import cli
 from taskflows.admin.models import PortableSchedulePatch, PortableScheduleRequest
 from taskflows.exceptions import RevisionConflict
 from taskflows.schedule import Calendar
+from taskflows.scheduler import executor as executor_module
 from taskflows.scheduler import installer, supervisor
 from taskflows.scheduler import repository as repository_module
 from taskflows.scheduler.daemon import DaemonAlreadyRunning, SchedulerDaemon, _SingletonLock
@@ -62,6 +63,7 @@ from taskflows.scheduler.repository import (
 from taskflows.scheduler.runner import (
     _assign_windows_job,
     _finish_process_tree,
+    _task_log_directory,
     cancel_run,
     enqueue_now,
     execute_scheduled_task,
@@ -151,6 +153,39 @@ def test_short_lived_command_cannot_leave_a_descendant_running(tmp_path):
     assert not escaped.exists()
 
 
+def test_runner_cleans_up_process_tree_when_post_launch_registration_fails(tmp_path, monkeypatch):
+    repository = make_repository(tmp_path)
+    escaped = tmp_path / "escaped-after-registration-failure.txt"
+    child = (
+        "import pathlib, time; time.sleep(0.8); "
+        f"pathlib.Path({str(escaped)!r}).write_text('escaped')"
+    )
+    parent = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(30)"
+    )
+    task = repository.add(
+        ScheduledTask.create(
+            "registration-failure-cleanup",
+            [sys.executable, "-c", parent],
+            ScheduleSpec.interval(60),
+        )
+    )
+
+    def fail_registration(self, run_id, pid, *, process_identity=None):
+        raise sqlite3.OperationalError("registry unavailable after launch")
+
+    monkeypatch.setattr(SchedulerRepository, "set_runner_pid", fail_registration)
+
+    assert run_now(repository.database_path, task.id) == 1
+    time.sleep(1)
+
+    assert not escaped.exists()
+    run = repository.history(task.id)[0]
+    assert run["status"] == "failed"
+    assert "registry unavailable after launch" in run["error"]
+
+
 def test_windows_job_object_is_assigned_before_process_resumes(monkeypatch):
     calls: list[tuple[str, object]] = []
     job = object()
@@ -183,6 +218,35 @@ def test_windows_job_object_is_assigned_before_process_resumes(monkeypatch):
         ("resume", "thread"),
         ("close", job),
     ]
+
+
+def test_windows_job_assignment_failure_never_resumes_uncontained_process(monkeypatch):
+    calls: list[str] = []
+    win32api = ModuleType("win32api")
+    win32api.CloseHandle = lambda handle: calls.append("close")
+    win32job = ModuleType("win32job")
+    win32job.JobObjectExtendedLimitInformation = 9
+    win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    win32job.CreateJobObject = lambda security, name: object()
+    win32job.QueryInformationJobObject = lambda handle, kind: {
+        "BasicLimitInformation": {"LimitFlags": 0}
+    }
+    win32job.SetInformationJobObject = lambda handle, kind, value: None
+    win32job.AssignProcessToJobObject = lambda handle, process: (_ for _ in ()).throw(
+        OSError("assignment denied")
+    )
+    win32process = ModuleType("win32process")
+    win32process.ResumeThread = lambda thread: calls.append("resume")
+    monkeypatch.setitem(sys.modules, "win32api", win32api)
+    monkeypatch.setitem(sys.modules, "win32job", win32job)
+    monkeypatch.setitem(sys.modules, "win32process", win32process)
+    process = SimpleNamespace(pid=123, _handle="process", _thread="thread")
+    process.kill = lambda: calls.append("kill")
+
+    with pytest.raises(RuntimeError, match="could not contain"):
+        _assign_windows_job(process)
+
+    assert calls == ["close", "kill"]
     with pytest.raises(ValueError, match="five fields"):
         ScheduleSpec.cron("0 9 *")
     with pytest.raises(ValueError, match="greater than zero"):
@@ -584,6 +648,43 @@ def test_executor_capacity_admission_is_atomic(tmp_path):
         DurableThreadPoolExecutor(str(tmp_path / "invalid.sqlite3"), max_pending_jobs=0)
 
 
+def test_executor_summarizes_oversized_catch_up_backlog(tmp_path, monkeypatch):
+    task = SimpleNamespace(id="task", revision=1)
+    recorded: list[tuple[datetime, str]] = []
+
+    class FakeRepository:
+        def get(self, task_id):
+            return task
+
+        def record_missed(self, selected_task, run_time, reason):
+            recorded.append((run_time, reason))
+
+        def reserve_occurrences(self, selected_task, run_times):
+            return []
+
+    monkeypatch.setattr(executor_module, "SchedulerRepository", lambda path: FakeRepository())
+    executor = DurableThreadPoolExecutor(str(tmp_path / "scheduler.sqlite3"), max_workers=1)
+    monkeypatch.setattr(executor, "_run_job_success", lambda job_id, events: None)
+    now = utc_now() + timedelta(hours=1)
+    run_times = [now + timedelta(seconds=index) for index in range(1005)]
+    job = SimpleNamespace(
+        id="job",
+        kwargs={"task_id": task.id, "revision": task.revision},
+        misfire_grace_time=None,
+    )
+    try:
+        executor._do_submit_job(job, run_times)
+    finally:
+        executor._pool.shutdown(wait=True)
+
+    assert recorded == [
+        (
+            run_times[4],
+            "catch-up backlog dropped 5 occurrences; only the newest 1000 were retained",
+        )
+    ]
+
+
 def test_reserved_occurrence_records_the_actual_fire_time(tmp_path):
     repository = make_repository(tmp_path)
     task = repository.add(
@@ -918,7 +1019,7 @@ def test_runner_finishes_reservation_when_log_setup_fails(tmp_path, monkeypatch)
     task = repository.add(
         ScheduledTask.create("log-failure", ["echo", "ok"], ScheduleSpec.interval(60))
     )
-    log_dir = repository.database_path.parent / "runs" / task.id
+    log_dir = _task_log_directory(repository, task.id)
     original_mkdir = Path.mkdir
 
     def fail_log_setup(path, *args, **kwargs):
@@ -934,6 +1035,25 @@ def test_runner_finishes_reservation_when_log_setup_fails(tmp_path, monkeypatch)
     assert run["status"] == "failed"
     assert run["finished_at"] is not None
     assert run["error"] == "cannot create logs"
+
+
+def test_runner_hashes_opaque_task_ids_before_building_log_paths(tmp_path):
+    repository = make_repository(tmp_path)
+    task = repository.add(
+        replace(
+            ScheduledTask.create(
+                "opaque-id", [sys.executable, "-c", "pass"], ScheduleSpec.interval(60)
+            ),
+            id="../../outside-runs",
+        )
+    )
+
+    assert run_now(repository.database_path, task.id) == 0
+
+    run = repository.history(task.id)[0]
+    run_root = (repository.database_path.parent / "runs").resolve()
+    assert Path(run["stdout_path"]).resolve().is_relative_to(run_root)
+    assert Path(run["stdout_path"]).parent.name != task.id
 
 
 def test_daemon_executes_and_disables_one_time_task(tmp_path):
@@ -1859,6 +1979,25 @@ def test_systemd_supervisor_reports_native_state(tmp_path, monkeypatch):
     assert "journalctl --user" in status.log_hint
 
 
+def test_systemd_supervisor_detects_definition_drift_beyond_embedded_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "_home_dir", lambda: tmp_path)
+    unit = tmp_path / ".config" / "systemd" / "user" / installer.LINUX_UNIT_NAME
+    unit.parent.mkdir(parents=True)
+    unit.write_text(installer._linux_unit_content().replace("RestartSec=2", "RestartSec=99"))
+    monkeypatch.setattr(
+        installer,
+        "_run",
+        lambda command, check=True: __import__("subprocess").CompletedProcess(
+            command, 0, "enabled\n" if "is-enabled" in command else "active\n", ""
+        ),
+    )
+
+    status = supervisor.SystemdSupervisor().status()
+
+    assert status.definition_fingerprint == installer.definition_fingerprint()
+    assert status.registration_valid is False
+
+
 def test_launchd_supervisor_distinguishes_loaded_but_stopped(tmp_path, monkeypatch):
     plist = tmp_path / "Library" / "LaunchAgents" / f"{installer.MACOS_LABEL}.plist"
     plist.parent.mkdir(parents=True)
@@ -1878,6 +2017,28 @@ def test_launchd_supervisor_distinguishes_loaded_but_stopped(tmp_path, monkeypat
     assert status.installed is True
     assert status.state == "stopped"
     assert "scheduler.stdout.log" in status.log_hint
+
+
+def test_launchd_supervisor_detects_definition_drift_beyond_embedded_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "_home_dir", lambda: tmp_path)
+    plist = tmp_path / "Library" / "LaunchAgents" / f"{installer.MACOS_LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    definition = installer._macos_definition()
+    definition["WorkingDirectory"] = "/unexpected"
+    plist.write_bytes(plistlib.dumps(definition))
+    monkeypatch.setattr(supervisor.os, "getuid", lambda: 501, raising=False)
+    monkeypatch.setattr(
+        installer,
+        "_run",
+        lambda command, check=True: __import__("subprocess").CompletedProcess(
+            command, 0, "state = running\n", ""
+        ),
+    )
+
+    status = supervisor.LaunchdSupervisor().status()
+
+    assert status.definition_fingerprint == installer.definition_fingerprint()
+    assert status.registration_valid is False
 
 
 def test_launchd_stop_preserves_login_autostart_and_reports_last_failure(tmp_path, monkeypatch):
@@ -1965,7 +2126,7 @@ def test_windows_supervisor_rejects_enabled_task_without_logon_trigger(monkeypat
     status = supervisor.WindowsTaskSupervisor().status()
 
     assert status.automatic is False
-    assert status.registration_valid is True
+    assert status.registration_valid is None
 
 
 def test_sqlalchemy_job_store_preserves_special_database_path(tmp_path):

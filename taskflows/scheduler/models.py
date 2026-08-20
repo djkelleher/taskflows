@@ -420,6 +420,7 @@ class RunHandle:
     error: str | None = None
     stdout_path: str | None = None
     stderr_path: str | None = None
+    cancellation_requested: bool = False
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> RunHandle:
@@ -436,6 +437,7 @@ class RunHandle:
             error=row.get("error"),
             stdout_path=row.get("stdout_path"),
             stderr_path=row.get("stderr_path"),
+            cancellation_requested=bool(row.get("cancellation_requested", False)),
         )
 
     @property
@@ -454,6 +456,7 @@ class RunHandle:
             "finished_at": self.finished_at,
             "exit_code": self.exit_code,
             "error": self.error,
+            "cancellation_requested": self.cancellation_requested,
         }
         if include_log_paths:
             result.update(stdout_path=self.stdout_path, stderr_path=self.stderr_path)

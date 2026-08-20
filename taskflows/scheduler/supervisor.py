@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
 import plistlib
 import re
@@ -101,7 +102,7 @@ class SystemdSupervisor:
             definition = self.definition_path.read_text()
             match = re.search(r"^X-Taskflows-Definition=(.+)$", definition, re.MULTILINE)
             fingerprint = match.group(1).strip() if match else None
-            registration_valid = fingerprint == native.definition_fingerprint()
+            registration_valid = definition == native._linux_unit_content()
         except OSError:
             registration_valid = None
         try:
@@ -224,7 +225,7 @@ class LaunchdSupervisor:
                 definition = plistlib.load(stream)
             value = definition.get("TaskflowsDefinitionFingerprint")
             fingerprint = value if isinstance(value, str) else None
-            registration_valid = fingerprint == native.definition_fingerprint()
+            registration_valid = definition == native._macos_definition()
         except (OSError, plistlib.InvalidFileException, AttributeError):
             registration_valid = None
         try:
@@ -292,6 +293,39 @@ def _windows_registered_task() -> Any | None:
         return None
 
 
+def _windows_registration_valid(task: Any) -> bool | None:
+    """Validate the executable identity, not only the self-reported marker."""
+
+    try:
+        windows_api: Any = __import__("win32api")
+        definition = task.Definition
+        source = definition.RegistrationInfo.Source
+        principal = definition.Principal
+        actions = definition.Actions
+        if int(actions.Count) != 1:
+            return False
+        action = actions.Item(1)
+        command = native._daemon_command()
+
+        def normalized_path(value: Any) -> str:
+            return ntpath.normcase(ntpath.normpath(str(value)))
+
+        expected_user = windows_api.GetUserNameEx(windows_api.NameSamCompatible)
+        return all(
+            (
+                source == native.definition_fingerprint(),
+                normalized_path(action.Path) == normalized_path(command[0]),
+                str(action.Arguments) == subprocess.list2cmdline(command[1:]),
+                normalized_path(action.WorkingDirectory) == normalized_path(native._home_dir()),
+                str(principal.UserId).casefold() == str(expected_user).casefold(),
+                int(principal.LogonType) == native._TASK_LOGON_INTERACTIVE_TOKEN,
+                int(principal.RunLevel) == native._TASK_RUNLEVEL_LUA,
+            )
+        )
+    except Exception:
+        return None
+
+
 class WindowsTaskSupervisor:
     """Manage the scheduler through the current user's Task Scheduler folder."""
 
@@ -320,8 +354,13 @@ class WindowsTaskSupervisor:
             task.Stop(0)
 
     def restart(self) -> None:
-        self.stop()
-        self.start()
+        task = _windows_registered_task()
+        if task is None:
+            raise RuntimeError("the Taskflows scheduler task is not installed")
+        with suppress(Exception):
+            task.Stop(0)
+        native._wait_for_windows_task_stop(task)
+        task.Run("")
 
     def status(self) -> SupervisorStatus:
         try:
@@ -364,7 +403,7 @@ class WindowsTaskSupervisor:
         source = getattr(getattr(task, "Definition", None), "RegistrationInfo", None)
         fingerprint_value = getattr(source, "Source", None)
         fingerprint = fingerprint_value if isinstance(fingerprint_value, str) else None
-        registration_valid = fingerprint == native.definition_fingerprint()
+        registration_valid = _windows_registration_valid(task)
         result_value = getattr(task, "LastTaskResult", None)
         last_exit_code = int(result_value) if isinstance(result_value, int) else None
         # TASK_STATE_RUNNING=4, READY=3, QUEUED=2, DISABLED=1, UNKNOWN=0.

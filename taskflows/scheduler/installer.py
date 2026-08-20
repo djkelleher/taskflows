@@ -7,6 +7,7 @@ import plistlib
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -77,6 +78,71 @@ def definition_fingerprint() -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _linux_unit_content() -> str:
+    """Return the complete systemd definition expected by the supervisor."""
+
+    # systemd expands percent specifiers even in quoted command/environment
+    # values, so literal path components must double them.
+    command = shlex.join(part.replace("%", "%%") for part in _daemon_command())
+    working_directory = shlex.quote(str(_home_dir()).replace("%", "%%"))
+    data_dir = services_data_dir.resolve()
+    environment_assignment = (
+        str(data_dir).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+    )
+    return f"""[Unit]
+Description=Taskflows portable scheduler
+X-Taskflows-Definition={definition_fingerprint()}
+After=default.target
+
+[Service]
+Type=simple
+ExecStart={command}
+WorkingDirectory={working_directory}
+Environment="TASKFLOWS_DATA_DIR={environment_assignment}"
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _macos_definition() -> dict[str, Any]:
+    """Return the complete LaunchAgent definition expected by the supervisor."""
+
+    data_dir = services_data_dir.resolve()
+    log_dir = data_dir / "logs"
+    return {
+        "Label": MACOS_LABEL,
+        "TaskflowsDefinitionFingerprint": definition_fingerprint(),
+        "ProgramArguments": _daemon_command(),
+        "EnvironmentVariables": {"TASKFLOWS_DATA_DIR": str(data_dir)},
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ProcessType": "Background",
+        "WorkingDirectory": str(_home_dir()),
+        "StandardOutPath": str(log_dir / "scheduler.stdout.log"),
+        "StandardErrorPath": str(log_dir / "scheduler.stderr.log"),
+    }
+
+
+def _wait_for_windows_task_stop(task: Any) -> None:
+    """Wait until Task Scheduler has finished an asynchronous stop request."""
+
+    # Fake/third-party COM wrappers may not expose State. In that case there is
+    # nothing useful to poll and the outer combined lifecycle wait remains the
+    # final readiness check.
+    if not hasattr(task, "State"):
+        return
+    deadline = time.monotonic() + current_operation_timeout()
+    while int(task.State) in {2, 4}:  # queued or running
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Windows scheduler task did not stop within {current_operation_timeout():g}s"
+            )
+        time.sleep(0.05)
+
+
 def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -99,34 +165,10 @@ def install_linux() -> Path:
     unit_dir = _home_dir() / ".config" / "systemd" / "user"
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit_path = unit_dir / LINUX_UNIT_NAME
-    # systemd expands percent specifiers even in quoted command/environment
-    # values, so literal path components must double them.
-    command = shlex.join(part.replace("%", "%%") for part in _daemon_command())
-    working_directory = shlex.quote(str(_home_dir()).replace("%", "%%"))
-    data_dir = services_data_dir.resolve()
-    environment_assignment = (
-        str(data_dir).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
-    )
-    content = f"""[Unit]
-Description=Taskflows portable scheduler
-X-Taskflows-Definition={definition_fingerprint()}
-After=default.target
-
-[Service]
-Type=simple
-ExecStart={command}
-WorkingDirectory={working_directory}
-Environment="TASKFLOWS_DATA_DIR={environment_assignment}"
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-"""
     # systemd may reload the unit while an upgrade is in progress.  Keep the
     # definition owner-readable only and replace it atomically, just as the
     # macOS LaunchAgent definition is handled below.
-    secure_write_text(unit_path, content)
+    secure_write_text(unit_path, _linux_unit_content())
     _run(["systemctl", "--user", "daemon-reload"])
     # ``enable --now`` does not restart an already-active unit.  Restart after
     # enabling so reinstalling also applies an updated interpreter, database
@@ -154,18 +196,7 @@ def install_macos() -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(log_dir, 0o700)
     plist_path = agents_dir / f"{MACOS_LABEL}.plist"
-    definition = {
-        "Label": MACOS_LABEL,
-        "TaskflowsDefinitionFingerprint": definition_fingerprint(),
-        "ProgramArguments": _daemon_command(),
-        "EnvironmentVariables": {"TASKFLOWS_DATA_DIR": str(data_dir)},
-        "RunAtLoad": True,
-        "KeepAlive": {"SuccessfulExit": False},
-        "ProcessType": "Background",
-        "WorkingDirectory": str(_home_dir()),
-        "StandardOutPath": str(log_dir / "scheduler.stdout.log"),
-        "StandardErrorPath": str(log_dir / "scheduler.stderr.log"),
-    }
+    definition = _macos_definition()
     # launchd can observe this file at login while an upgrade is writing it.
     # Replace a complete owner-only plist atomically instead of exposing a
     # partial definition.
@@ -240,8 +271,13 @@ def install_windows() -> None:
     action.WorkingDirectory = str(_home_dir())
     # Apply an updated interpreter/database path immediately instead of leaving
     # an old instance running until the next login.
-    with suppress(Exception):
-        folder.GetTask(WINDOWS_TASK_NAME).Stop(0)
+    try:
+        previous_task = folder.GetTask(WINDOWS_TASK_NAME)
+        previous_task.Stop(0)
+    except Exception:
+        pass
+    else:
+        _wait_for_windows_task_stop(previous_task)
     # Current interactive user, with no stored password.
     folder.RegisterTaskDefinition(
         WINDOWS_TASK_NAME,

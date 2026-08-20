@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import signal
 import subprocess
@@ -107,8 +108,14 @@ def _assign_windows_job(process: subprocess.Popen[Any]) -> Any | None:
         if job is not None and win32api is not None:
             with suppress(Exception):
                 win32api.CloseHandle(job)
-            job = None
-        logger.warning(f"Could not assign scheduled process {process.pid} to a Job Object: {exc}")
+        # The process is still suspended. Fail closed rather than running a
+        # command whose descendants Taskflows cannot reliably contain after the
+        # root exits.
+        with suppress(Exception):
+            process.kill()
+        raise RuntimeError(
+            f"could not contain scheduled process {process.pid} in a Job Object: {exc}"
+        ) from exc
     try:
         native_process = process
         win32process = import_module("win32process")
@@ -147,6 +154,13 @@ def _join_capture_threads(
     stuck = [capture_thread.name for capture_thread in capture_threads if capture_thread.is_alive()]
     if stuck:
         errors.append(f"output capture did not stop: {', '.join(stuck)}")
+
+
+def _task_log_directory(repository: SchedulerRepository, task_id: str) -> Path:
+    """Return a fixed-width, traversal-safe directory for an opaque task ID."""
+
+    component = hashlib.sha256(task_id.encode("utf-8", errors="surrogatepass")).hexdigest()
+    return repository.database_path.parent / "runs" / component
 
 
 def terminate_active_runs() -> None:
@@ -292,11 +306,13 @@ def execute_scheduled_task(
         logger.warning(f"Scheduled task {task.name} was not claimed for execution")
         return None
 
-    log_dir = repository.database_path.parent / "runs" / task.id
+    log_dir = _task_log_directory(repository, task.id)
     stdout_path = log_dir / f"{run_id}.stdout.log"
     stderr_path = log_dir / f"{run_id}.stderr.log"
     process: subprocess.Popen[Any] | None = None
     windows_job: Any | None = None
+    capture_errors: list[str] = []
+    capture_threads: list[threading.Thread] = []
 
     try:
         # Claim one-time schedules before starting so the reconcile loop cannot
@@ -340,7 +356,6 @@ def execute_scheduled_task(
             if os.name == "nt":
                 windows_job = _assign_windows_job(process)
             assert process.stdout is not None and process.stderr is not None
-            capture_errors: list[str] = []
             capture_threads = [
                 threading.Thread(
                     target=_copy_bounded,
@@ -440,21 +455,30 @@ def execute_scheduled_task(
             if isinstance(exc, FileNotFoundError)
             else 1
         )
-        if process is not None and process.poll() is None:
+        if process is not None:
             try:
-                _terminate_process_tree(process)
+                _finish_process_tree(process, windows_job)
             except Exception as termination_error:
+                capture_errors.append(f"process cleanup failed: {termination_error}")
                 logger.warning(
                     f"Could not terminate failed scheduled process {process.pid}: "
                     f"{termination_error}"
                 )
+            else:
+                windows_job = None
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=10)
+            _join_capture_threads(capture_threads, capture_errors)
+        error = str(exc)
+        if capture_errors:
+            error += f"; {'; '.join(capture_errors)}"
         repository.finish_run(
             run_id,
             status="failed",
             exit_code=failure_exit_code,
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
-            error=str(exc),
+            error=error,
         )
         logger.exception(f"Scheduled task {task.name} failed to launch: {exc}")
         return failure_exit_code

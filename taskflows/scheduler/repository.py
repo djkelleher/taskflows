@@ -1087,7 +1087,8 @@ class SchedulerRepository:
         with self.connect() as db:
             rows = db.execute(
                 f"""SELECT r.* FROM task_runs r
-                    {where} ORDER BY COALESCE(r.started_at, r.scheduled_for) DESC LIMIT ?""",
+                    {where} ORDER BY COALESCE(r.started_at, r.scheduled_for) DESC,
+                                     r.id DESC LIMIT ?""",
                 params,
             ).fetchall()
         return [dict(row) for row in rows]

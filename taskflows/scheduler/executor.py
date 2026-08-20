@@ -159,12 +159,15 @@ class DurableThreadPoolExecutor(ThreadPoolExecutor):
             dropped = run_times[:-MAX_CATCH_UP_OCCURRENCES]
             run_times = run_times[-MAX_CATCH_UP_OCCURRENCES:]
             if task is not None and task.revision == revision:
-                for run_time in dropped:
-                    repository.record_missed(
-                        task,
-                        run_time,
-                        f"catch-up backlog exceeded {MAX_CATCH_UP_OCCURRENCES} occurrences",
-                    )
+                # Persist one summary instead of turning a long outage on a
+                # one-second interval into millions of SQLite writes and run
+                # history rows. The retained execution batch remains bounded.
+                repository.record_missed(
+                    task,
+                    dropped[-1],
+                    f"catch-up backlog dropped {len(dropped)} occurrences; "
+                    f"only the newest {MAX_CATCH_UP_OCCURRENCES} were retained",
+                )
         executable_times: list[datetime] = []
         missed_events: list[JobExecutionEvent] = []
         now = datetime.now(UTC)

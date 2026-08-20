@@ -129,4 +129,51 @@ describe("SchedulesPage", () => {
     const request = vi.mocked(updateSchedule).mock.calls[0][1];
     expect(request).not.toHaveProperty("environment");
   });
+
+  it("surfaces query failures instead of rendering empty data silently", async () => {
+    vi.mocked(getSchedules).mockRejectedValue(new Error("registry unavailable"));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <SchedulesPage />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Definitions: registry unavailable",
+    );
+  });
+
+  it("shows an accepted cancellation as pending and prevents duplicate requests", async () => {
+    vi.mocked(getScheduleRuns).mockResolvedValue({
+      runs: [
+        {
+          id: "run-1",
+          task_id: schedule.id,
+          task_name: schedule.name,
+          task_revision: schedule.revision,
+          scheduled_for: "2026-08-20T10:00:00+00:00",
+          started_at: "2026-08-20T10:00:01+00:00",
+          finished_at: null,
+          status: "running",
+          exit_code: null,
+          error: null,
+          cancellation_requested: true,
+        },
+      ],
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <SchedulesPage />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("cancelling")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  });
 });

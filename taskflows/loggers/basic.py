@@ -82,9 +82,11 @@ def _shared_file_filter(file_path: Path) -> Callable[[Any], bool]:
     return filter_record
 
 
-def _env_bool(var: str, default: str | None = None) -> bool | None:
-    value = any_case_env_var(var, default)
-    if value is None or isinstance(value, bool):
+def _env_bool(var: str, default: bool | None = None) -> bool | None:
+    value = any_case_env_var(var)
+    if value is None:
+        return default
+    if isinstance(value, bool):
         return value
     raise ValueError(f"{var} must be a boolean value")
 
@@ -196,7 +198,7 @@ def get_logger(
         if name:
             single_file = _env_bool(f"{name}_SINGLE_FILE")
         if single_file is None:
-            single_file = _env_bool("LOGGERS_SINGLE_FILE", "true")
+            single_file = _env_bool("LOGGERS_SINGLE_FILE", True)
     single_file = bool(single_file)
 
     if file_name is None:

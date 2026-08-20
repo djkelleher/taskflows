@@ -43,12 +43,17 @@ function stateClass(state: string): string {
   return "text-muted";
 }
 
+function errorMessage(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
+}
+
 export function SchedulesPage() {
   const queryClient = useQueryClient();
   const [kind, setKind] = useState<ScheduleKind>("interval");
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
   const [scheduleValue, setScheduleValue] = useState("300");
+  const [startAt, setStartAt] = useState("");
   const [timezone, setTimezone] = useState(browserTimezone);
   const [timeout, setTimeout] = useState("3600");
   const [cwd, setCwd] = useState("");
@@ -73,6 +78,7 @@ export function SchedulesPage() {
     setName("");
     setCommand("");
     setScheduleValue("300");
+    setStartAt("");
     setTimezone(browserTimezone);
     setTimeout("3600");
     setCwd("");
@@ -203,9 +209,7 @@ export function SchedulesPage() {
         return;
       }
       request.interval_seconds = seconds;
-      if (editing?.schedule.kind === "interval" && editing.schedule.start_at) {
-        request.start_at = editing.schedule.start_at;
-      }
+      if (startAt.trim()) request.start_at = startAt.trim();
     }
     if (kind === "cron") request.cron = scheduleValue;
     if (kind === "date") request.run_at = scheduleValue;
@@ -229,6 +233,7 @@ export function SchedulesPage() {
 
   const changeScheduleKind = (nextKind: ScheduleKind) => {
     setKind(nextKind);
+    setStartAt("");
     setScheduleValue(
       nextKind === "interval"
         ? "300"
@@ -244,6 +249,7 @@ export function SchedulesPage() {
     setCommand(schedule.command.join("\n"));
     setKind(schedule.schedule.kind);
     setScheduleValue(String(schedule.schedule.value));
+    setStartAt(schedule.schedule.start_at || "");
     setTimezone(schedule.schedule.timezone);
     setTimeout(schedule.timeout === null ? "" : String(schedule.timeout));
     setCwd(schedule.cwd || "");
@@ -296,6 +302,11 @@ export function SchedulesPage() {
   const scheduler = statusQuery.data;
   const schedules = schedulesQuery.data?.schedules || [];
   const runs = runsQuery.data?.runs || [];
+  const queryErrors = [
+    schedulesQuery.error && `Definitions: ${errorMessage(schedulesQuery.error)}`,
+    runsQuery.error && `Run history: ${errorMessage(runsQuery.error)}`,
+    statusQuery.error && `Scheduler health: ${errorMessage(statusQuery.error)}`,
+  ].filter((value): value is string => Boolean(value));
 
   return (
     <div className="flex-1 overflow-auto p-6 space-y-6">
@@ -323,6 +334,19 @@ export function SchedulesPage() {
           role="status"
         >
           {message}
+        </div>
+      )}
+      {queryErrors.length > 0 && (
+        <div
+          className="rounded border border-red-500/50 bg-red-500/10 px-4 py-3 text-red-300"
+          role="alert"
+        >
+          <strong>Some scheduler data could not be loaded.</strong>
+          <ul className="mt-1 list-disc pl-5 text-sm">
+            {queryErrors.map((value) => (
+              <li key={value}>{value}</li>
+            ))}
+          </ul>
         </div>
       )}
       {preview.length > 0 && (
@@ -393,6 +417,17 @@ export function SchedulesPage() {
               onChange={(event) => setName(event.target.value)}
             />
           </label>
+          {kind === "interval" && (
+            <label className="text-sm">
+              First run / interval anchor (optional ISO timestamp)
+              <input
+                className="mt-1 w-full rounded border border-border bg-background px-3 py-2 font-mono"
+                value={startAt}
+                onChange={(event) => setStartAt(event.target.value)}
+                placeholder="2026-08-20T09:00:00-04:00"
+              />
+            </label>
+          )}
           <label className="text-sm">
             Time zone
             <input
@@ -664,7 +699,9 @@ export function SchedulesPage() {
                 <tr key={run.id} className="border-t border-border">
                   <td className="p-3">{run.task_name}</td>
                   <td className={`p-3 ${stateClass(run.status)}`}>
-                    {run.status}
+                    {run.cancellation_requested && !["cancelled"].includes(run.status)
+                      ? "cancelling"
+                      : run.status}
                   </td>
                   <td className="p-3">
                     {formatDate(run.started_at || run.scheduled_for)}
@@ -672,7 +709,8 @@ export function SchedulesPage() {
                   <td className="p-3">{run.exit_code ?? "—"}</td>
                   <td className="p-3 flex gap-3">
                     <button onClick={() => void showLogs(run)}>Logs</button>
-                    {["queued", "starting", "running"].includes(run.status) && (
+                    {["queued", "starting", "running"].includes(run.status) &&
+                      !run.cancellation_requested && (
                       <button
                         className="text-red-400"
                         onClick={() =>

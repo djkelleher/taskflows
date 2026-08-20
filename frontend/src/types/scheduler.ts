@@ -42,6 +42,7 @@ export interface ScheduleRun {
   finished_at: string | null;
   exit_code: number | null;
   error: string | null;
+  cancellation_requested: boolean;
 }
 
 export interface SchedulerStatus {

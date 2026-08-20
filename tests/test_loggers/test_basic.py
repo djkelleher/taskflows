@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from loguru import logger
 
-from taskflows.loggers.basic import any_case_env_var, get_logger
+from taskflows.loggers.basic import _env_bool, any_case_env_var, get_logger
 
 
 def _reset_basic_logger_state(basic, original_configured):
@@ -53,6 +53,10 @@ class TestEnvVarHandling:
         for value in ("0", "no", "off", "N"):
             with patch.dict(os.environ, {test_var: value}):
                 assert any_case_env_var(test_var) is False
+
+    def test_boolean_defaults_are_typed_before_logger_configuration(self):
+        assert _env_bool("NONEXISTENT_BOOLEAN", True) is True
+        assert _env_bool("NONEXISTENT_BOOLEAN", False) is False
 
 
 @pytest.mark.parametrize("use_env_vars", [False, True])
